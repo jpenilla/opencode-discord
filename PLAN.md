@@ -123,13 +123,13 @@ Confirmed via `btca ask`:
 - The app should create or reuse a session ID per Discord channel.
 - To avoid streaming partial output, use the prompt API that waits for the final assistant message rather than consuming CLI output.
 - Use the opencode SSE event stream to observe status and tool execution events.
-- Custom tools are supported via repo-local `.opencode/tools` files or plugins.
+- Custom tools are supported via repo-local `opencode/tools` files or plugins.
 
 For v1, choose:
 
 - Spawn and supervise a local `opencode serve` process from the bot.
 - Use the SDK as the primary app integration surface.
-- Register custom tools under repo-local `.opencode/tools`.
+- Register custom tools under repo-local `opencode/tools`.
 
 ### Effect Integration
 
@@ -244,14 +244,14 @@ For each queued channel job:
 
 ### Registration Approach
 
-- Store custom opencode tools in repo-local `.opencode/tools`.
+- Store custom opencode tools in repo-local `opencode/tools`.
 - Tool filenames become tool names.
 
 Planned tools:
 
-- `.opencode/tools/send-file.ts`
-- `.opencode/tools/send-image.ts`
-- `.opencode/tools/react.ts`
+- `opencode/tools/send-file.ts`
+- `opencode/tools/send-image.ts`
+- `opencode/tools/react.ts`
 
 ### Tool Bridge Model
 
@@ -332,9 +332,9 @@ PLAN.md
 package.json
 tsconfig.json
 .env.example
-.opencode/tools/send-file.ts
-.opencode/tools/send-image.ts
-.opencode/tools/react.ts
+opencode/tools/send-file.ts
+opencode/tools/send-image.ts
+opencode/tools/react.ts
 src/index.ts
 src/config.ts
 src/app.ts
@@ -393,7 +393,7 @@ This layout may evolve slightly during implementation, but these concerns should
 ### Phase 6: Custom Discord Tools
 
 - Implement the local tool bridge.
-- Add repo-local `.opencode/tools` files.
+- Add repo-local `opencode/tools` files.
 - Enforce workdir path restrictions and invoking-message reaction restrictions.
 
 ### Phase 7: Error Handling and Operational Hardening

@@ -1,7 +1,7 @@
 import type { Message } from "discord.js"
 import type { Queue } from "effect/Queue"
 
-import type { SessionHandle } from "../opencode/service.ts"
+import type { SessionHandle } from "@/opencode/service.ts"
 
 export type RunRequest = {
   message: Message

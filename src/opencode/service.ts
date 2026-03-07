@@ -1,8 +1,9 @@
 import { createOpencode, createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk"
 import { Cause, Chunk, Context, Effect, Layer } from "effect"
+import { fileURLToPath } from "node:url"
 
-import { AppConfig } from "../config.ts"
-import { Logger, type LoggerShape } from "../util/logging.ts"
+import { AppConfig } from "@/config.ts"
+import { Logger, type LoggerShape } from "@/util/logging.ts"
 
 export type SessionHandle = {
   sessionId: string
@@ -23,6 +24,7 @@ export type OpencodeServiceShape = {
 export class OpencodeService extends Context.Tag("OpencodeService")<OpencodeService, OpencodeServiceShape>() {}
 
 const LOCALHOST = "127.0.0.1"
+const OPENCODE_CONFIG_DIR = fileURLToPath(new URL("../../opencode", import.meta.url))
 
 const formatValue = (value: unknown) => {
   if (value === undefined || value === null) {
@@ -131,6 +133,7 @@ export const OpencodeServiceLive = Layer.scoped(
     const config = yield* AppConfig
     const logger = yield* Logger
     yield* logger.info("starting opencode server", {
+      configDir: OPENCODE_CONFIG_DIR,
       host: LOCALHOST,
       port: config.opencodeServerPort,
     })
@@ -139,16 +142,19 @@ export const OpencodeServiceLive = Layer.scoped(
       Effect.sync(() => {
         const previousBridgeUrl = process.env.OPENCODE_DISCORD_BRIDGE_URL
         const previousBridgeToken = process.env.OPENCODE_DISCORD_BRIDGE_TOKEN
+        const previousConfigDir = process.env.OPENCODE_CONFIG_DIR
 
         process.env.OPENCODE_DISCORD_BRIDGE_URL = `http://${LOCALHOST}:${config.toolBridgePort}`
         process.env.OPENCODE_DISCORD_BRIDGE_TOKEN = config.toolBridgeToken
+        process.env.OPENCODE_CONFIG_DIR = OPENCODE_CONFIG_DIR
 
         return {
           previousBridgeUrl,
           previousBridgeToken,
+          previousConfigDir,
         }
       }),
-      ({ previousBridgeUrl, previousBridgeToken }) =>
+      ({ previousBridgeUrl, previousBridgeToken, previousConfigDir }) =>
         Effect.sync(() => {
           if (previousBridgeUrl === undefined) {
             delete process.env.OPENCODE_DISCORD_BRIDGE_URL
@@ -160,6 +166,12 @@ export const OpencodeServiceLive = Layer.scoped(
             delete process.env.OPENCODE_DISCORD_BRIDGE_TOKEN
           } else {
             process.env.OPENCODE_DISCORD_BRIDGE_TOKEN = previousBridgeToken
+          }
+
+          if (previousConfigDir === undefined) {
+            delete process.env.OPENCODE_CONFIG_DIR
+          } else {
+            process.env.OPENCODE_CONFIG_DIR = previousConfigDir
           }
         }),
     )

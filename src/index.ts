@@ -1,12 +1,12 @@
 import { BunRuntime } from "@effect/platform-bun"
 import { Effect, Layer } from "effect"
 
-import { DiscordBot, DiscordBotLive } from "./app.ts"
-import { AppConfigLive } from "./config.ts"
-import { OpencodeServiceLive } from "./opencode/service.ts"
-import { ChannelSessionsLive } from "./sessions/registry.ts"
-import { ToolBridgeLive } from "./tools/http.ts"
-import { Logger, LoggerLive } from "./util/logging.ts"
+import { DiscordBot, DiscordBotLive } from "@/app.ts"
+import { AppConfigLive } from "@/config.ts"
+import { OpencodeServiceLive } from "@/opencode/service.ts"
+import { ChannelSessionsLive } from "@/sessions/registry.ts"
+import { ToolBridgeLive } from "@/tools/http.ts"
+import { Logger, LoggerLive } from "@/util/logging.ts"
 
 const BaseLive = Layer.mergeAll(
   AppConfigLive,

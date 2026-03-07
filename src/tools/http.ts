@@ -1,9 +1,9 @@
 import { Context, Effect, Layer } from "effect"
 import { resolve, relative, isAbsolute } from "node:path"
 
-import { AppConfig } from "../config.ts"
-import { ChannelSessions } from "../sessions/registry.ts"
-import { Logger } from "../util/logging.ts"
+import { AppConfig } from "@/config.ts"
+import { ChannelSessions } from "@/sessions/registry.ts"
+import { Logger } from "@/util/logging.ts"
 
 export type ToolBridgeShape = {
   url: string

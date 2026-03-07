@@ -5,12 +5,12 @@ import { tmpdir } from "node:os"
 import { Context, Effect, FiberSet, Layer, Queue, Ref } from "effect"
 import type { Message } from "discord.js"
 
-import { buildOpencodePrompt, sendFinalResponse, startTypingLoop, summarizeAttachments, summarizeEmbeds } from "../discord/messages.ts"
-import type { Invocation } from "../discord/triggers.ts"
-import { OpencodeService } from "../opencode/service.ts"
-import { AppConfig } from "../config.ts"
-import { Logger } from "../util/logging.ts"
-import type { ActiveRun, ChannelSession, RunRequest } from "./session.ts"
+import { AppConfig } from "@/config.ts"
+import { buildOpencodePrompt, sendFinalResponse, startTypingLoop, summarizeAttachments, summarizeEmbeds } from "@/discord/messages.ts"
+import type { Invocation } from "@/discord/triggers.ts"
+import { OpencodeService } from "@/opencode/service.ts"
+import type { ActiveRun, ChannelSession, RunRequest } from "@/sessions/session.ts"
+import { Logger } from "@/util/logging.ts"
 
 export type ChannelSessionsShape = {
   submit: (message: Message, invocation: Invocation) => Effect.Effect<void>

@@ -1,10 +1,10 @@
 import { ActivityType, Client, Events, GatewayIntentBits } from "discord.js"
 import { Context, Effect, Layer, Runtime } from "effect"
 
-import { AppConfig } from "./config.ts"
-import { detectInvocation } from "./discord/triggers.ts"
-import { ChannelSessions } from "./sessions/registry.ts"
-import { Logger } from "./util/logging.ts"
+import { AppConfig } from "@/config.ts"
+import { detectInvocation } from "@/discord/triggers.ts"
+import { ChannelSessions } from "@/sessions/registry.ts"
+import { Logger } from "@/util/logging.ts"
 
 export type DiscordBotShape = {
   client: Client
