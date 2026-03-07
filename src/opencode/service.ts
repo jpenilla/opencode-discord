@@ -26,6 +26,58 @@ export class OpencodeService extends Context.Tag("OpencodeService")<OpencodeServ
 const LOCALHOST = "127.0.0.1"
 const OPENCODE_CONFIG_DIR = fileURLToPath(new URL("../../opencode", import.meta.url))
 
+const wrapCodeBlock = (content: string, language = "text") => {
+  const trimmed = content.trim()
+  if (!trimmed) {
+    return ""
+  }
+  const fence = trimmed.includes("```") ? "````" : "```"
+  return `${fence}${language}\n${trimmed}\n${fence}`
+}
+
+const formatToolState = (value: unknown) => {
+  if (value === undefined) {
+    return ""
+  }
+  if (typeof value === "string") {
+    return value.trim()
+  }
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return formatValue(value)
+  }
+}
+
+const toolStateLanguage = (value: unknown) => (typeof value === "string" ? "text" : "json")
+
+const renderReasoning = (text: string) => {
+  const trimmed = text.trim()
+  if (!trimmed) {
+    return ""
+  }
+  return ["## Thinking", "", `> ${trimmed.replace(/\n/g, "\n> ")}`].join("\n")
+}
+
+const renderTool = (part: any) => {
+  const status = part.state?.status ?? "unknown"
+  const title = part.state?.title ? ` - ${part.state.title}` : ""
+  const sections = [`## ${status === "completed" ? "✅" : status === "error" ? "❌" : "🔧"} Tool: \`${part.tool}\``, `- Status: \`${status}\`${title}`]
+  const input = formatToolState(part.state?.input)
+  if (input) {
+    sections.push("", "### Input", wrapCodeBlock(input, toolStateLanguage(part.state?.input)))
+  }
+  const output = formatToolState(part.state?.output)
+  if (output) {
+    sections.push("", "### Output", wrapCodeBlock(output))
+  }
+  const error = formatToolState(part.state?.error)
+  if (error) {
+    sections.push("", "### Error", wrapCodeBlock(error))
+  }
+  return sections.filter(Boolean).join("\n")
+}
+
 const formatValue = (value: unknown) => {
   if (value === undefined || value === null) {
     return ""
@@ -53,23 +105,12 @@ const renderTranscript = (parts: Array<any>) => {
       }
       case "reasoning": {
         if (part.text?.trim()) {
-          lines.push(`[Reasoning]\n${part.text.trim()}`)
+          lines.push(renderReasoning(part.text))
         }
         break
       }
       case "tool": {
-        const status = part.state?.status ?? "unknown"
-        const title = part.state?.title ? ` | ${part.state.title}` : ""
-        lines.push(`[Tool] ${part.tool} | ${status}${title}`)
-        if (part.state?.input !== undefined) {
-          lines.push(`input: ${formatValue(part.state.input)}`)
-        }
-        if (typeof part.state?.output === "string" && part.state.output.trim().length > 0) {
-          lines.push(`output: ${part.state.output.trim()}`)
-        }
-        if (typeof part.state?.error === "string" && part.state.error.trim().length > 0) {
-          lines.push(`error: ${part.state.error.trim()}`)
-        }
+        lines.push(renderTool(part))
         break
       }
       default:

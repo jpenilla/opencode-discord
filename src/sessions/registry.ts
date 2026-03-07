@@ -76,7 +76,7 @@ export const ChannelSessionsLive = Layer.scoped(
           })
           yield* Effect.promise(() =>
             request.message.reply({
-              content: `Opencode failed: ${formatError(error)}`,
+              content: ["## ❌ Opencode failed", "", "```text", formatError(error), "```"].join("\n"),
               allowedMentions: { repliedUser: false, parse: [] },
             }),
           )
