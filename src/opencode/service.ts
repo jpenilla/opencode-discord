@@ -22,6 +22,8 @@ export type OpencodeServiceShape = {
 
 export class OpencodeService extends Context.Tag("OpencodeService")<OpencodeService, OpencodeServiceShape>() {}
 
+const LOCALHOST = "127.0.0.1"
+
 const formatValue = (value: unknown) => {
   if (value === undefined || value === null) {
     return ""
@@ -129,7 +131,7 @@ export const OpencodeServiceLive = Layer.scoped(
     const config = yield* AppConfig
     const logger = yield* Logger
     yield* logger.info("starting opencode server", {
-      host: config.opencodeServerHost,
+      host: LOCALHOST,
       port: config.opencodeServerPort,
     })
 
@@ -138,7 +140,7 @@ export const OpencodeServiceLive = Layer.scoped(
         const previousBridgeUrl = process.env.OPENCODE_DISCORD_BRIDGE_URL
         const previousBridgeToken = process.env.OPENCODE_DISCORD_BRIDGE_TOKEN
 
-        process.env.OPENCODE_DISCORD_BRIDGE_URL = `http://${config.toolBridgeHost}:${config.toolBridgePort}`
+        process.env.OPENCODE_DISCORD_BRIDGE_URL = `http://${LOCALHOST}:${config.toolBridgePort}`
         process.env.OPENCODE_DISCORD_BRIDGE_TOKEN = config.toolBridgeToken
 
         return {
@@ -165,7 +167,7 @@ export const OpencodeServiceLive = Layer.scoped(
     const runtime = yield* Effect.acquireRelease(
       Effect.tryPromise(() =>
         createOpencode({
-          hostname: config.opencodeServerHost,
+          hostname: LOCALHOST,
           port: config.opencodeServerPort,
           timeout: 10_000,
         }),

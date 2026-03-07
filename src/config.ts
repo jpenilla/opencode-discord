@@ -3,10 +3,7 @@ import { Context, Effect, Layer } from "effect"
 export type AppConfigShape = {
   discordToken: string
   triggerPhrase: string
-  opencodeServerHost: string
   opencodeServerPort: number
-  opencodeServerBaseUrl: string
-  toolBridgeHost: string
   toolBridgePort: number
   toolBridgeToken: string
 }
@@ -30,22 +27,15 @@ export const AppConfigLive = Layer.effect(
       throw new Error("Missing DISCORD_TOKEN")
     }
 
-    const opencodeServerHost = Bun.env.OPENCODE_SERVER_HOST ?? "127.0.0.1"
     const opencodeServerPort = parsePort("OPENCODE_SERVER_PORT", Bun.env.OPENCODE_SERVER_PORT, 4096)
-    const opencodeServerBaseUrl =
-      Bun.env.OPENCODE_SERVER_BASE_URL ?? `http://${opencodeServerHost}:${opencodeServerPort}`
-    const toolBridgeHost = Bun.env.DISCORD_TOOL_BRIDGE_HOST ?? "127.0.0.1"
     const toolBridgePort = parsePort("DISCORD_TOOL_BRIDGE_PORT", Bun.env.DISCORD_TOOL_BRIDGE_PORT, 8787)
 
     return {
       discordToken,
       triggerPhrase: Bun.env.TRIGGER_PHRASE ?? "hey opencode",
-      opencodeServerHost,
       opencodeServerPort,
-      opencodeServerBaseUrl,
-      toolBridgeHost,
       toolBridgePort,
-      toolBridgeToken: Bun.env.DISCORD_TOOL_BRIDGE_TOKEN ?? crypto.randomUUID(),
+      toolBridgeToken: crypto.randomUUID(),
     } satisfies AppConfigShape
   }),
 )

@@ -11,6 +11,8 @@ export type ToolBridgeShape = {
 
 export class ToolBridge extends Context.Tag("ToolBridge")<ToolBridge, ToolBridgeShape>() {}
 
+const LOCALHOST = "127.0.0.1"
+
 type ToolRequest = {
   sessionID: string
   path?: string
@@ -39,7 +41,7 @@ export const ToolBridgeLive = Layer.scoped(
     const sessions = yield* ChannelSessions
 
     const server = Bun.serve({
-      hostname: config.toolBridgeHost,
+      hostname: LOCALHOST,
       port: config.toolBridgePort,
       async fetch(request) {
         if (request.headers.get("x-opencode-discord-token") !== config.toolBridgeToken) {
@@ -125,7 +127,7 @@ export const ToolBridgeLive = Layer.scoped(
     })
 
     yield* logger.info("started tool bridge", {
-      host: config.toolBridgeHost,
+      host: LOCALHOST,
       port: config.toolBridgePort,
     })
 
@@ -136,7 +138,7 @@ export const ToolBridgeLive = Layer.scoped(
     )
 
     return {
-      url: `http://${config.toolBridgeHost}:${config.toolBridgePort}`,
+      url: `http://${LOCALHOST}:${config.toolBridgePort}`,
     } satisfies ToolBridgeShape
   }),
 )
