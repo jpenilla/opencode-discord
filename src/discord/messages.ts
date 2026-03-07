@@ -1,14 +1,8 @@
 import type { APIEmbedField, Attachment, Embed, Message, SendableChannels } from "discord.js"
 
-const DISCORD_MESSAGE_LIMIT = 2000
-const SAFE_DISCORD_MESSAGE_LIMIT = 1900
-const FENCE_RE = /^(`{3,})([A-Za-z0-9_-]+)?\s*$/
+import { splitDiscordMessage } from "@/discord/formatting.ts"
 
-type FenceState = {
-  marker: string
-  language: string
-  open: boolean
-}
+const DISCORD_MESSAGE_LIMIT = 2000
 
 const summarizeField = (field: APIEmbedField | Embed["fields"][number]) => `${field.name}: ${field.value}`
 
@@ -66,91 +60,12 @@ export const buildOpencodePrompt = (input: {
   return sections.join("\n")
 }
 
-const findSplitPoint = (text: string, maxLength: number) => {
-  if (text.length <= maxLength) {
-    return text.length
-  }
-
-  const slice = text.slice(0, maxLength)
-  const candidates = [
-    slice.lastIndexOf("\n\n"),
-    slice.lastIndexOf("\n"),
-    Math.max(slice.lastIndexOf(". "), slice.lastIndexOf("! "), slice.lastIndexOf("? ")),
-    slice.lastIndexOf(" "),
-  ].filter((index) => index > 0)
-
-  if (candidates.length === 0) {
-    return maxLength
-  }
-
-  const splitAt = Math.max(...candidates)
-  return splitAt === slice.lastIndexOf("\n\n") ? splitAt + 2 : splitAt + 1
-}
-
-const advanceFenceState = (text: string, initial: FenceState): FenceState => {
-  let state = { ...initial }
-
-  for (const line of text.split("\n")) {
-    const match = line.match(FENCE_RE)
-    if (!match) {
-      continue
-    }
-
-    if (!state.open) {
-      state = {
-        marker: match[1],
-        language: match[2] ?? "",
-        open: true,
-      }
-      continue
-    }
-
-    state = {
-      marker: "```",
-      language: "",
-      open: false,
-    }
-  }
-
-  return state
-}
-
-export const splitDiscordMessage = (text: string, maxLength = SAFE_DISCORD_MESSAGE_LIMIT): Array<string> => {
-  if (!text) {
-    return [text]
-  }
-
-  const chunks: Array<string> = []
-  let remaining = text
-  let fence: FenceState = {
-    marker: "```",
-    language: "",
-    open: false,
-  }
-
-  while (remaining.length > 0) {
-    const reopen = fence.open ? `${fence.marker}${fence.language}\n` : ""
-    const available = maxLength - reopen.length
-    const splitAt = findSplitPoint(remaining, available)
-    const body = remaining.slice(0, splitAt)
-    const nextFence = advanceFenceState(body, fence)
-    const close = nextFence.open ? `\n${nextFence.marker}` : ""
-    const chunk = `${reopen}${body}${close}`.trimEnd()
-
-    chunks.push(chunk)
-    remaining = remaining.slice(splitAt).trimStart()
-    fence = nextFence
-  }
-
-  return chunks
-}
-
 export const sendFinalResponse = async (input: {
   message: Message
   text: string
 }) => {
   const safeText = input.text.length > 0 ? input.text : "(no response content)"
-  const chunks = splitDiscordMessage(safeText, SAFE_DISCORD_MESSAGE_LIMIT)
+  const chunks = splitDiscordMessage(safeText)
 
   for (const [index, chunk] of chunks.entries()) {
     if (index === 0) {

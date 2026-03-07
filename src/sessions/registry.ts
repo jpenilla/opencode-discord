@@ -6,6 +6,7 @@ import { Context, Effect, FiberSet, Layer, Queue, Ref } from "effect"
 import type { Message } from "discord.js"
 
 import { AppConfig } from "@/config.ts"
+import { formatErrorResponse } from "@/discord/formatting.ts"
 import { buildOpencodePrompt, sendFinalResponse, startTypingLoop, summarizeAttachments, summarizeEmbeds } from "@/discord/messages.ts"
 import type { Invocation } from "@/discord/triggers.ts"
 import { OpencodeService } from "@/opencode/service.ts"
@@ -76,7 +77,7 @@ export const ChannelSessionsLive = Layer.scoped(
           })
           yield* Effect.promise(() =>
             request.message.reply({
-              content: ["## ❌ Opencode failed", "", "```text", formatError(error), "```"].join("\n"),
+              content: formatErrorResponse("## ❌ Opencode failed", formatError(error)),
               allowedMentions: { repliedUser: false, parse: [] },
             }),
           )

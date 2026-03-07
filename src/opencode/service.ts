@@ -3,6 +3,7 @@ import { Cause, Chunk, Context, Effect, Layer } from "effect"
 import { fileURLToPath } from "node:url"
 
 import { AppConfig } from "@/config.ts"
+import { renderTranscript } from "@/opencode/transcript.ts"
 import { Logger, type LoggerShape } from "@/util/logging.ts"
 
 export type SessionHandle = {
@@ -26,58 +27,6 @@ export class OpencodeService extends Context.Tag("OpencodeService")<OpencodeServ
 const LOCALHOST = "127.0.0.1"
 const OPENCODE_CONFIG_DIR = fileURLToPath(new URL("../../opencode", import.meta.url))
 
-const wrapCodeBlock = (content: string, language = "text") => {
-  const trimmed = content.trim()
-  if (!trimmed) {
-    return ""
-  }
-  const fence = trimmed.includes("```") ? "````" : "```"
-  return `${fence}${language}\n${trimmed}\n${fence}`
-}
-
-const formatToolState = (value: unknown) => {
-  if (value === undefined) {
-    return ""
-  }
-  if (typeof value === "string") {
-    return value.trim()
-  }
-  try {
-    return JSON.stringify(value, null, 2)
-  } catch {
-    return formatValue(value)
-  }
-}
-
-const toolStateLanguage = (value: unknown) => (typeof value === "string" ? "text" : "json")
-
-const renderReasoning = (text: string) => {
-  const trimmed = text.trim()
-  if (!trimmed) {
-    return ""
-  }
-  return ["## Thinking", "", `> ${trimmed.replace(/\n/g, "\n> ")}`].join("\n")
-}
-
-const renderTool = (part: any) => {
-  const status = part.state?.status ?? "unknown"
-  const title = part.state?.title ? ` - ${part.state.title}` : ""
-  const sections = [`## ${status === "completed" ? "✅" : status === "error" ? "❌" : "🔧"} Tool: \`${part.tool}\``, `- Status: \`${status}\`${title}`]
-  const input = formatToolState(part.state?.input)
-  if (input) {
-    sections.push("", "### Input", wrapCodeBlock(input, toolStateLanguage(part.state?.input)))
-  }
-  const output = formatToolState(part.state?.output)
-  if (output) {
-    sections.push("", "### Output", wrapCodeBlock(output))
-  }
-  const error = formatToolState(part.state?.error)
-  if (error) {
-    sections.push("", "### Error", wrapCodeBlock(error))
-  }
-  return sections.filter(Boolean).join("\n")
-}
-
 const formatValue = (value: unknown) => {
   if (value === undefined || value === null) {
     return ""
@@ -90,35 +39,6 @@ const formatValue = (value: unknown) => {
   } catch {
     return String(value)
   }
-}
-
-const renderTranscript = (parts: Array<any>) => {
-  const lines: Array<string> = []
-
-  for (const part of parts) {
-    switch (part.type) {
-      case "text": {
-        if (part.text?.trim()) {
-          lines.push(part.text.trim())
-        }
-        break
-      }
-      case "reasoning": {
-        if (part.text?.trim()) {
-          lines.push(renderReasoning(part.text))
-        }
-        break
-      }
-      case "tool": {
-        lines.push(renderTool(part))
-        break
-      }
-      default:
-        break
-    }
-  }
-
-  return lines.join("\n\n").trim()
 }
 
 const consumeEvents = (input: {
