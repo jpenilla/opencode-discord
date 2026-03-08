@@ -27,9 +27,16 @@ export type PromptResult = {
   transcript: string
 }
 
+type SessionModel = {
+  providerID: string
+  modelID: string
+}
+
 export type OpencodeServiceShape = {
   createSession: (workdir: string, title: string) => Effect.Effect<SessionHandle>
   prompt: (session: SessionHandle, prompt: string) => Effect.Effect<PromptResult>
+  interruptSession: (session: SessionHandle) => Effect.Effect<void>
+  compactSession: (session: SessionHandle) => Effect.Effect<void>
   replyToQuestion: (session: SessionHandle, requestID: string, answers: Array<QuestionAnswer>) => Effect.Effect<void>
   rejectQuestion: (session: SessionHandle, requestID: string) => Effect.Effect<void>
   isHealthy: (session: SessionHandle) => Effect.Effect<boolean>
@@ -143,6 +150,45 @@ const makeSessionCloser = (input: {
     yield* Effect.sync(() => {
       input.closeServer()
     })
+  })
+
+const resolveSessionModel = (session: SessionHandle) =>
+  Effect.gen(function* () {
+    const result = yield* Effect.promise(() =>
+      session.client.session.messages({
+        sessionID: session.sessionId,
+      }),
+    )
+
+    if (result.error || !result.data) {
+      throw new Error(`Failed to load opencode session messages: ${formatValue(result.error)}`)
+    }
+
+    let assistantModel: SessionModel | null = null
+    for (let i = result.data.length - 1; i >= 0; i--) {
+      const info = result.data[i]?.info
+      if (!info) {
+        continue
+      }
+      if (info.role === "user") {
+        return {
+          providerID: info.model.providerID,
+          modelID: info.model.modelID,
+        } satisfies SessionModel
+      }
+      if (info.role === "assistant" && !assistantModel) {
+        assistantModel = {
+          providerID: info.providerID,
+          modelID: info.modelID,
+        } satisfies SessionModel
+      }
+    }
+
+    if (assistantModel) {
+      return assistantModel
+    }
+
+    throw new Error("Failed to compact opencode session: no model metadata is available for this session")
   })
 
 export const OpencodeServiceLive = Layer.scoped(
@@ -276,6 +322,33 @@ export const OpencodeServiceLive = Layer.scoped(
             messageId: result.data.info.id,
             transcript: renderTranscript(result.data.parts),
           } satisfies PromptResult
+        }),
+      interruptSession: (session) =>
+        Effect.gen(function* () {
+          const result = yield* Effect.promise(() =>
+            session.client.session.abort({
+              sessionID: session.sessionId,
+            }),
+          )
+
+          if (result.error || result.data !== true) {
+            throw new Error(`Failed to interrupt opencode session: ${formatValue(result.error)}`)
+          }
+        }),
+      compactSession: (session) =>
+        Effect.gen(function* () {
+          const model = yield* resolveSessionModel(session)
+          const result = yield* Effect.promise(() =>
+            session.client.session.summarize({
+              sessionID: session.sessionId,
+              providerID: model.providerID,
+              modelID: model.modelID,
+            }),
+          )
+
+          if (result.error || result.data !== true) {
+            throw new Error(`Failed to compact opencode session: ${formatValue(result.error)}`)
+          }
         }),
       replyToQuestion: (session, requestID, answers) =>
         Effect.gen(function* () {

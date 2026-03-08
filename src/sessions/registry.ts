@@ -3,11 +3,12 @@ import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 
 import { Chunk, Context, Deferred, Effect, Fiber, FiberSet, Layer, Queue, Ref } from "effect"
-import type { Interaction, Message } from "discord.js"
+import { ChannelType, MessageFlags, type Interaction, type Message, type SendableChannels } from "discord.js"
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
 
 import { AppConfig } from "@/config.ts"
 import { formatErrorResponse } from "@/discord/formatting.ts"
+import { editInfoCard, sendInfoCard, upsertInfoCard } from "@/discord/info-card.ts"
 import {
   buildBatchedOpencodePrompt,
   buildOpencodePrompt,
@@ -84,6 +85,7 @@ type SessionRuntimeState = {
   sessionsBySessionId: Map<string, ChannelSession>
   activeRunsBySessionId: Map<string, ActiveRun>
   gatesByChannelId: Map<string, SessionGate>
+  idleCompactionCardsBySessionId: Map<string, Message>
   questionBatchesByRequestId: Map<string, PendingQuestionBatch>
 }
 
@@ -100,6 +102,7 @@ const createSessionRuntimeState = (): SessionRuntimeState => ({
   sessionsBySessionId: new Map<string, ChannelSession>(),
   activeRunsBySessionId: new Map<string, ActiveRun>(),
   gatesByChannelId: new Map<string, SessionGate>(),
+  idleCompactionCardsBySessionId: new Map<string, Message>(),
   questionBatchesByRequestId: new Map<string, PendingQuestionBatch>(),
 })
 
@@ -119,6 +122,8 @@ export const ChannelSessionsLive = Layer.scoped(
       Ref.get(stateRef).pipe(Effect.map((state) => state.activeRunsBySessionId.get(sessionId) ?? null))
     const getQuestionBatch = (requestId: string) =>
       Ref.get(stateRef).pipe(Effect.map((state) => state.questionBatchesByRequestId.get(requestId) ?? null))
+    const getIdleCompactionCard = (sessionId: string) =>
+      Ref.get(stateRef).pipe(Effect.map((state) => state.idleCompactionCardsBySessionId.get(sessionId) ?? null))
     const putSession = (session: ChannelSession) =>
       Ref.update(stateRef, (current) => {
         const sessionsByChannelId = new Map(current.sessionsByChannelId)
@@ -168,11 +173,32 @@ export const ChannelSessionsLive = Layer.scoped(
         const activeRunsBySessionId = new Map(current.activeRunsBySessionId)
         activeRunsBySessionId.delete(previousSessionId)
 
+        const idleCompactionCardsBySessionId = new Map(current.idleCompactionCardsBySessionId)
+        const idleCompactionCard = idleCompactionCardsBySessionId.get(previousSessionId)
+        idleCompactionCardsBySessionId.delete(previousSessionId)
+        if (idleCompactionCard) {
+          idleCompactionCardsBySessionId.set(replacement.sessionId, idleCompactionCard)
+        }
+
         return {
           ...current,
           sessionsByChannelId,
           sessionsBySessionId,
           activeRunsBySessionId,
+          idleCompactionCardsBySessionId,
+        }
+      })
+    const setIdleCompactionCard = (sessionId: string, message: Message | null) =>
+      Ref.update(stateRef, (current) => {
+        const idleCompactionCardsBySessionId = new Map(current.idleCompactionCardsBySessionId)
+        if (message) {
+          idleCompactionCardsBySessionId.set(sessionId, message)
+        } else {
+          idleCompactionCardsBySessionId.delete(sessionId)
+        }
+        return {
+          ...current,
+          idleCompactionCardsBySessionId,
         }
       })
     const putQuestionBatch = (batch: PendingQuestionBatch) =>
@@ -317,6 +343,25 @@ export const ChannelSessionsLive = Layer.scoped(
           return Effect.sync(() => {
             activeRun.typing.resume()
           })
+        }),
+      )
+
+    const updateIdleCompactionCard = (sessionId: string, title: string, body: string) =>
+      getIdleCompactionCard(sessionId).pipe(
+        Effect.flatMap((card) => {
+          if (!card) {
+            return Effect.void
+          }
+
+          return Effect.promise(() => editInfoCard(card, title, body)).pipe(
+            Effect.catchAll((error) =>
+              logger.warn("failed to update idle compaction card", {
+                sessionId,
+                error: formatError(error),
+              }).pipe(Effect.zipRight(setIdleCompactionCard(sessionId, null))),
+            ),
+            Effect.asVoid,
+          )
         }),
       )
 
@@ -498,19 +543,19 @@ export const ChannelSessionsLive = Layer.scoped(
 
         return Ref.get(stateRef).pipe(
           Effect.flatMap((state) => {
-            const activeRun = state.activeRunsBySessionId.get(sessionId)
             const session = state.sessionsBySessionId.get(sessionId)
-            if (!activeRun || !session) {
+            if (!session) {
               return Effect.void
             }
 
+            const activeRun = state.activeRunsBySessionId.get(sessionId)
             const progressEvents = collectProgressEvents(wrapped.payload)
             const questionAsked = getQuestionAsked(wrapped.payload)
             const questionReplied = getQuestionReplied(wrapped.payload)
             const questionRejected = getQuestionRejected(wrapped.payload)
 
             return Effect.gen(function* () {
-              if (questionAsked) {
+              if (questionAsked && activeRun) {
                 yield* handleQuestionAsked(session, activeRun, questionAsked)
               }
               if (questionReplied) {
@@ -520,9 +565,17 @@ export const ChannelSessionsLive = Layer.scoped(
                 yield* finalizeQuestionBatch(questionRejected.requestID, "rejected")
               }
 
-              yield* Effect.forEach(progressEvents, (progressEvent) =>
-                Queue.offer(activeRun.progressQueue, progressEvent).pipe(Effect.asVoid),
-              ).pipe(Effect.asVoid)
+              if (activeRun) {
+                yield* Effect.forEach(progressEvents, (progressEvent) =>
+                  Queue.offer(activeRun.progressQueue, progressEvent).pipe(Effect.asVoid),
+                ).pipe(Effect.asVoid)
+              } else if (progressEvents.some((event) => event.type === "session-compacted")) {
+                yield* updateIdleCompactionCard(
+                  sessionId,
+                  "🗜️ Session compacted",
+                  "OpenCode summarized earlier context for this session.",
+                )
+              }
             })
           }),
         )
@@ -587,19 +640,19 @@ export const ChannelSessionsLive = Layer.scoped(
         const acceptFollowUps = yield* Ref.make(true)
         const responseMessage = initialRequests[0]!.message
         const progressFiber = yield* runProgressWorker(responseMessage, session.workdir, progressQueue).pipe(Effect.fork)
-
-        const typing = startTypingLoop(responseMessage.channel)
-        yield* setActiveRun(session, {
+        const activeRun: ActiveRun = {
           discordMessage: responseMessage,
           workdir: session.workdir,
           progressQueue,
           followUpQueue,
           acceptFollowUps,
-          typing,
+          typing: startTypingLoop(responseMessage.channel),
           questionOutcome: noQuestionOutcome(),
-        })
+          interruptRequested: false,
+        }
+        yield* setActiveRun(session, activeRun)
 
-        const stopTyping = Effect.promise(() => typing.stop())
+        const stopTyping = Effect.promise(() => activeRun.typing.stop())
         let failed = false
 
         try {
@@ -630,7 +683,7 @@ export const ChannelSessionsLive = Layer.scoped(
             )
           }
 
-          const questionOutcome = session.activeRun?.questionOutcome ?? noQuestionOutcome()
+          const questionOutcome = activeRun.questionOutcome
           const trimmedTranscript = result.transcript.trim()
 
           yield* stopTyping
@@ -639,7 +692,7 @@ export const ChannelSessionsLive = Layer.scoped(
             yield* Effect.promise(() => sendFinalResponse({ message: responseMessage, text: result.transcript }))
           } else if (questionOutcome._tag === "ui-failure" && !questionOutcome.notified) {
             yield* sendQuestionUiFailure(responseMessage, questionOutcome.message)
-          } else if (questionOutcome._tag !== "user-rejected") {
+          } else if (!activeRun.interruptRequested && questionOutcome._tag !== "user-rejected") {
             yield* Effect.promise(() => sendFinalResponse({ message: responseMessage, text: result.transcript }))
           }
           yield* logger.info("completed run", {
@@ -648,14 +701,23 @@ export const ChannelSessionsLive = Layer.scoped(
             opencodeMessageId: result.messageId,
           })
         } catch (error) {
-          yield* logger.error("run failed", {
-            channelId: session.channelId,
-            sessionId: session.opencode.sessionId,
-            error: formatError(error),
-          })
-          yield* stopTyping
-          yield* sendRunFailure(responseMessage, error)
-          failed = true
+          if (activeRun.interruptRequested) {
+            yield* logger.info("interrupted run", {
+              channelId: session.channelId,
+              sessionId: session.opencode.sessionId,
+              error: formatError(error),
+            })
+            yield* stopTyping
+          } else {
+            yield* logger.error("run failed", {
+              channelId: session.channelId,
+              sessionId: session.opencode.sessionId,
+              error: formatError(error),
+            })
+            yield* stopTyping
+            yield* sendRunFailure(responseMessage, error)
+            failed = true
+          }
         } finally {
           yield* stopTyping
           yield* setActiveRun(session, null)
@@ -809,6 +871,177 @@ export const ChannelSessionsLive = Layer.scoped(
       }
       return Effect.promise(() => interaction.reply(questionInteractionReply(message))).pipe(Effect.ignore)
     }
+
+    const replyToCommandInteraction = (interaction: Interaction, message: string) => {
+      if (!interaction.isChatInputCommand()) {
+        return Effect.void
+      }
+      if (interaction.replied || interaction.deferred) {
+        return Effect.void
+      }
+      return Effect.promise(() =>
+        interaction.reply({
+          content: message,
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        }),
+      ).pipe(Effect.ignore)
+    }
+
+    const deferCommandInteraction = (interaction: Interaction) => {
+      if (!interaction.isChatInputCommand()) {
+        return Effect.void
+      }
+      if (interaction.replied || interaction.deferred) {
+        return Effect.void
+      }
+      return Effect.promise(() => interaction.deferReply({ flags: MessageFlags.Ephemeral })).pipe(Effect.ignore)
+    }
+
+    const editCommandInteraction = (interaction: Interaction, message: string) => {
+      if (!interaction.isChatInputCommand()) {
+        return Effect.void
+      }
+      if (!interaction.replied && !interaction.deferred) {
+        return replyToCommandInteraction(interaction, message)
+      }
+      return Effect.promise(() =>
+        interaction.editReply({
+          content: message,
+          allowedMentions: { parse: [] },
+        }),
+      ).pipe(Effect.ignore)
+    }
+
+    const handleCommandInteraction = (interaction: Interaction): FallibleEffect<boolean> =>
+      Effect.gen(function* () {
+        if (!interaction.isChatInputCommand()) {
+          return false
+        }
+
+        if (interaction.commandName !== "compact" && interaction.commandName !== "interrupt") {
+          return false
+        }
+
+        if (!interaction.inGuild() || interaction.channel?.type !== ChannelType.GuildText) {
+          yield* replyToCommandInteraction(interaction, "This command only works in standard guild text channels.")
+          return true
+        }
+
+        const session = yield* getSession(interaction.channelId)
+        if (!session) {
+          yield* replyToCommandInteraction(interaction, "No OpenCode session exists in this channel yet.")
+          return true
+        }
+
+        if (interaction.commandName === "compact") {
+          if (session.activeRun) {
+            yield* replyToCommandInteraction(
+              interaction,
+              "OpenCode is busy in this channel right now. Use /interrupt first or wait for the current run to finish.",
+            )
+            return true
+          }
+
+          yield* deferCommandInteraction(interaction)
+
+          const healthy = yield* opencode.isHealthy(session.opencode)
+          if (!healthy) {
+            yield* editCommandInteraction(
+              interaction,
+              "This channel session is unavailable right now. Send a normal message to recreate it.",
+            )
+            return true
+          }
+
+          const channel = interaction.channel as SendableChannels
+          const existingCard = yield* getIdleCompactionCard(session.opencode.sessionId)
+          const compactionCard = yield* Effect.promise(() =>
+            upsertInfoCard({
+              channel,
+              existingCard,
+              title: "🗜️ Compacting session",
+              body: "OpenCode is summarizing earlier context for this session.",
+            }),
+          ).pipe(
+            Effect.tap((card) => setIdleCompactionCard(session.opencode.sessionId, card)),
+            Effect.catchAll((error) =>
+              logger.warn("failed to post idle compaction card", {
+                channelId: session.channelId,
+                sessionId: session.opencode.sessionId,
+                error: formatError(error),
+              }).pipe(Effect.zipRight(setIdleCompactionCard(session.opencode.sessionId, null)), Effect.as(null)),
+            ),
+          )
+
+          yield* opencode.compactSession(session.opencode).pipe(
+            Effect.tap(() =>
+              updateIdleCompactionCard(
+                session.opencode.sessionId,
+                "🗜️ Session compacted",
+                "OpenCode summarized earlier context for this session.",
+              ).pipe(Effect.zipRight(setIdleCompactionCard(session.opencode.sessionId, null))),
+            ),
+            Effect.tapError((error) =>
+              logger.error("failed to compact session", {
+                channelId: session.channelId,
+                sessionId: session.opencode.sessionId,
+                error: formatError(error),
+              }),
+            ),
+            Effect.catchAll((error) =>
+              compactionCard
+                ? Effect.promise(() =>
+                    editInfoCard(compactionCard, "❌ Session compaction failed", `OpenCode could not compact this session.\n\n${formatError(error)}`),
+                  ).pipe(Effect.ignore, Effect.zipRight(setIdleCompactionCard(session.opencode.sessionId, null)))
+                : Effect.void,
+            ),
+            Effect.forkDaemon,
+          )
+
+          yield* editCommandInteraction(interaction, "Started session compaction. I'll post updates in this channel.")
+          return true
+        }
+
+        const activeRun = session.activeRun
+        if (!activeRun) {
+          yield* replyToCommandInteraction(interaction, "No active OpenCode run is running in this channel.")
+          return true
+        }
+
+        yield* deferCommandInteraction(interaction)
+
+        activeRun.interruptRequested = true
+        const interruptResult = yield* opencode.interruptSession(session.opencode).pipe(Effect.either)
+        if (interruptResult._tag === "Left") {
+          activeRun.interruptRequested = false
+          yield* editCommandInteraction(
+            interaction,
+            formatErrorResponse("## ❌ Failed to interrupt run", formatError(interruptResult.left)),
+          )
+          return true
+        }
+
+        yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
+        yield* Effect.promise(async () => {
+          await sendInfoCard(
+            interaction.channel as SendableChannels,
+            "🛑 Run interrupted",
+            "OpenCode stopped the active run in this channel.",
+          )
+        }).pipe(
+          Effect.catchAll((error) =>
+            logger.warn("failed to post interrupt info card", {
+              channelId: session.channelId,
+              sessionId: session.opencode.sessionId,
+              error: formatError(error),
+            }),
+          ),
+          Effect.ignore,
+        )
+        yield* editCommandInteraction(interaction, "Interrupted the active OpenCode run.")
+        return true
+      })
 
     const persistQuestionBatch = (
       requestId: string,
@@ -1164,7 +1397,10 @@ export const ChannelSessionsLive = Layer.scoped(
           })
         }),
       getActiveRunBySessionId,
-      handleInteraction: handleQuestionInteraction,
+      handleInteraction: (interaction) =>
+        handleCommandInteraction(interaction).pipe(
+          Effect.flatMap((handled) => handled ? Effect.succeed(true) : handleQuestionInteraction(interaction)),
+        ),
     } satisfies ChannelSessionsShape
   }),
 )

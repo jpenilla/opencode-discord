@@ -1,8 +1,8 @@
 import { Chunk, Deferred, Effect, Queue } from "effect"
-import type { Message } from "discord.js"
+import type { Message, SendableChannels } from "discord.js"
 import type { Event } from "@opencode-ai/sdk/v2"
 
-import { sendSessionCompactedCard } from "@/discord/info-card.ts"
+import { upsertInfoCard } from "@/discord/info-card.ts"
 import { sendProgressUpdate } from "@/discord/messages.ts"
 import { upsertToolCard } from "@/discord/tool-card.ts"
 import {
@@ -13,6 +13,7 @@ import {
   formatThinkingCompleted,
 } from "@/discord/progress.ts"
 import {
+  getCompactionPart,
   getPatchPart,
   getPermissionReplied,
   getPermissionUpdated,
@@ -39,6 +40,8 @@ type ProgressState = {
   toolStates: Map<string, string>
   toolCards: Map<string, Message>
   todoCards: Message[]
+  compactionCard: Message | null
+  compactionPartIds: Set<string>
   permissionReplies: Map<string, string>
   pendingPermissions: Set<string>
   retryStatusKeys: Set<string>
@@ -50,6 +53,8 @@ const createProgressState = (): ProgressState => ({
   toolStates: new Map<string, string>(),
   toolCards: new Map<string, Message>(),
   todoCards: [],
+  compactionCard: null,
+  compactionPartIds: new Set<string>(),
   permissionReplies: new Map<string, string>(),
   pendingPermissions: new Set<string>(),
   retryStatusKeys: new Set<string>(),
@@ -103,6 +108,7 @@ const progressUpdateForEvent = (event: RunProgressEvent, state: ProgressState) =
       state.patchPartIds.add(event.part.id)
       return formatPatchUpdated(event.part)
     }
+    case "session-compacting":
     case "session-compacted":
       return null
     case "session-status":
@@ -172,6 +178,43 @@ const handleToolCard = (
     }
   })
 
+const handleCompactionCard = (
+  state: ProgressState,
+  message: Message,
+  event: Extract<RunProgressEvent, { type: "session-compacting" | "session-compacted" }>,
+) =>
+  Effect.gen(function* () {
+    if (!message.channel.isSendable()) {
+      throw new Error("Channel is not sendable for compaction card")
+    }
+    const channel = message.channel as SendableChannels
+
+    if (event.type === "session-compacting") {
+      if (state.compactionPartIds.has(event.part.id)) {
+        return
+      }
+      state.compactionPartIds.add(event.part.id)
+      state.compactionCard = yield* Effect.promise(() =>
+        upsertInfoCard({
+          channel,
+          existingCard: state.compactionCard,
+          title: "🗜️ Compacting session",
+          body: "OpenCode is summarizing earlier context for this session.",
+        }),
+      )
+      return
+    }
+
+    state.compactionCard = yield* Effect.promise(() =>
+      upsertInfoCard({
+        channel,
+        existingCard: state.compactionCard,
+        title: "🗜️ Session compacted",
+        body: "OpenCode summarized earlier context for this session.",
+      }),
+    )
+  })
+
 export const collectProgressEvents = (event: Event): ReadonlyArray<RunProgressEvent> => {
   const progressEvents: RunProgressEvent[] = []
 
@@ -212,6 +255,14 @@ export const collectProgressEvents = (event: Event): ReadonlyArray<RunProgressEv
     progressEvents.push({
       type: "session-status",
       status: sessionStatus.status,
+    })
+  }
+
+  const compactionPart = getCompactionPart(event)
+  if (compactionPart) {
+    progressEvents.push({
+      type: "session-compacting",
+      part: compactionPart,
     })
   }
 
@@ -260,8 +311,8 @@ export const runProgressWorker = (
           continue
         }
 
-        if (event.type === "session-compacted") {
-          yield* Effect.promise(() => sendSessionCompactedCard(message))
+        if (event.type === "session-compacting" || event.type === "session-compacted") {
+          yield* handleCompactionCard(state, message, event)
           continue
         }
 

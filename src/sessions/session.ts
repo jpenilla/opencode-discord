@@ -1,5 +1,5 @@
 import type { Message } from "discord.js"
-import type { EventPermissionReplied, EventSessionCompacted, PatchPart, PermissionRequest, SessionStatus, ToolPart } from "@opencode-ai/sdk/v2"
+import type { CompactionPart, EventPermissionReplied, EventSessionCompacted, PatchPart, PermissionRequest, SessionStatus, ToolPart } from "@opencode-ai/sdk/v2"
 import type { Deferred } from "effect/Deferred"
 import type { Queue } from "effect/Queue"
 import type { Ref } from "effect/Ref"
@@ -25,12 +25,14 @@ export type ActiveRun = {
   acceptFollowUps: Ref<boolean>
   typing: TypingLoop
   questionOutcome: QuestionOutcome
+  interruptRequested: boolean
 }
 
 export type RunProgressEvent =
   | { type: "run-finalizing"; ack: Deferred<void> }
   | { type: "patch-updated"; part: PatchPart }
   | { type: "reasoning-completed"; partId: string; text: string }
+  | { type: "session-compacting"; part: CompactionPart }
   | { type: "session-compacted"; compacted: EventSessionCompacted["properties"] }
   | { type: "session-status"; status: SessionStatus }
   | { type: "tool-updated"; part: ToolPart }

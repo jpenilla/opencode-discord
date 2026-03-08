@@ -1,4 +1,5 @@
 import type {
+  CompactionPart,
   Event,
   EventQuestionReplied,
   EventQuestionRejected,
@@ -92,6 +93,13 @@ export const getSessionCompacted = (event: Event): EventSessionCompacted["proper
     return null
   }
   return event.properties
+}
+
+export const getCompactionPart = (event: Event): CompactionPart | null => {
+  if (event.type !== "message.part.updated" || event.properties.part.type !== "compaction") {
+    return null
+  }
+  return event.properties.part
 }
 
 export const getPatchPart = (event: Event): PatchPart | null => {
