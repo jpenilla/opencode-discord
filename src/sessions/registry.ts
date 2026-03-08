@@ -47,6 +47,7 @@ export type ChannelSessionsShape = {
 }
 
 export class ChannelSessions extends Context.Tag("ChannelSessions")<ChannelSessions, ChannelSessionsShape>() {}
+type FallibleEffect<A> = Effect.Effect<A, unknown>
 
 const formatError = (error: unknown) => {
   if (error instanceof Error) {
@@ -61,6 +62,7 @@ type SessionGateDecision = {
   gate: SessionGate
   owner: boolean
 }
+const sessionTitle = (channelId: string) => `Discord #${channelId}`
 
 const collectProgressEvents = (event: Event): ReadonlyArray<RunProgressEvent> => {
   const progressEvents: RunProgressEvent[] = []
@@ -141,6 +143,14 @@ export const ChannelSessionsLive = Layer.scoped(
       })
 
     const getSession = (channelId: string) => Ref.get(sessionsRef).pipe(Effect.map((sessions) => sessions.get(channelId)))
+    const putSession = (session: ChannelSession) =>
+      Ref.update(sessionsRef, (current) => {
+        const next = new Map(current)
+        next.set(session.channelId, session)
+        return next
+      })
+    const removeWorkdir = (workdir: string) =>
+      Effect.promise(() => rm(resolve(workdir), { recursive: true, force: true })).pipe(Effect.ignore)
 
     const clearSessionGate = (channelId: string, gate: SessionGate) =>
       Ref.update(sessionGatesRef, (current) => {
@@ -169,9 +179,11 @@ export const ChannelSessionsLive = Layer.scoped(
         )
 
         if (owner) {
-          const exit = yield* task.pipe(Effect.exit)
-          yield* Deferred.done(currentGate, exit).pipe(Effect.ignore)
-          yield* clearSessionGate(channelId, currentGate)
+          yield* task.pipe(
+            Effect.exit,
+            Effect.tap((exit) => Deferred.done(currentGate, exit).pipe(Effect.ignore)),
+            Effect.ensuring(clearSessionGate(channelId, currentGate)),
+          )
         }
 
         return yield* Deferred.await(currentGate)
@@ -370,7 +382,7 @@ export const ChannelSessionsLive = Layer.scoped(
     const processRequestBatch = (
       session: ChannelSession,
       initialRequests: ReadonlyArray<RunRequest>,
-    ): Effect.Effect<void, unknown> =>
+    ): FallibleEffect<void> =>
       Effect.gen(function* () {
         const progressQueue = yield* Queue.unbounded<RunProgressEvent>()
         const followUpQueue = yield* Queue.unbounded<RunRequest>()
@@ -483,13 +495,13 @@ export const ChannelSessionsLive = Layer.scoped(
         ),
       )
 
-    const createSession = (message: Message): Effect.Effect<ChannelSession, unknown> =>
+    const createSession = (message: Message): FallibleEffect<ChannelSession> =>
       Effect.gen(function* () {
         const workdir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "opencode-discord-")))
         let opencodeSession: ChannelSession["opencode"] | null = null
 
         try {
-          opencodeSession = yield* opencode.createSession(workdir, `Discord #${message.channelId}`)
+          opencodeSession = yield* opencode.createSession(workdir, sessionTitle(message.channelId))
           const queue = yield* Queue.unbounded<RunRequest>()
 
           const session: ChannelSession = {
@@ -501,11 +513,7 @@ export const ChannelSessionsLive = Layer.scoped(
           }
 
           yield* FiberSet.run(fiberSet, worker(session))
-          yield* Ref.update(sessionsRef, (current) => {
-            const next = new Map(current)
-            next.set(message.channelId, session)
-            return next
-          })
+          yield* putSession(session)
 
           yield* logger.info("created channel session", {
             channelId: message.channelId,
@@ -520,12 +528,12 @@ export const ChannelSessionsLive = Layer.scoped(
           if (opencodeSession) {
             yield* opencodeSession.close().pipe(Effect.ignore)
           }
-          yield* Effect.promise(() => rm(resolve(workdir), { recursive: true, force: true })).pipe(Effect.ignore)
+          yield* removeWorkdir(workdir)
           throw error
         }
       })
 
-    const getOrCreateSession = (message: Message): Effect.Effect<ChannelSession, unknown> =>
+    const getOrCreateSession = (message: Message): FallibleEffect<ChannelSession> =>
       Effect.gen(function* () {
         const existing = yield* getSession(message.channelId)
         if (existing) {
@@ -547,7 +555,7 @@ export const ChannelSessionsLive = Layer.scoped(
       session: ChannelSession,
       message: Message,
       reason: string,
-    ): Effect.Effect<ChannelSession, unknown> =>
+    ): FallibleEffect<ChannelSession> =>
       withSessionGate(
         message.channelId,
         Effect.gen(function* () {
@@ -561,7 +569,7 @@ export const ChannelSessionsLive = Layer.scoped(
           }
 
           const previous = current.opencode
-          const replacement = yield* opencode.createSession(current.workdir, `Discord #${message.channelId}`)
+          const replacement = yield* opencode.createSession(current.workdir, sessionTitle(message.channelId))
           current.opencode = replacement
           yield* previous.close().pipe(Effect.ignore)
           yield* logger.warn("recovered channel session", {
@@ -580,7 +588,7 @@ export const ChannelSessionsLive = Layer.scoped(
       session: ChannelSession,
       message: Message,
       reason: string,
-    ): Effect.Effect<ChannelSession, unknown> =>
+    ): FallibleEffect<ChannelSession> =>
       Effect.gen(function* () {
         if (session.activeRun) {
           return session
@@ -598,7 +606,7 @@ export const ChannelSessionsLive = Layer.scoped(
       session: ChannelSession,
       message: Message,
       reason: string,
-    ): Effect.Effect<void, unknown> =>
+    ): FallibleEffect<void> =>
       Effect.gen(function* () {
         const healthy = yield* opencode.isHealthy(session.opencode)
         if (healthy) {
@@ -614,14 +622,14 @@ export const ChannelSessionsLive = Layer.scoped(
         for (const session of sessions.values()) {
           yield* Queue.shutdown(session.queue)
           yield* session.opencode.close().pipe(Effect.ignore)
-          yield* Effect.promise(() => rm(resolve(session.workdir), { recursive: true, force: true }))
+          yield* removeWorkdir(session.workdir)
         }
         yield* FiberSet.clear(fiberSet)
       }),
     )
 
     return {
-      submit: (message, invocation): Effect.Effect<void, unknown> =>
+      submit: (message, invocation): FallibleEffect<void> =>
         Effect.gen(function* () {
           const session = yield* getOrCreateSession(message).pipe(
             Effect.flatMap((existing) =>

@@ -257,7 +257,7 @@ export const OpencodeServiceLive = Layer.scoped(
       isHealthy: (session) =>
         Effect.promise(() => session.client.global.health()).pipe(
           Effect.map((result) => !result.error && result.data?.healthy === true),
-          Effect.catchAll(() => Effect.succeed(false)),
+          Effect.orElseSucceed(() => false),
         ),
     } satisfies OpencodeServiceShape
   }),
