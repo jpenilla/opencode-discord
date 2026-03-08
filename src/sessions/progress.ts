@@ -2,6 +2,7 @@ import { Chunk, Deferred, Effect, Queue } from "effect"
 import type { Message } from "discord.js"
 import type { Event } from "@opencode-ai/sdk/v2"
 
+import { sendSessionCompactedCard } from "@/discord/info-card.ts"
 import { sendProgressUpdate } from "@/discord/messages.ts"
 import { upsertToolCard } from "@/discord/tool-card.ts"
 import {
@@ -16,6 +17,7 @@ import {
   getPermissionReplied,
   getPermissionUpdated,
   getReasoningPart,
+  getSessionCompacted,
   getSessionStatusUpdated,
   getToolPartUpdated,
 } from "@/opencode/events.ts"
@@ -101,6 +103,8 @@ const progressUpdateForEvent = (event: RunProgressEvent, state: ProgressState) =
       state.patchPartIds.add(event.part.id)
       return formatPatchUpdated(event.part)
     }
+    case "session-compacted":
+      return null
     case "session-status":
       if (event.status.type === "retry") {
         const key = `${event.status.attempt}:${event.status.message}`
@@ -211,6 +215,14 @@ export const collectProgressEvents = (event: Event): ReadonlyArray<RunProgressEv
     })
   }
 
+  const compacted = getSessionCompacted(event)
+  if (compacted) {
+    progressEvents.push({
+      type: "session-compacted",
+      compacted,
+    })
+  }
+
   const reasoningPart = getReasoningPart(event)
   if (reasoningPart?.time.end) {
     progressEvents.push({
@@ -245,6 +257,11 @@ export const runProgressWorker = (
 
         if (event.type === "tool-updated") {
           yield* handleToolCard(state, message, workdir, event)
+          continue
+        }
+
+        if (event.type === "session-compacted") {
+          yield* Effect.promise(() => sendSessionCompactedCard(message))
           continue
         }
 

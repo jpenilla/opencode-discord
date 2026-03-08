@@ -2,6 +2,7 @@ import type {
   Event,
   EventQuestionReplied,
   EventQuestionRejected,
+  EventSessionCompacted,
   PatchPart,
   QuestionRequest,
   ReasoningPart,
@@ -81,6 +82,13 @@ export const getPermissionReplied = (event: Event): EventPermissionReplied["prop
 
 export const getSessionStatusUpdated = (event: Event): EventSessionStatus["properties"] | null => {
   if (event.type !== "session.status") {
+    return null
+  }
+  return event.properties
+}
+
+export const getSessionCompacted = (event: Event): EventSessionCompacted["properties"] | null => {
+  if (event.type !== "session.compacted") {
     return null
   }
   return event.properties
