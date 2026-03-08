@@ -8,7 +8,16 @@ import type { Event } from "@opencode-ai/sdk/v2"
 
 import { AppConfig } from "@/config.ts"
 import { formatErrorResponse } from "@/discord/formatting.ts"
-import { buildOpencodePrompt, sendFinalResponse, sendProgressUpdate, startTypingLoop, summarizeAttachments, summarizeEmbeds } from "@/discord/messages.ts"
+import {
+  buildBatchedOpencodePrompt,
+  buildOpencodePrompt,
+  buildQueuedFollowUpPrompt,
+  sendFinalResponse,
+  sendProgressUpdate,
+  startTypingLoop,
+  summarizeAttachments,
+  summarizeEmbeds,
+} from "@/discord/messages.ts"
 import { upsertToolCard } from "@/discord/tool-card.ts"
 import {
   formatPatchUpdated,
@@ -319,25 +328,56 @@ export const ChannelSessionsLive = Layer.scoped(
       Effect.forkScoped,
     )
 
-    const processRequest = (session: ChannelSession, request: RunRequest) =>
+    const processRequestBatch = (session: ChannelSession, initialRequests: ReadonlyArray<RunRequest>) =>
       Effect.gen(function* () {
         const progressQueue = yield* Queue.unbounded<RunProgressEvent>()
-        const progressFiber = yield* runProgressWorker(request.message, session.workdir, progressQueue).pipe(Effect.fork)
+        const followUpQueue = yield* Queue.unbounded<RunRequest>()
+        const acceptFollowUps = yield* Ref.make(true)
+        const responseMessage = initialRequests[0]!.message
+        const progressFiber = yield* runProgressWorker(responseMessage, session.workdir, progressQueue).pipe(Effect.fork)
 
         yield* setActiveRun(session.channelId, {
-          discordMessage: request.message,
+          discordMessage: responseMessage,
           workdir: session.workdir,
           progressQueue,
+          followUpQueue,
+          acceptFollowUps,
         })
 
-        const stopTyping = startTypingLoop(request.message.channel)
+        const stopTyping = startTypingLoop(responseMessage.channel)
 
         try {
-          const result = yield* opencode.prompt(session.opencode, request.prompt)
+          let currentBatch: ReadonlyArray<RunRequest> = initialRequests
+          let result = yield* opencode.prompt(
+            session.opencode,
+            buildBatchedOpencodePrompt(currentBatch.map((request) => request.prompt)),
+          )
+
+          while (true) {
+            yield* Ref.set(acceptFollowUps, false)
+            const followUps = yield* Queue.takeAll(followUpQueue).pipe(Effect.map(Chunk.toReadonlyArray))
+            if (followUps.length === 0) {
+              break
+            }
+
+            yield* logger.info("absorbing queued follow-up messages into active run", {
+              channelId: session.channelId,
+              sessionId: session.opencode.sessionId,
+              count: followUps.length,
+            })
+
+            currentBatch = followUps
+            yield* Ref.set(acceptFollowUps, true)
+            result = yield* opencode.prompt(
+              session.opencode,
+              buildQueuedFollowUpPrompt(currentBatch.map((request) => request.prompt)),
+            )
+          }
+
           const finalizingAck = yield* Deferred.make<void>()
           yield* Queue.offer(progressQueue, { type: "run-finalizing", ack: finalizingAck })
           yield* Deferred.await(finalizingAck)
-          yield* Effect.promise(() => sendFinalResponse({ message: request.message, text: result.transcript }))
+          yield* Effect.promise(() => sendFinalResponse({ message: responseMessage, text: result.transcript }))
           yield* logger.info("completed run", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
@@ -350,7 +390,7 @@ export const ChannelSessionsLive = Layer.scoped(
             error: formatError(error),
           })
           yield* Effect.promise(() =>
-            request.message.reply({
+            responseMessage.reply({
               content: formatErrorResponse("## ❌ Opencode failed", formatError(error)),
               allowedMentions: { repliedUser: false, parse: [] },
             }),
@@ -365,7 +405,11 @@ export const ChannelSessionsLive = Layer.scoped(
     const worker = (session: ChannelSession) =>
       Effect.forever(
         Queue.take(session.queue).pipe(
-          Effect.flatMap((request) => processRequest(session, request)),
+          Effect.flatMap((first) =>
+            Queue.takeUpTo(session.queue, 64).pipe(
+              Effect.flatMap((rest) => processRequestBatch(session, [first, ...Chunk.toReadonlyArray(rest)])),
+            ),
+          ),
           Effect.catchAll((error) =>
             logger.error("channel worker iteration failed", {
               channelId: session.channelId,
@@ -431,7 +475,11 @@ export const ChannelSessionsLive = Layer.scoped(
     return {
       submit: (message, invocation) =>
         Effect.gen(function* () {
-          const session = yield* getOrCreateSession(message)
+          yield* getOrCreateSession(message)
+          const session = yield* getSession(message.channelId)
+          if (!session) {
+            throw new Error(`Channel session not found for ${message.channelId}`)
+          }
           const prompt = buildOpencodePrompt({
             userTag: message.author.tag,
             content: invocation.prompt,
@@ -440,10 +488,25 @@ export const ChannelSessionsLive = Layer.scoped(
             embedSummary: summarizeEmbeds(message),
           })
 
-          yield* Queue.offer(session.queue, {
+          const request = {
             message,
             prompt,
-          })
+          } satisfies RunRequest
+
+          if (session.activeRun) {
+            const acceptFollowUps = yield* Ref.get(session.activeRun.acceptFollowUps)
+            if (acceptFollowUps) {
+              yield* Queue.offer(session.activeRun.followUpQueue, request)
+              yield* logger.info("queued follow-up on active run", {
+                channelId: message.channelId,
+                sessionId: session.opencode.sessionId,
+                author: message.author.tag,
+              })
+              return
+            }
+          }
+
+          yield* Queue.offer(session.queue, request)
 
           yield* logger.info("queued run", {
             channelId: message.channelId,

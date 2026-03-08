@@ -62,6 +62,29 @@ export const buildOpencodePrompt = (input: {
   return sections.join("\n")
 }
 
+const wrapDiscordPrompts = (heading: string, prompts: ReadonlyArray<string>) =>
+  [
+    heading,
+    ...prompts.map((prompt, index) => [`<discord-message index="${index + 1}">`, prompt, "</discord-message>"].join("\n")),
+  ].join("\n\n")
+
+export const buildBatchedOpencodePrompt = (prompts: ReadonlyArray<string>) => {
+  if (prompts.length === 1) {
+    return prompts[0] ?? ""
+  }
+
+  return wrapDiscordPrompts(
+    "Multiple Discord messages arrived before you responded. Read all of them and address them together in order.",
+    prompts,
+  )
+}
+
+export const buildQueuedFollowUpPrompt = (prompts: ReadonlyArray<string>) =>
+  wrapDiscordPrompts(
+    "Additional Discord messages arrived while you were working. Read all of them, address them, and continue the task.",
+    prompts,
+  )
+
 export const sendFinalResponse = async (input: {
   message: Message
   text: string

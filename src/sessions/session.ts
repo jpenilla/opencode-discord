@@ -2,6 +2,7 @@ import type { Message } from "discord.js"
 import type { EventPermissionReplied, PatchPart, PermissionRequest, SessionStatus, ToolPart } from "@opencode-ai/sdk/v2"
 import type { Deferred } from "effect/Deferred"
 import type { Queue } from "effect/Queue"
+import type { Ref } from "effect/Ref"
 
 import type { SessionHandle } from "@/opencode/service.ts"
 
@@ -14,6 +15,8 @@ export type ActiveRun = {
   discordMessage: Message
   workdir: string
   progressQueue: Queue<RunProgressEvent>
+  followUpQueue: Queue<RunRequest>
+  acceptFollowUps: Ref<boolean>
 }
 
 export type RunProgressEvent =
