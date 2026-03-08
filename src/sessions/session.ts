@@ -1,5 +1,5 @@
 import type { Message } from "discord.js"
-import type { EventPermissionReplied, PatchPart, PermissionRequest, SessionStatus, ToolPart } from "@opencode-ai/sdk/v2"
+import type { EventMessageUpdated, EventPermissionReplied, PatchPart, PermissionRequest, SessionStatus, ToolPart } from "@opencode-ai/sdk/v2"
 import type { Queue } from "effect/Queue"
 
 import type { SessionHandle } from "@/opencode/service.ts"
@@ -19,6 +19,8 @@ export type ActiveRun = {
 export type RunProgressEvent =
   | { type: "run-started" }
   | { type: "patch-updated"; part: PatchPart }
+  | { type: "reasoning-updated"; messageId: string; partId: string; text: string }
+  | { type: "assistant-message-completed"; message: EventMessageUpdated["properties"]["info"] }
   | { type: "session-status"; status: SessionStatus }
   | { type: "tool-updated"; part: ToolPart }
   | { type: "permission-asked"; permission: PermissionRequest }

@@ -24,3 +24,11 @@ export const formatPermissionAsked = (permission: PermissionRequest) => {
 
 export const formatPermissionReplied = (reply: EventPermissionReplied["properties"]) =>
   ["## 🔓 Permission resolved", `- Decision: \`${reply.reply}\``].join("\n")
+
+export const formatThinkingCompleted = (text: string) => {
+  const trimmed = text.trim()
+  if (!trimmed) {
+    return null
+  }
+  return ["*Thinking*", "", `> ${trimmed.replace(/\n/g, "\n> ")}`].join("\n")
+}

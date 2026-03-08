@@ -3,6 +3,7 @@ import type {
   EventMessagePartUpdated,
   EventMessageUpdated,
   PatchPart,
+  ReasoningPart,
   EventPermissionReplied,
   EventSessionStatus,
   GlobalEvent,
@@ -110,6 +111,14 @@ export const getPatchPart = (event: Event): PatchPart | null => {
 export const getTextPart = (event: Event): TextPart | null => {
   const partUpdated = getMessagePartUpdated(event)
   if (!partUpdated || partUpdated.properties.part.type !== "text") {
+    return null
+  }
+  return partUpdated.properties.part
+}
+
+export const getReasoningPart = (event: Event): ReasoningPart | null => {
+  const partUpdated = getMessagePartUpdated(event)
+  if (!partUpdated || partUpdated.properties.part.type !== "reasoning") {
     return null
   }
   return partUpdated.properties.part

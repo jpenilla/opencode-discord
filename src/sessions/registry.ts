@@ -14,6 +14,7 @@ import {
   formatPermissionAsked,
   formatPermissionReplied,
   formatSessionStatus,
+  formatThinkingCompleted,
 } from "@/discord/progress.ts"
 import {
   OpencodeEventQueue,
@@ -22,6 +23,7 @@ import {
   getPatchPart,
   getPermissionReplied,
   getPermissionUpdated,
+  getReasoningPart,
   getSessionStatusUpdated,
   getToolPartUpdated,
 } from "@/opencode/events.ts"
@@ -121,10 +123,46 @@ export const ChannelSessionsLive = Layer.scoped(
       permissionReplies: Map<string, string>
       pendingPermissions: Set<string>
       retryStatusKeys: Set<string>
+      reasoningByMessage: Map<string, Map<string, string>>
+      completedThinkingMessageIds: Set<string>
     }) => {
       switch (event.type) {
         case "run-started":
           return null
+        case "reasoning-updated": {
+          if (state.completedThinkingMessageIds.has(event.messageId)) {
+            return null
+          }
+          const reasoningParts = state.reasoningByMessage.get(event.messageId) ?? new Map<string, string>()
+          const previous = reasoningParts.get(event.partId)
+          if (previous === event.text) {
+            return null
+          }
+          reasoningParts.set(event.partId, event.text)
+          state.reasoningByMessage.set(event.messageId, reasoningParts)
+          return null
+        }
+        case "assistant-message-completed": {
+          if (event.message.role !== "assistant" || !event.message.time.completed) {
+            return null
+          }
+          if (state.completedThinkingMessageIds.has(event.message.id)) {
+            return null
+          }
+          const reasoningParts = state.reasoningByMessage.get(event.message.id)
+          if (!reasoningParts || reasoningParts.size === 0) {
+            return null
+          }
+          const thinkingText = [...reasoningParts.values()]
+            .map((value) => value.trim())
+            .filter((value) => value.length > 0)
+            .join("\n\n")
+          if (!thinkingText) {
+            return null
+          }
+          state.completedThinkingMessageIds.add(event.message.id)
+          return formatThinkingCompleted(thinkingText)
+        }
         case "patch-updated": {
           if (state.patchPartIds.has(event.part.id)) {
             return null
@@ -169,6 +207,8 @@ export const ChannelSessionsLive = Layer.scoped(
           permissionReplies: new Map<string, string>(),
           pendingPermissions: new Set<string>(),
           retryStatusKeys: new Set<string>(),
+          reasoningByMessage: new Map<string, Map<string, string>>(),
+          completedThinkingMessageIds: new Set<string>(),
         }
 
         const isTodoTool = (tool: string) => tool === "todowrite"
@@ -268,6 +308,12 @@ export const ChannelSessionsLive = Layer.scoped(
               if (!assistantMessageIds.includes(messageId)) {
                 assistantMessageIds = [...assistantMessageIds, messageId]
               }
+              if (assistantMessage.properties.info.role === "assistant" && assistantMessage.properties.info.time.completed) {
+                progressEvents.push({
+                  type: "assistant-message-completed",
+                  message: assistantMessage.properties.info,
+                })
+              }
             }
 
             const toolPart = getToolPartUpdated(wrapped.payload)
@@ -316,6 +362,19 @@ export const ChannelSessionsLive = Layer.scoped(
               progressEvents.push({
                 type: "session-status",
                 status: sessionStatus.status,
+              })
+            }
+
+            const reasoningPart = getReasoningPart(wrapped.payload)
+            if (reasoningPart) {
+              if (!assistantMessageIds.includes(reasoningPart.messageID)) {
+                assistantMessageIds = [...assistantMessageIds, reasoningPart.messageID]
+              }
+              progressEvents.push({
+                type: "reasoning-updated",
+                messageId: reasoningPart.messageID,
+                partId: reasoningPart.id,
+                text: reasoningPart.text,
               })
             }
 
