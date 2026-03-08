@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
-import { sendBridgeRequest } from "./bridge.ts"
+import { sendBridgeRequest } from "./lib/bridge.ts"
 
 export default tool({
   description: "Send an image from the current session workdir to Discord.",

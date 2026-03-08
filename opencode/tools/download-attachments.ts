@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
-import { sendBridgeRequest } from "./bridge.ts"
+import { sendBridgeRequest } from "./lib/bridge.ts"
 
 export default tool({
   description: "Download files attached to the Discord message that triggered this run and the message it replies to, if any, into the session workdir.",
