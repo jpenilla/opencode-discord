@@ -113,27 +113,32 @@ export const sendProgressUpdate = async (input: {
 }
 
 export const startTypingLoop = (channel: Message["channel"]) => {
-  let active = true
+  const TYPING_REFRESH_MS = 8_000
+  let stopped = false
+  let sending = false
 
   const tick = async () => {
-    while (active) {
-      if (!channel.isSendable()) {
-        await Bun.sleep(5_000)
-        continue
-      }
+    if (stopped || sending || !channel.isSendable()) {
+      return
+    }
 
-      try {
-        await channel.sendTyping()
-      } catch {
-        // Keep retrying during the run; transient API/gateway issues should not permanently stop typing.
-      }
-      await Bun.sleep(5_000)
+    sending = true
+    try {
+      await channel.sendTyping()
+    } catch {
+      // Keep retrying during the run; transient API/gateway issues should not permanently stop typing.
+    } finally {
+      sending = false
     }
   }
 
   void tick()
+  const interval = setInterval(() => {
+    void tick()
+  }, TYPING_REFRESH_MS)
 
   return () => {
-    active = false
+    stopped = true
+    clearInterval(interval)
   }
 }

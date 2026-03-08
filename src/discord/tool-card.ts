@@ -268,12 +268,7 @@ const formatPatchInputLines: ToolInputFormatter = ({ part, workdir, input }) => 
     return [`- Edited: ${files.map((file) => `\`${file}\``).join(", ")}`]
   }
 
-  return [
-    `- Edited: ${files
-      .slice(0, 3)
-      .map((file) => `\`${file}\``)
-      .join(", ")} (+${files.length - 3} more)`,
-  ]
+  return [`- Edited: ${files.map((file) => `\`${file}\``).join(", ")}`]
 }
 
 const formatBashInputLines: ToolInputFormatter = ({ part, workdir, input }) => {
