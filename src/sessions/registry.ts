@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 
-import { Chunk, Context, Effect, Fiber, FiberSet, Layer, Queue, Ref } from "effect"
+import { Chunk, Context, Deferred, Effect, Fiber, FiberSet, Layer, Queue, Ref } from "effect"
 import type { Message } from "discord.js"
 
 import { AppConfig } from "@/config.ts"
@@ -128,6 +128,8 @@ export const ChannelSessionsLive = Layer.scoped(
     }) => {
       switch (event.type) {
         case "run-started":
+          return null
+        case "run-finalizing":
           return null
         case "reasoning-updated": {
           if (state.completedThinkingMessageIds.has(event.messageId)) {
@@ -271,6 +273,12 @@ export const ChannelSessionsLive = Layer.scoped(
           const batch = [first, ...Chunk.toReadonlyArray(rest)]
 
           for (const event of batch) {
+            if (event.type === "run-finalizing") {
+              progressUpdateForEvent(event, state)
+              yield* Deferred.succeed(event.ack, undefined).pipe(Effect.ignore)
+              continue
+            }
+
             if (event.type === "tool-updated") {
               yield* handleToolCard(event)
               continue
@@ -418,6 +426,9 @@ export const ChannelSessionsLive = Layer.scoped(
 
         try {
           const result = yield* opencode.prompt(session.opencode, request.prompt)
+          const finalizingAck = yield* Deferred.make<void>()
+          yield* Queue.offer(progressQueue, { type: "run-finalizing", ack: finalizingAck })
+          yield* Deferred.await(finalizingAck)
           yield* Effect.promise(() => sendFinalResponse({ message: request.message, text: result.transcript }))
           yield* logger.info("completed run", {
             channelId: session.channelId,

@@ -38,6 +38,47 @@ const statusEmoji = (part: ToolPart) => {
   }
 }
 
+const toolEmoji = (tool: string) => {
+  switch (tool) {
+    case "invalid":
+      return "⚠️"
+    case "question":
+      return "❓"
+    case "bash":
+      return "💻"
+    case "read":
+      return "📖"
+    case "glob":
+    case "grep":
+      return "🔎"
+    case "edit":
+    case "write":
+      return "✏️"
+    case "task":
+      return "🧩"
+    case "webfetch":
+    case "websearch":
+      return "🌐"
+    case "codesearch":
+      return "🧠"
+    case "skill":
+      return "🎯"
+    case "apply_patch":
+      return "🩹"
+    case "todoread":
+    case "todowrite":
+      return "📝"
+    case "plan_exit":
+      return "🚪"
+    case "batch":
+      return "📦"
+    case "lsp":
+      return "🧭"
+    default:
+      return tool.includes("patch") ? "🩹" : "🛠️"
+  }
+}
+
 const formatDuration = (part: ToolPart) => {
   if (part.state.status !== "completed" && part.state.status !== "error") {
     return null
@@ -414,6 +455,7 @@ const TOOL_INPUT_FORMATTERS: Record<string, ToolInputFormatter> = {
   websearch: formatSearchInputLines,
   codesearch: formatSearchInputLines,
   skill: formatSkillInputLines,
+  todoread: formatTodoInputLines,
   todowrite: formatTodoInputLines,
   question: formatQuestionInputLines,
   plan_exit: formatPlanExitInputLines,
@@ -424,7 +466,7 @@ const TOOL_INPUT_FORMATTERS: Record<string, ToolInputFormatter> = {
 
 const formatToolInputLines = (part: ToolPart, workdir: string) => {
   const input = inputObject(part)
-  if (part.tool.includes("patch")) {
+  if (part.tool === "apply_patch" || part.tool.includes("patch")) {
     return formatPatchInputLines({ part, workdir, input })
   }
 
@@ -484,7 +526,7 @@ const renderToolCard = (input: {
   const { part } = input
   const duration = formatDuration(part)
   const statusLabel = duration ? `${formatStatus(part)} in ${duration}` : formatStatus(part)
-  const header = part.tool === "todowrite" ? "**📝 Todo list**" : `**${statusEmoji(part)} \`${part.tool}\` ${statusLabel}**`
+  const header = part.tool === "todowrite" ? "**📝 Todo list**" : `**${toolEmoji(part.tool)} ${statusEmoji(part)} \`${part.tool}\` ${statusLabel}**`
   const lines = [
     header,
   ]

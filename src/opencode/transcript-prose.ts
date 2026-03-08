@@ -3,7 +3,7 @@ const renderReasoning = (text: string) => {
   if (!trimmed) {
     return ""
   }
-  return ["## Thinking", "", `> ${trimmed.replace(/\n/g, "\n> ")}`].join("\n")
+  return ""
 }
 
 export const renderProseTranscriptPart = (part: any) => {

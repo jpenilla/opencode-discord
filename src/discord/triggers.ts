@@ -8,6 +8,20 @@ export type Invocation = {
 const cleanMentionText = (content: string, botId: string) =>
   content.replace(new RegExp(`<@!?${botId}>`, "g"), "").trim()
 
+const parsePrompt = (content: string, botId: string, triggerPhrase: string): string | null => {
+  const mentionPattern = new RegExp(`<@!?${botId}>`, "i")
+  if (mentionPattern.test(content)) {
+    return cleanMentionText(content, botId)
+  }
+
+  const lowered = content.toLowerCase()
+  const loweredTrigger = triggerPhrase.toLowerCase()
+  if (!lowered.startsWith(loweredTrigger)) {
+    return null
+  }
+  return content.slice(triggerPhrase.length).trim()
+}
+
 export const detectInvocation = async (input: {
   client: Client
   message: Message
@@ -35,18 +49,10 @@ export const detectInvocation = async (input: {
     }
   }
 
-  if (message.mentions.users.has(botUser.id)) {
-    const prompt = cleanMentionText(message.content, botUser.id)
+  const prompt = parsePrompt(message.content, botUser.id, triggerPhrase)
+  if (prompt !== null) {
     return {
       prompt,
-    }
-  }
-
-  const lowered = message.content.toLowerCase()
-  const loweredTrigger = triggerPhrase.toLowerCase()
-  if (lowered.startsWith(loweredTrigger)) {
-    return {
-      prompt: message.content.slice(triggerPhrase.length).trim(),
     }
   }
 

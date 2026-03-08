@@ -30,5 +30,5 @@ export const formatThinkingCompleted = (text: string) => {
   if (!trimmed) {
     return null
   }
-  return ["*Thinking*", "", `> ${trimmed.replace(/\n/g, "\n> ")}`].join("\n")
+  return ["*🧠*", "", `> ${trimmed.replace(/\n/g, "\n> ")}`].join("\n")
 }
