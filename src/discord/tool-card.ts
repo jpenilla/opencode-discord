@@ -131,13 +131,7 @@ const workdirAliases = (workdir: string) => {
 
 const normalizePathToken = (token: string) => {
   const trimmed = token.trim()
-  if (trimmed.startsWith("/")) {
-    return trimmed
-  }
-  if (trimmed.startsWith("var/")) {
-    return `/${trimmed}`
-  }
-  return trimmed
+  return trimmed.startsWith("./") ? trimmed.slice(2) : trimmed
 }
 
 const pathCandidates = (path: string, workdir: string) => {
@@ -148,7 +142,26 @@ const pathCandidates = (path: string, workdir: string) => {
   return [...candidates]
 }
 
+const relativeToWorkdirByPrefix = (path: string, workdir: string) => {
+  const normalized = normalizePathToken(path)
+  for (const alias of workdirAliases(workdir)) {
+    const aliasWithoutRoot = alias.startsWith("/") ? alias.slice(1) : alias
+    if (normalized === aliasWithoutRoot) {
+      return "."
+    }
+    if (normalized.startsWith(`${aliasWithoutRoot}/`)) {
+      return `./${normalized.slice(aliasWithoutRoot.length + 1)}`
+    }
+  }
+  return null
+}
+
 const relativeToWorkdir = (path: string, workdir: string) => {
+  const prefixedPath = relativeToWorkdirByPrefix(path, workdir)
+  if (prefixedPath) {
+    return prefixedPath
+  }
+
   const candidates = pathCandidates(path, workdir)
   for (const alias of workdirAliases(workdir)) {
     for (const absolutePath of candidates) {
