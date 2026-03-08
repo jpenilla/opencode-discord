@@ -27,8 +27,8 @@ export const DiscordBotLive = Layer.scoped(
         GatewayIntentBits.MessageContent,
       ],
       allowedMentions: {
-        parse: [],
-        repliedUser: false,
+        parse: ["users", "roles", "everyone"],
+        repliedUser: true,
       },
     })
 

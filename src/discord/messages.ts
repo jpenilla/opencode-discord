@@ -2,6 +2,7 @@ import type { APIEmbedField, Attachment, Embed, Message, SendableChannels } from
 import { MessageFlags } from "discord.js"
 
 import { splitDiscordMessage } from "@/discord/formatting.ts"
+import { normalizeOutgoingMentions } from "@/discord/mentions.ts"
 
 const DISCORD_MESSAGE_LIMIT = 2000
 
@@ -65,14 +66,14 @@ export const sendFinalResponse = async (input: {
   message: Message
   text: string
 }) => {
-  const safeText = input.text.length > 0 ? input.text : "(no response content)"
+  const safeText = input.text.length > 0 ? normalizeOutgoingMentions(input.message, input.text) : "(no response content)"
   const chunks = splitDiscordMessage(safeText)
 
   for (const [index, chunk] of chunks.entries()) {
     if (index === 0) {
       await input.message.reply({
         content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
-        allowedMentions: { repliedUser: true, parse: [] },
+        allowedMentions: { repliedUser: true, parse: ["users", "roles", "everyone"] },
       })
       continue
     }
@@ -83,7 +84,7 @@ export const sendFinalResponse = async (input: {
 
     await (input.message.channel as SendableChannels).send({
       content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
-      allowedMentions: { parse: [] },
+      allowedMentions: { parse: ["users", "roles", "everyone"] },
     })
   }
 }
@@ -92,7 +93,7 @@ export const sendProgressUpdate = async (input: {
   message: Message
   text: string
 }) => {
-  const safeText = input.text.trim()
+  const safeText = normalizeOutgoingMentions(input.message, input.text).trim()
   if (!safeText) {
     return
   }
@@ -105,7 +106,7 @@ export const sendProgressUpdate = async (input: {
   for (const chunk of chunks) {
     await (input.message.channel as SendableChannels).send({
       content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
-      allowedMentions: { parse: [] },
+      allowedMentions: { parse: ["users", "roles", "everyone"] },
       flags: MessageFlags.SuppressNotifications,
     })
   }

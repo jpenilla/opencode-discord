@@ -104,7 +104,7 @@ export const ToolBridgeLive = Layer.scoped(
           await activeRun.discordMessage.channel.send({
             content: payload.caption,
             files: [filePath],
-            allowedMentions: { parse: [] },
+            allowedMentions: { parse: ["users", "roles", "everyone"] },
           })
 
           return json({ ok: true, message: `Sent file ${payload.path}` })
@@ -126,7 +126,7 @@ export const ToolBridgeLive = Layer.scoped(
           await activeRun.discordMessage.channel.send({
             content: payload.caption,
             files: [imagePath],
-            allowedMentions: { parse: [] },
+            allowedMentions: { parse: ["users", "roles", "everyone"] },
           })
 
           return json({ ok: true, message: `Sent image ${payload.path}` })
