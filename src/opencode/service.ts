@@ -1,16 +1,19 @@
-import { createOpencode, createOpencodeClient, type GlobalEvent, type OpencodeClient } from "@opencode-ai/sdk/v2"
-import { Cause, Chunk, Context, Effect, Layer } from "effect"
+import { createOpencodeClient, type GlobalEvent, type OpencodeClient } from "@opencode-ai/sdk/v2"
+import { Cause, Chunk, Context, Effect, Fiber, Layer } from "effect"
 import { fileURLToPath } from "node:url"
 
 import { AppConfig } from "@/config.ts"
 import { OpencodeEventQueue, type OpencodeEventQueueShape } from "@/opencode/events.ts"
 import { renderTranscript } from "@/opencode/transcript.ts"
+import { describeSandboxBackend, launchSandboxedServer, type ResolvedSandboxBackend } from "@/sandbox/backend.ts"
 import { Logger, type LoggerShape } from "@/util/logging.ts"
 
 export type SessionHandle = {
   sessionId: string
   client: OpencodeClient
   workdir: string
+  backend: ResolvedSandboxBackend
+  close: () => Effect.Effect<void>
 }
 
 export type PromptResult = {
@@ -101,118 +104,87 @@ export const OpencodeServiceLive = Layer.scoped(
     const config = yield* AppConfig
     const eventQueue = yield* OpencodeEventQueue
     const logger = yield* Logger
-    yield* logger.info("starting opencode server", {
+    const resolvedBackend = describeSandboxBackend(config.sandboxBackend)
+
+    yield* logger.info("configured opencode sandbox backend", {
+      backend: resolvedBackend,
       configDir: OPENCODE_CONFIG_DIR,
-      host: LOCALHOST,
-      port: config.opencodeServerPort,
     })
 
-    yield* Effect.acquireRelease(
-      Effect.sync(() => {
-        const previousBridgeUrl = process.env.OPENCODE_DISCORD_BRIDGE_URL
-        const previousBridgeToken = process.env.OPENCODE_DISCORD_BRIDGE_TOKEN
-        const previousConfigDir = process.env.OPENCODE_CONFIG_DIR
-
-        process.env.OPENCODE_DISCORD_BRIDGE_URL = `http://${LOCALHOST}:${config.toolBridgePort}`
-        process.env.OPENCODE_DISCORD_BRIDGE_TOKEN = config.toolBridgeToken
-        process.env.OPENCODE_CONFIG_DIR = OPENCODE_CONFIG_DIR
-
-        return {
-          previousBridgeUrl,
-          previousBridgeToken,
-          previousConfigDir,
-        }
-      }),
-      ({ previousBridgeUrl, previousBridgeToken, previousConfigDir }) =>
-        Effect.sync(() => {
-          if (previousBridgeUrl === undefined) {
-            delete process.env.OPENCODE_DISCORD_BRIDGE_URL
-          } else {
-            process.env.OPENCODE_DISCORD_BRIDGE_URL = previousBridgeUrl
-          }
-
-          if (previousBridgeToken === undefined) {
-            delete process.env.OPENCODE_DISCORD_BRIDGE_TOKEN
-          } else {
-            process.env.OPENCODE_DISCORD_BRIDGE_TOKEN = previousBridgeToken
-          }
-
-          if (previousConfigDir === undefined) {
-            delete process.env.OPENCODE_CONFIG_DIR
-          } else {
-            process.env.OPENCODE_CONFIG_DIR = previousConfigDir
-          }
-        }),
-    )
-
-    const runtime = yield* Effect.acquireRelease(
-      Effect.tryPromise(() =>
-        createOpencode({
-          hostname: LOCALHOST,
-          port: config.opencodeServerPort,
-          timeout: 10_000,
-        }),
-      ),
-      ({ server }) =>
-        Effect.gen(function* () {
-          yield* logger.info("stopping opencode server")
-          yield* Effect.sync(() => {
-            server.close()
-          })
-        }),
-    )
-
-    yield* logger.info("opencode server ready", {
-      url: runtime.server.url,
-    })
-
-    const abortController = yield* Effect.acquireRelease(
-      Effect.sync(() => new AbortController()),
-      (controller) =>
-        Effect.sync(() => {
-          controller.abort()
-        }),
-    )
-
-    yield* consumeEvents({
-      client: runtime.client,
-      eventQueue,
-      logger,
-      signal: abortController.signal,
-    }).pipe(
-      Effect.tapErrorCause((cause) =>
-        isExpectedAbort(cause, abortController.signal)
-          ? Effect.void
-          : logger.warn("opencode event stream closed unexpectedly", {
-              error: Cause.pretty(cause),
-            }),
-      ),
-      Effect.ignore,
-      Effect.forkScoped,
-    )
+    if (resolvedBackend === "unsafe-dev") {
+      yield* logger.warn("opencode sandbox backend is running in unsafe development mode", {
+        platform: process.platform,
+      })
+    }
 
     return {
       createSession: (workdir, title) =>
         Effect.gen(function* () {
+          const server = yield* Effect.promise(() =>
+            launchSandboxedServer({
+              config,
+              configDir: OPENCODE_CONFIG_DIR,
+              workdir,
+            }),
+          )
+
           const client = createOpencodeClient({
-            baseUrl: runtime.server.url,
+            baseUrl: server.url,
             directory: workdir,
           })
-          const result = yield* Effect.promise(() => client.session.create({ title }))
-          if (result.error || !result.data) {
-            throw new Error(`Failed to create opencode session: ${formatValue(result.error)}`)
-          }
-
-          yield* logger.info("created opencode session", {
-            sessionId: result.data.id,
-            workdir,
-          })
-
-          return {
-            sessionId: result.data.id,
+          const abortController = new AbortController()
+          const eventFiber = yield* consumeEvents({
             client,
-            workdir,
-          } satisfies SessionHandle
+            eventQueue,
+            logger,
+            signal: abortController.signal,
+          }).pipe(
+            Effect.tapErrorCause((cause) =>
+              isExpectedAbort(cause, abortController.signal)
+                ? Effect.void
+                : logger.warn("opencode event stream closed unexpectedly", {
+                    backend: server.backend,
+                    workdir,
+                    error: Cause.pretty(cause),
+                  }),
+            ),
+            Effect.ignore,
+            Effect.fork,
+          )
+
+          const close = () =>
+            Effect.gen(function* () {
+              abortController.abort()
+              yield* Fiber.interrupt(eventFiber)
+              yield* Effect.sync(() => {
+                server.close()
+              })
+            })
+
+          try {
+            const result = yield* Effect.promise(() => client.session.create({ title }))
+            if (result.error || !result.data) {
+              throw new Error(`Failed to create opencode session: ${formatValue(result.error)}`)
+            }
+
+            yield* logger.info("created opencode session", {
+              sessionId: result.data.id,
+              backend: server.backend,
+              serverUrl: server.url,
+              workdir,
+            })
+
+            return {
+              sessionId: result.data.id,
+              client,
+              workdir,
+              backend: server.backend,
+              close,
+            } satisfies SessionHandle
+          } catch (error) {
+            yield* close().pipe(Effect.ignore)
+            throw error
+          }
         }),
       prompt: (session, prompt) =>
         Effect.gen(function* () {

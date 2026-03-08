@@ -399,6 +399,7 @@ export const ChannelSessionsLive = Layer.scoped(
         yield* logger.info("created channel session", {
           channelId: message.channelId,
           sessionId: opencodeSession.sessionId,
+          backend: opencodeSession.backend,
           workdir,
           triggerPhrase: config.triggerPhrase,
         })
@@ -420,6 +421,7 @@ export const ChannelSessionsLive = Layer.scoped(
         const sessions = yield* Ref.get(sessionsRef)
         for (const session of sessions.values()) {
           yield* Queue.shutdown(session.queue)
+          yield* session.opencode.close().pipe(Effect.ignore)
           yield* Effect.promise(() => rm(resolve(session.workdir), { recursive: true, force: true }))
         }
         yield* FiberSet.clear(fiberSet)
