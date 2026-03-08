@@ -1,30 +1,7 @@
-import type { PatchPart, StepFinishPart } from "@opencode-ai/sdk/v2"
-import type { EventPermissionReplied, PermissionRequest, SessionStatus, ToolPart } from "@opencode-ai/sdk/v2"
-
-const formatToolTitle = (tool: ToolPart) => {
-  switch (tool.state.status) {
-    case "running":
-    case "completed":
-      return tool.state.title
-    default:
-      return tool.tool
-  }
-}
+import type { PatchPart } from "@opencode-ai/sdk/v2"
+import type { EventPermissionReplied, PermissionRequest, SessionStatus } from "@opencode-ai/sdk/v2"
 
 export const formatRunStarted = () => "## 🚀 Run started\n- Opencode is working on it"
-
-export const formatAssistantMessageStarted = (count: number) =>
-  count === 1
-    ? "## 💬 Assistant update\n- The assistant started composing a response"
-    : `## 💬 Assistant update\n- The assistant started message ${count}`
-
-export const formatAssistantMessageCompleted = () => "## 🧾 Assistant draft complete\n- A stable assistant message was finalized"
-
-export const formatStepStarted = (count: number) =>
-  count === 1 ? "## 🪜 Step started\n- Opencode began step 1" : `## 🪜 Step started\n- Opencode began step ${count}`
-
-export const formatStepFinished = (part: StepFinishPart) =>
-  [`## ✅ Step finished`, `- Reason: ${part.reason}`, `- Cost: ${part.cost.toFixed(6)}`].join("\n")
 
 export const formatPatchUpdated = (part: PatchPart) =>
   part.files.length === 0
@@ -38,26 +15,13 @@ export const formatSessionStatus = (status: SessionStatus) => {
     case "busy":
       return null
     case "idle":
-      return "## ✅ Run idle\n- Opencode reported the session is idle"
+      return null
     case "retry":
       return [
         "## 🔁 Retrying",
         `- Attempt: ${status.attempt}`,
         `- Reason: ${status.message}`,
       ].join("\n")
-  }
-}
-
-export const formatToolUpdate = (tool: ToolPart) => {
-  switch (tool.state.status) {
-    case "pending":
-      return [`## 🧰 Tool queued`, `- Tool: \`${tool.tool}\``].join("\n")
-    case "running":
-      return [`## 🛠️ Tool running`, `- Tool: \`${tool.tool}\``, `- Step: ${formatToolTitle(tool)}`].join("\n")
-    case "completed":
-      return [`## ✅ Tool finished`, `- Tool: \`${tool.tool}\``, `- Step: ${formatToolTitle(tool)}`].join("\n")
-    case "error":
-      return ["## ❌ Tool failed", `- Tool: \`${tool.tool}\``, `- Error: ${tool.state.error}`].join("\n")
   }
 }
 

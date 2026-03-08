@@ -8,18 +8,13 @@ import type { Message } from "discord.js"
 import { AppConfig } from "@/config.ts"
 import { formatErrorResponse } from "@/discord/formatting.ts"
 import { buildOpencodePrompt, sendFinalResponse, sendProgressUpdate, startTypingLoop, summarizeAttachments, summarizeEmbeds } from "@/discord/messages.ts"
+import { upsertToolCard } from "@/discord/tool-card.ts"
 import {
-  formatAssistantMessageCompleted,
-  formatAssistantMessageStarted,
   formatPatchUpdated,
   formatPermissionAsked,
   formatPermissionReplied,
-  formatRunStarted,
   formatSessionStatus,
-  formatStepFinished,
-  formatStepStarted,
   formatTextReady,
-  formatToolUpdate,
 } from "@/discord/progress.ts"
 import {
   OpencodeEventQueue,
@@ -29,8 +24,6 @@ import {
   getPermissionReplied,
   getPermissionUpdated,
   getSessionStatusUpdated,
-  getStepFinishPart,
-  getStepStartPart,
   getTextPart,
   getToolPartUpdated,
 } from "@/opencode/events.ts"
@@ -111,48 +104,19 @@ export const ChannelSessionsLive = Layer.scoped(
       })
 
     const progressUpdateForEvent = (event: RunProgressEvent, state: {
-      assistantMessageIds: Set<string>
-      completedAssistantMessageIds: Set<string>
-      stepIds: Set<string>
-      finishedStepIds: Set<string>
       textPartIds: Set<string>
       patchPartIds: Set<string>
       toolStates: Map<string, string>
+      toolCards: Map<string, Message>
+      toolIndices: Map<string, number>
+      nextToolIndex: number
       permissionReplies: Map<string, string>
       pendingPermissions: Set<string>
       retryStatusKeys: Set<string>
     }) => {
       switch (event.type) {
         case "run-started":
-          return formatRunStarted()
-        case "assistant-message-started": {
-          if (state.assistantMessageIds.has(event.messageId)) {
-            return null
-          }
-          state.assistantMessageIds.add(event.messageId)
-          return formatAssistantMessageStarted(state.assistantMessageIds.size)
-        }
-        case "assistant-message-completed": {
-          if (state.completedAssistantMessageIds.has(event.messageId)) {
-            return null
-          }
-          state.completedAssistantMessageIds.add(event.messageId)
-          return formatAssistantMessageCompleted()
-        }
-        case "step-started": {
-          if (state.stepIds.has(event.stepId)) {
-            return null
-          }
-          state.stepIds.add(event.stepId)
-          return formatStepStarted(state.stepIds.size)
-        }
-        case "step-finished": {
-          if (state.finishedStepIds.has(event.part.id)) {
-            return null
-          }
-          state.finishedStepIds.add(event.part.id)
-          return formatStepFinished(event.part)
-        }
+          return null
         case "patch-updated": {
           if (state.patchPartIds.has(event.part.id)) {
             return null
@@ -176,16 +140,6 @@ export const ChannelSessionsLive = Layer.scoped(
             state.retryStatusKeys.add(key)
           }
           return formatSessionStatus(event.status)
-        case "tool-updated": {
-          const title = event.part.state.status === "running" || event.part.state.status === "completed" ? event.part.state.title : ""
-          const nextKey = `${event.part.state.status}:${title}`
-          const previousKey = state.toolStates.get(event.part.callID)
-          if (previousKey === nextKey) {
-            return null
-          }
-          state.toolStates.set(event.part.callID, nextKey)
-          return formatToolUpdate(event.part)
-        }
         case "permission-asked": {
           if (state.pendingPermissions.has(event.permission.id)) {
             return null
@@ -207,13 +161,12 @@ export const ChannelSessionsLive = Layer.scoped(
     const runProgressWorker = (message: Message, queue: Queue.Queue<RunProgressEvent>) =>
       Effect.gen(function* () {
         const state = {
-          assistantMessageIds: new Set<string>(),
-          completedAssistantMessageIds: new Set<string>(),
-          stepIds: new Set<string>(),
-          finishedStepIds: new Set<string>(),
           textPartIds: new Set<string>(),
           patchPartIds: new Set<string>(),
           toolStates: new Map<string, string>(),
+          toolCards: new Map<string, Message>(),
+          toolIndices: new Map<string, number>(),
+          nextToolIndex: 1,
           permissionReplies: new Map<string, string>(),
           pendingPermissions: new Set<string>(),
           retryStatusKeys: new Set<string>(),
@@ -225,6 +178,35 @@ export const ChannelSessionsLive = Layer.scoped(
           const batch = [first, ...Chunk.toReadonlyArray(rest)]
 
           for (const event of batch) {
+            if (event.type === "tool-updated") {
+              const title = event.part.state.status === "running" || event.part.state.status === "completed" ? event.part.state.title : ""
+              const nextKey = `${event.part.state.status}:${title}`
+              const previousKey = state.toolStates.get(event.part.callID)
+              if (previousKey === nextKey) {
+                continue
+              }
+              state.toolStates.set(event.part.callID, nextKey)
+
+              const existingCard = state.toolCards.get(event.part.callID) ?? null
+              const existingToolIndex = state.toolIndices.get(event.part.callID)
+              const toolIndex = existingToolIndex ?? state.nextToolIndex
+              if (existingToolIndex === undefined) {
+                state.toolIndices.set(event.part.callID, toolIndex)
+                state.nextToolIndex += 1
+              }
+
+              const toolCard = yield* Effect.promise(() =>
+                upsertToolCard({
+                  sourceMessage: message,
+                  existingCard,
+                  toolIndex,
+                  part: event.part,
+                }),
+              )
+              state.toolCards.set(event.part.callID, toolCard)
+              continue
+            }
+
             const update = progressUpdateForEvent(event, state)
             if (!update) {
               continue
@@ -256,19 +238,8 @@ export const ChannelSessionsLive = Layer.scoped(
               const messageId = assistantMessage.properties.info.id
               if (!assistantMessageId) {
                 assistantMessageId = messageId
-                progressEvents.push({
-                  type: "assistant-message-started",
-                  messageId,
-                })
               } else if (assistantMessageId !== messageId) {
                 return Effect.void
-              }
-
-              if ("completed" in assistantMessage.properties.info.time && assistantMessage.properties.info.time.completed) {
-                progressEvents.push({
-                  type: "assistant-message-completed",
-                  messageId,
-                })
               }
             }
 
@@ -280,28 +251,6 @@ export const ChannelSessionsLive = Layer.scoped(
               progressEvents.push({
                 type: "tool-updated",
                 part: toolPart,
-              })
-            }
-
-            const stepStartPart = getStepStartPart(wrapped.payload)
-            if (stepStartPart) {
-              if (!assistantMessageId || stepStartPart.messageID !== assistantMessageId) {
-                return Effect.void
-              }
-              progressEvents.push({
-                type: "step-started",
-                stepId: stepStartPart.id,
-              })
-            }
-
-            const stepFinishPart = getStepFinishPart(wrapped.payload)
-            if (stepFinishPart) {
-              if (!assistantMessageId || stepFinishPart.messageID !== assistantMessageId) {
-                return Effect.void
-              }
-              progressEvents.push({
-                type: "step-finished",
-                part: stepFinishPart,
               })
             }
 

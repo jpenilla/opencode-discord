@@ -7,8 +7,6 @@ import type {
   EventSessionStatus,
   GlobalEvent,
   PermissionRequest,
-  StepFinishPart,
-  StepStartPart,
   TextPart,
   ToolPart,
 } from "@opencode-ai/sdk/v2"
@@ -99,22 +97,6 @@ export const getMessagePartUpdated = (event: Event): EventMessagePartUpdated | n
     return null
   }
   return event
-}
-
-export const getStepStartPart = (event: Event): StepStartPart | null => {
-  const partUpdated = getMessagePartUpdated(event)
-  if (!partUpdated || partUpdated.properties.part.type !== "step-start") {
-    return null
-  }
-  return partUpdated.properties.part
-}
-
-export const getStepFinishPart = (event: Event): StepFinishPart | null => {
-  const partUpdated = getMessagePartUpdated(event)
-  if (!partUpdated || partUpdated.properties.part.type !== "step-finish") {
-    return null
-  }
-  return partUpdated.properties.part
 }
 
 export const getPatchPart = (event: Event): PatchPart | null => {

@@ -8,6 +8,7 @@
     "typecheck": "tsgo -p tsconfig.json"
   },
   "dependencies": {
+    "@discordjs/builders": "^1.13.1",
     "@effect/platform-bun": "^0.87.1",
     "@opencode-ai/plugin": "^1.2.20",
     "@opencode-ai/sdk": "^1.2.20",
