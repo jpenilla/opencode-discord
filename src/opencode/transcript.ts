@@ -6,7 +6,10 @@ export const renderTranscript = (parts: any[]) => {
 
   for (const part of parts) {
     if (part.type === "tool") {
-      lines.push(renderToolTranscriptPart(part))
+      const tool = renderToolTranscriptPart(part)
+      if (tool) {
+        lines.push(tool)
+      }
       continue
     }
 

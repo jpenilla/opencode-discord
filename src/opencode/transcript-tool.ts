@@ -30,9 +30,23 @@ const formatToolState = (value: unknown) => {
 
 const toolStateLanguage = (value: unknown) => (typeof value === "string" ? "text" : "json")
 
+const isDismissedQuestionError = (part: any, error: string) => {
+  if (part.tool !== "question" || part.state?.status !== "error") {
+    return false
+  }
+
+  const normalized = error.toLowerCase()
+  return normalized.includes("dismissed this question") || normalized.includes("user dismissed")
+}
+
 export const renderToolTranscriptPart = (part: any) => {
   const status = part.state?.status ?? "unknown"
   const title = part.state?.title ? ` - ${part.state.title}` : ""
+  const error = formatToolState(part.state?.error)
+  if (isDismissedQuestionError(part, error)) {
+    return ""
+  }
+
   const sections = [`## ${status === "completed" ? "✅" : status === "error" ? "❌" : "🔧"} Tool: \`${part.tool}\``, `- Status: \`${status}\`${title}`]
   const input = formatToolState(part.state?.input)
   if (input) {
@@ -42,7 +56,6 @@ export const renderToolTranscriptPart = (part: any) => {
   if (output) {
     sections.push("", "### Output", formatCodeBlock(output))
   }
-  const error = formatToolState(part.state?.error)
   if (error) {
     sections.push("", "### Error", formatCodeBlock(error))
   }

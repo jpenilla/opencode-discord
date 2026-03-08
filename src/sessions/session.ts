@@ -12,6 +12,11 @@ export type RunRequest = {
   prompt: string
 }
 
+export type QuestionOutcome =
+  | { _tag: "none" }
+  | { _tag: "user-rejected" }
+  | { _tag: "ui-failure"; message: string; notified: boolean }
+
 export type ActiveRun = {
   discordMessage: Message
   workdir: string
@@ -19,6 +24,7 @@ export type ActiveRun = {
   followUpQueue: Queue<RunRequest>
   acceptFollowUps: Ref<boolean>
   typing: TypingLoop
+  questionOutcome: QuestionOutcome
 }
 
 export type RunProgressEvent =

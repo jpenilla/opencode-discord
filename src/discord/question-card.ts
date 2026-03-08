@@ -1,3 +1,4 @@
+import { ContainerBuilder, SeparatorBuilder, TextDisplayBuilder } from "@discordjs/builders"
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -17,6 +18,13 @@ import type { QuestionAnswer, QuestionInfo, QuestionRequest } from "@opencode-ai
 const CUSTOM_ID_PREFIX = "ocq"
 const MODAL_INPUT_ID = "answer"
 export const QUESTION_OPTIONS_PER_PAGE = 25
+const QUESTION_STATUS_COLORS = {
+  active: 0x4f8cff,
+  submitting: 0xf0b429,
+  answered: 0x2bb673,
+  rejected: 0xd64545,
+  expired: 0x6b7280,
+} as const
 
 export type QuestionDraft = {
   selectedOptions: string[]
@@ -56,6 +64,23 @@ const compact = (value: string, maxLength: number) => {
 const lines = (...parts: Array<string | null | undefined | false>) => parts.filter(Boolean).join("\n")
 
 const questionAllowsCustom = (question: QuestionInfo) => question.custom !== false
+
+const statusTitle = (status: PendingQuestionBatchView["status"]) => {
+  switch (status) {
+    case "active":
+      return "❓ Questions need answers"
+    case "submitting":
+      return "⏳ Submitting answers"
+    case "answered":
+      return "✅ Questions answered"
+    case "rejected":
+      return "⛔ Questions rejected"
+    case "expired":
+      return "⏱️ Questions expired"
+  }
+}
+
+const questionModeLabel = (question: QuestionInfo) => (question.multiple ? "Pick many" : "Pick one")
 
 const questionAnswer = (question: QuestionInfo, draft: QuestionDraft): QuestionAnswer => {
   if (question.multiple) {
@@ -146,62 +171,128 @@ export const parseQuestionActionId = (customId: string): QuestionAction | null =
   }
 }
 
-const renderQuestionBody = (input: PendingQuestionBatchView) => {
-  if (input.status === "answered" || input.status === "rejected" || input.status === "expired") {
-    const resolvedAnswers = input.resolvedAnswers ?? input.request.questions.map((question, index) => questionAnswer(question, input.drafts[index] ?? emptyQuestionDraft()))
-    return lines(
-      input.status === "answered"
-        ? "## ✅ Questions answered"
-        : input.status === "rejected"
-          ? "## ⛔ Questions rejected"
-          : "## ⏱️ Questions expired",
-      ...input.request.questions.flatMap((question, index) => {
-        const answers = resolvedAnswers[index] ?? []
-        return ["", `**${question.header}**`, question.question, answerSummary(answers)]
-      }),
-    )
+const optionLabel = (question: QuestionInfo, page: number) => {
+  const options = optionSlice(question, page)
+  if (question.options.length === 0) {
+    return null
   }
 
+  return options.totalPages === 1
+    ? `${question.options.length} option${question.options.length === 1 ? "" : "s"}`
+    : `Options ${options.start + 1}-${options.start + options.items.length} of ${question.options.length} • page ${options.page + 1}/${options.totalPages}`
+}
+
+const renderQuestionMeta = (input: PendingQuestionBatchView) => {
+  const question = input.request.questions[input.page]!
+  const answered = answerCount(input.request, input.drafts)
+  return [
+    `Question ${input.page + 1}/${input.request.questions.length}`,
+    `${answered}/${input.request.questions.length} answered`,
+    questionModeLabel(question),
+    questionAllowsCustom(question) ? "Other allowed" : null,
+    optionLabel(question, input.optionPages[input.page] ?? 0),
+  ]
+    .filter(Boolean)
+    .join(" • ")
+}
+
+const renderActiveQuestionText = (input: PendingQuestionBatchView) => {
+  const question = input.request.questions[input.page]!
+  return lines(`### ${question.header}`, question.question)
+}
+
+const renderAnswerText = (input: PendingQuestionBatchView) => {
   const question = input.request.questions[input.page]!
   const draft = input.drafts[input.page] ?? emptyQuestionDraft()
   const answers = questionAnswer(question, draft)
-  const answered = answerCount(input.request, input.drafts)
-  const options = optionSlice(question, input.optionPages[input.page] ?? 0)
-  const optionLabel =
-    question.options.length === 0
-      ? null
-      : options.totalPages === 1
-        ? `${question.options.length} option${question.options.length === 1 ? "" : "s"}`
-        : `Options ${options.start + 1}-${options.start + options.items.length} of ${question.options.length} (page ${options.page + 1}/${options.totalPages})`
+  return lines("**Current answer**", answerSummary(answers))
+}
+
+const renderQuestionHints = (input: PendingQuestionBatchView) => {
+  const question = input.request.questions[input.page]!
+  const hints = [
+    input.request.questions.length > 1 ? "Use Prev/Next to review the whole batch before submitting." : null,
+    question.options.length > QUESTION_OPTIONS_PER_PAGE
+      ? "This question has more than 25 options. Use the choice paging buttons to browse them."
+      : null,
+  ].filter(Boolean)
+
+  if (hints.length === 0) {
+    return null
+  }
 
   return lines(
-    input.status === "submitting" ? "## ⏳ Submitting answers..." : "## ❓ Questions need answers",
-    `**${question.header}**`,
-    `Question ${input.page + 1}/${input.request.questions.length} · ${answered}/${input.request.questions.length} answered`,
-    optionLabel ? optionLabel : null,
-    "",
-    question.question,
-    "",
-    "Current answer:",
-    answerSummary(answers),
-    question.options.length > QUESTION_OPTIONS_PER_PAGE
-      ? "_This question has more than 25 options. Use the option page buttons to navigate the full list._"
-      : null,
-    question.multiple ? "_Multiple selections allowed._" : null,
-    questionAllowsCustom(question) ? "_Use Other... for a custom answer._" : null,
+    "**How to answer**",
+    ...hints.map((hint) => `- ${hint}`),
   )
 }
 
-const renderQuestionComponents = (input: PendingQuestionBatchView) => {
-  if (input.status !== "active") {
-    return []
+const renderResolvedQuestionSection = (question: QuestionInfo, answers: ReadonlyArray<string>) =>
+  lines(
+    `### ${question.header}`,
+    question.question,
+    answers.length > 0
+      ? lines(
+          "",
+          "**Answer**",
+          answerSummary(answers),
+        )
+      : null,
+  )
+
+const renderResolvedQuestionSections = (input: PendingQuestionBatchView) => {
+  const resolvedAnswers =
+    input.resolvedAnswers ??
+    input.request.questions.map((question, index) => questionAnswer(question, input.drafts[index] ?? emptyQuestionDraft()))
+
+  return input.request.questions.map((question, index) =>
+    renderResolvedQuestionSection(question, resolvedAnswers[index] ?? []),
+  )
+}
+
+const renderQuestionContainer = (input: PendingQuestionBatchView) => {
+  const container = new ContainerBuilder().setAccentColor(QUESTION_STATUS_COLORS[input.status])
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(
+      lines(
+        `## ${statusTitle(input.status)}`,
+        input.status === "active" || input.status === "submitting" ? renderQuestionMeta(input) : `${input.request.questions.length} question${input.request.questions.length === 1 ? "" : "s"}`,
+      ),
+    ),
+  )
+
+  if (input.status === "answered" || input.status === "rejected" || input.status === "expired") {
+    for (const section of renderResolvedQuestionSections(input)) {
+      container.addSeparatorComponents(new SeparatorBuilder())
+      container.addTextDisplayComponents(new TextDisplayBuilder().setContent(section))
+    }
+    return container
   }
 
   const question = input.request.questions[input.page]!
   const draft = input.drafts[input.page] ?? emptyQuestionDraft()
   const options = optionSlice(question, input.optionPages[input.page] ?? 0)
   const allAnswered = input.request.questions.every((item, index) => questionAnswered(item, input.drafts[index] ?? emptyQuestionDraft()))
-  const components: Array<ActionRowBuilder<any>> = []
+  const optionPageLabel =
+    options.totalPages > 1
+      ? lines(
+          `**Choice page ${options.page + 1}/${options.totalPages}**`,
+          `${options.start + 1}-${options.start + options.items.length} of ${question.options.length} options`,
+        )
+      : null
+
+  container.addSeparatorComponents(new SeparatorBuilder())
+  container.addTextDisplayComponents(new TextDisplayBuilder().setContent(renderActiveQuestionText(input)))
+  container.addTextDisplayComponents(new TextDisplayBuilder().setContent(renderAnswerText(input)))
+  if (optionPageLabel) {
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(optionPageLabel))
+  }
+
+  const hints = renderQuestionHints(input)
+  if (hints) {
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(hints))
+  }
 
   if (question.options.length > 0) {
     const select = new StringSelectMenuBuilder()
@@ -225,7 +316,7 @@ const renderQuestionComponents = (input: PendingQuestionBatchView) => {
         ),
       )
 
-    components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select))
+    container.addActionRowComponents((row) => row.addComponents(select))
   }
 
   const questionButtons = [
@@ -255,30 +346,30 @@ const renderQuestionComponents = (input: PendingQuestionBatchView) => {
     )
   }
 
-  components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(questionButtons))
+  container.addActionRowComponents((row) => row.addComponents(...questionButtons))
 
   if (options.totalPages > 1) {
-    components.push(
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
+    container.addActionRowComponents(
+      (row) => row.addComponents(
         new ButtonBuilder()
           .setCustomId(setQuestionActionId({ kind: "option-prev", requestID: input.request.id, questionIndex: input.page }))
-          .setLabel("Prev options")
+          .setLabel("Prev choices")
           .setStyle(ButtonStyle.Secondary)
           .setDisabled(options.page === 0),
         new ButtonBuilder()
           .setCustomId(setQuestionActionId({ kind: "option-next", requestID: input.request.id, questionIndex: input.page }))
-          .setLabel("Next options")
+          .setLabel("Next choices")
           .setStyle(ButtonStyle.Secondary)
           .setDisabled(options.page === options.totalPages - 1),
       ),
     )
   }
 
-  components.push(
-    new ActionRowBuilder<ButtonBuilder>().addComponents(
+  container.addActionRowComponents(
+    (row) => row.addComponents(
       new ButtonBuilder()
         .setCustomId(setQuestionActionId({ kind: "submit", requestID: input.request.id }))
-        .setLabel("Submit answers")
+        .setLabel(`Submit ${answerCount(input.request, input.drafts)}/${input.request.questions.length}`)
         .setStyle(ButtonStyle.Success)
         .setDisabled(!allAnswered),
       new ButtonBuilder()
@@ -288,21 +379,23 @@ const renderQuestionComponents = (input: PendingQuestionBatchView) => {
     ),
   )
 
-  return components
+  return container
 }
 
 const renderQuestionMessage = (input: PendingQuestionBatchView) => ({
-  content: renderQuestionBody(input),
-  components: renderQuestionComponents(input),
-  allowedMentions: { parse: [] as Array<never> },
+  components: [renderQuestionContainer(input)],
 })
 
 export const createQuestionMessageCreate = (input: PendingQuestionBatchView): MessageCreateOptions => ({
   ...renderQuestionMessage(input),
-  flags: MessageFlags.SuppressNotifications,
+  flags: MessageFlags.IsComponentsV2,
 })
 
-export const createQuestionMessageEdit = (input: PendingQuestionBatchView): MessageEditOptions => renderQuestionMessage(input)
+export const createQuestionMessageEdit = (input: PendingQuestionBatchView): MessageEditOptions => ({
+  ...renderQuestionMessage(input),
+  content: null,
+  flags: MessageFlags.IsComponentsV2,
+})
 
 export const questionDrafts = (request: QuestionRequest) => request.questions.map(() => emptyQuestionDraft())
 

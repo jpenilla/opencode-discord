@@ -44,7 +44,7 @@ import {
 import type { Invocation } from "@/discord/triggers.ts"
 import { OpencodeService } from "@/opencode/service.ts"
 import { collectProgressEvents, runProgressWorker } from "@/sessions/progress.ts"
-import type { ActiveRun, ChannelSession, RunProgressEvent, RunRequest } from "@/sessions/session.ts"
+import type { ActiveRun, ChannelSession, QuestionOutcome, RunProgressEvent, RunRequest } from "@/sessions/session.ts"
 import { Logger } from "@/util/logging.ts"
 
 export type ChannelSessionsShape = {
@@ -86,6 +86,14 @@ type SessionRuntimeState = {
   gatesByChannelId: Map<string, SessionGate>
   questionBatchesByRequestId: Map<string, PendingQuestionBatch>
 }
+
+const noQuestionOutcome = (): QuestionOutcome => ({ _tag: "none" })
+const questionUiFailureOutcome = (message: string, notified = false): QuestionOutcome => ({
+  _tag: "ui-failure",
+  message,
+  notified,
+})
+const emptyResolvedAnswers = (request: QuestionRequest): Array<QuestionAnswer> => request.questions.map(() => [])
 const sessionTitle = (channelId: string) => `Discord #${channelId}`
 const createSessionRuntimeState = (): SessionRuntimeState => ({
   sessionsByChannelId: new Map<string, ChannelSession>(),
@@ -293,7 +301,17 @@ export const ChannelSessionsLive = Layer.scoped(
           }
 
           if (hasPendingQuestionsForSession(state, sessionId)) {
-            return Effect.promise(() => activeRun.typing.pause())
+            return Effect.promise(() => activeRun.typing.pause()).pipe(
+              Effect.timeoutOption("1 second"),
+              Effect.flatMap((result) =>
+                result._tag === "Some"
+                  ? Effect.void
+                  : logger.warn("typing pause timed out while question prompt was active", {
+                      channelId: activeRun.discordMessage.channelId,
+                      sessionId,
+                    }),
+              ),
+            )
           }
 
           return Effect.sync(() => {
@@ -323,8 +341,6 @@ export const ChannelSessionsLive = Layer.scoped(
           return
         }
 
-        yield* Effect.promise(() => activeRun.typing.pause())
-
         const batch: PendingQuestionBatch = {
           request,
           session,
@@ -337,10 +353,17 @@ export const ChannelSessionsLive = Layer.scoped(
         }
 
         try {
-          const questionMessage = yield* Effect.promise(() =>
-            activeRun.discordMessage.reply({
-              ...createQuestionMessageCreate(questionBatchView(batch)),
-              allowedMentions: { repliedUser: false, parse: [] },
+          const questionMessage = yield* Effect.tryPromise({
+            try: () =>
+              activeRun.discordMessage.reply({
+                ...createQuestionMessageCreate(questionBatchView(batch)),
+                allowedMentions: { repliedUser: true, parse: ["users", "roles", "everyone"] },
+              }),
+            catch: (error) => error,
+          }).pipe(
+            Effect.timeoutFail({
+              duration: "5 seconds",
+              onTimeout: () => new Error("Timed out sending question batch to Discord"),
             }),
           )
 
@@ -348,14 +371,10 @@ export const ChannelSessionsLive = Layer.scoped(
             ...batch,
             message: questionMessage,
           })
-
-          yield* logger.info("posted question batch", {
-            channelId: session.channelId,
-            sessionId: session.opencode.sessionId,
-            requestId: request.id,
-            questionCount: request.questions.length,
-          })
+          yield* syncTypingForSession(session.opencode.sessionId)
         } catch (error) {
+          const questionUiFailure = formatError(error)
+          activeRun.questionOutcome = questionUiFailureOutcome(questionUiFailure)
           yield* logger.error("failed to post question batch", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
@@ -363,23 +382,33 @@ export const ChannelSessionsLive = Layer.scoped(
             error: formatError(error),
           })
 
-          yield* opencode.rejectQuestion(session.opencode, request.id).pipe(
-            Effect.tap(() =>
-              logger.warn("rejected question batch after UI failure", {
-                channelId: session.channelId,
-                sessionId: session.opencode.sessionId,
-                requestId: request.id,
-              }),
-            ),
-            Effect.catchAll((rejectError) =>
-              logger.error("failed to reject question batch after UI failure", {
-                channelId: session.channelId,
-                sessionId: session.opencode.sessionId,
-                requestId: request.id,
-                error: formatError(rejectError),
-              }),
-            ),
+          const rejectResult = yield* opencode.rejectQuestion(session.opencode, request.id).pipe(
+            Effect.either,
           )
+          if (rejectResult._tag === "Left") {
+            yield* logger.error("failed to reject question batch after UI failure", {
+                channelId: session.channelId,
+                sessionId: session.opencode.sessionId,
+                requestId: request.id,
+                error: formatError(rejectResult.left),
+              })
+
+            yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
+            const failureReply = yield* sendQuestionUiFailure(activeRun.discordMessage, questionUiFailure).pipe(
+              Effect.either,
+            )
+            if (failureReply._tag === "Right") {
+              activeRun.questionOutcome = questionUiFailureOutcome(questionUiFailure, true)
+            } else {
+              yield* logger.error("failed to send question UI failure message", {
+                channelId: session.channelId,
+                sessionId: session.opencode.sessionId,
+                requestId: request.id,
+                error: formatError(failureReply.left),
+              })
+            }
+            return
+          }
 
           yield* syncTypingForSession(session.opencode.sessionId)
         }
@@ -394,7 +423,7 @@ export const ChannelSessionsLive = Layer.scoped(
         const batch = yield* updateQuestionBatch(requestId, (current) => ({
           ...current,
           status,
-          resolvedAnswers,
+          resolvedAnswers: resolvedAnswers ?? (status === "rejected" ? emptyResolvedAnswers(current.request) : undefined),
         }))
         if (!batch) {
           return
@@ -534,13 +563,19 @@ export const ChannelSessionsLive = Layer.scoped(
         })
       })
 
-    const sendRunFailure = (message: Message, error: unknown) =>
+    const sendErrorReply = (message: Message, title: string, error: unknown) =>
       Effect.promise(() =>
         message.reply({
-          content: formatErrorResponse("## ❌ Opencode failed", formatError(error)),
+          content: formatErrorResponse(title, formatError(error)),
           allowedMentions: { repliedUser: false, parse: [] },
         }),
       )
+
+    const sendRunFailure = (message: Message, error: unknown) =>
+      sendErrorReply(message, "## ❌ Opencode failed", error)
+
+    const sendQuestionUiFailure = (message: Message, error: unknown) =>
+      sendErrorReply(message, "## ❌ Failed to show questions", error)
 
     const processRequestBatch = (
       session: ChannelSession,
@@ -561,6 +596,7 @@ export const ChannelSessionsLive = Layer.scoped(
           followUpQueue,
           acceptFollowUps,
           typing,
+          questionOutcome: noQuestionOutcome(),
         })
 
         const stopTyping = Effect.promise(() => typing.stop())
@@ -594,9 +630,18 @@ export const ChannelSessionsLive = Layer.scoped(
             )
           }
 
+          const questionOutcome = session.activeRun?.questionOutcome ?? noQuestionOutcome()
+          const trimmedTranscript = result.transcript.trim()
+
           yield* stopTyping
           yield* finishProgressWorker(session, progressQueue, progressFiber)
-          yield* Effect.promise(() => sendFinalResponse({ message: responseMessage, text: result.transcript }))
+          if (trimmedTranscript) {
+            yield* Effect.promise(() => sendFinalResponse({ message: responseMessage, text: result.transcript }))
+          } else if (questionOutcome._tag === "ui-failure" && !questionOutcome.notified) {
+            yield* sendQuestionUiFailure(responseMessage, questionOutcome.message)
+          } else if (questionOutcome._tag !== "user-rejected") {
+            yield* Effect.promise(() => sendFinalResponse({ message: responseMessage, text: result.transcript }))
+          }
           yield* logger.info("completed run", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
@@ -973,9 +1018,7 @@ export const ChannelSessionsLive = Layer.scoped(
                   }),
                 ),
               )
-              yield* Effect.promise(() =>
-                interaction.reply(questionInteractionReply("Saved custom answer.")),
-              ).pipe(Effect.ignore)
+              yield* Effect.promise(() => interaction.deferUpdate()).pipe(Effect.ignore)
               return true
             }
           case "submit":
@@ -1039,10 +1082,16 @@ export const ChannelSessionsLive = Layer.scoped(
                 interaction.update(createQuestionMessageEdit(questionBatchView(rejecting))),
               )
 
+              if (rejecting.session.activeRun) {
+                rejecting.session.activeRun.questionOutcome = { _tag: "user-rejected" }
+              }
               const rejectResult = yield* opencode.rejectQuestion(rejecting.session.opencode, rejecting.request.id).pipe(
                 Effect.either,
               )
               if (rejectResult._tag === "Left") {
+                if (rejecting.session.activeRun) {
+                  rejecting.session.activeRun.questionOutcome = noQuestionOutcome()
+                }
                 const restored = yield* persistQuestionBatch(action.requestID, (current) => ({
                   ...current,
                   status: "active",
