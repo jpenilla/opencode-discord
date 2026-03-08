@@ -1,7 +1,7 @@
 import { ContainerBuilder, TextDisplayBuilder } from "@discordjs/builders"
 import { MessageFlags, type Message, type SendableChannels } from "discord.js"
 import type { ToolPart } from "@opencode-ai/sdk/v2"
-import { relative, resolve } from "node:path"
+import { resolve } from "node:path"
 
 const EDIT_TOOL_CARDS = true
 
@@ -134,47 +134,24 @@ const normalizePathToken = (token: string) => {
   return trimmed.startsWith("./") ? trimmed.slice(2) : trimmed
 }
 
-const pathCandidates = (path: string, workdir: string) => {
-  const candidates = new Set<string>()
-  const normalized = normalizePathToken(path)
-  candidates.add(resolve(normalized))
-  candidates.add(resolve(workdir, normalized))
-  return [...candidates]
-}
-
-const relativeToWorkdirByPrefix = (path: string, workdir: string) => {
-  const normalized = normalizePathToken(path)
-  for (const alias of workdirAliases(workdir)) {
-    const aliasWithoutRoot = alias.startsWith("/") ? alias.slice(1) : alias
-    if (normalized === aliasWithoutRoot) {
-      return "."
-    }
-    if (normalized.startsWith(`${aliasWithoutRoot}/`)) {
-      return `./${normalized.slice(aliasWithoutRoot.length + 1)}`
-    }
-  }
-  return null
-}
-
 const relativeToWorkdir = (path: string, workdir: string) => {
-  const prefixedPath = relativeToWorkdirByPrefix(path, workdir)
-  if (prefixedPath) {
-    return prefixedPath
-  }
-
-  const candidates = pathCandidates(path, workdir)
+  const normalized = normalizePathToken(path)
   for (const alias of workdirAliases(workdir)) {
-    for (const absolutePath of candidates) {
-      if (absolutePath !== alias && !absolutePath.startsWith(`${alias}/`)) {
-        continue
-      }
-      const rel = relative(alias, absolutePath)
-      if (!rel || rel === ".") {
+    const candidates = [alias]
+    if (alias.startsWith("/")) {
+      candidates.push(alias.slice(1))
+    }
+
+    for (const candidate of candidates) {
+      if (normalized === candidate) {
         return "."
       }
-      return rel.startsWith(".") ? rel : `./${rel}`
+      if (normalized.startsWith(`${candidate}/`)) {
+        return `./${normalized.slice(candidate.length + 1)}`
+      }
     }
   }
+
   return null
 }
 
