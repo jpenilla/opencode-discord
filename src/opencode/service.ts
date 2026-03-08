@@ -5,7 +5,13 @@ import { fileURLToPath } from "node:url"
 import { AppConfig } from "@/config.ts"
 import { OpencodeEventQueue, type OpencodeEventQueueShape } from "@/opencode/events.ts"
 import { renderTranscript } from "@/opencode/transcript.ts"
-import { describeSandboxBackend, launchSandboxedServer, type ResolvedSandboxBackend } from "@/sandbox/backend.ts"
+import {
+  describeSandboxBackend,
+  launchSandboxedServer,
+  probeSandboxExecutables,
+  stageSandboxConfigDirectory,
+  type ResolvedSandboxBackend,
+} from "@/sandbox/backend.ts"
 import { Logger, type LoggerShape } from "@/util/logging.ts"
 
 export type SessionHandle = {
@@ -37,6 +43,9 @@ const formatValue = (value: unknown) => {
   }
   if (typeof value === "string") {
     return value
+  }
+  if (value instanceof Error) {
+    return value.stack ?? value.message
   }
   try {
     return JSON.stringify(value)
@@ -105,10 +114,56 @@ export const OpencodeServiceLive = Layer.scoped(
     const eventQueue = yield* OpencodeEventQueue
     const logger = yield* Logger
     const resolvedBackend = describeSandboxBackend(config.sandboxBackend)
+    const executableProbe = yield* Effect.try({
+      try: () => probeSandboxExecutables(config),
+      catch: (error) => error,
+    }).pipe(
+      Effect.tapError((error) =>
+        logger.error("sandbox executable probe failed", {
+          configuredBackend: config.sandboxBackend,
+          selectedBackend: resolvedBackend,
+          error: formatValue(error),
+        }),
+      ),
+    )
+    const sandboxConfig = yield* (resolvedBackend === "bwrap"
+      ? Effect.acquireRelease(
+          Effect.promise(() => stageSandboxConfigDirectory(OPENCODE_CONFIG_DIR)).pipe(
+            Effect.tapError((error) =>
+              logger.error("failed to stage sandbox config", {
+                sourceConfigDir: OPENCODE_CONFIG_DIR,
+                error: formatValue(error),
+              }),
+            ),
+          ),
+          (config) => Effect.promise(() => config.cleanup()).pipe(Effect.ignore),
+        )
+      : Effect.succeed({
+          configDir: OPENCODE_CONFIG_DIR,
+        }))
+    const launchServer = (workdir: string) =>
+      Effect.promise(() =>
+        launchSandboxedServer({
+          config,
+          configDir: sandboxConfig.configDir,
+          workdir,
+        }),
+      ).pipe(
+        Effect.tapError((error) =>
+          logger.error("failed to launch opencode server", {
+            configuredBackend: config.sandboxBackend,
+            selectedBackend: resolvedBackend,
+            workdir,
+            error: formatValue(error),
+          }),
+        ),
+      )
 
     yield* logger.info("configured opencode sandbox backend", {
       backend: resolvedBackend,
-      configDir: OPENCODE_CONFIG_DIR,
+      configDir: sandboxConfig.configDir,
+      opencodeBin: executableProbe.opencodeBin,
+      bwrapBin: executableProbe.bwrapBin,
     })
 
     if (resolvedBackend === "unsafe-dev") {
@@ -120,13 +175,7 @@ export const OpencodeServiceLive = Layer.scoped(
     return {
       createSession: (workdir, title) =>
         Effect.gen(function* () {
-          const server = yield* Effect.promise(() =>
-            launchSandboxedServer({
-              config,
-              configDir: OPENCODE_CONFIG_DIR,
-              workdir,
-            }),
-          )
+          const server = yield* launchServer(workdir)
 
           const client = createOpencodeClient({
             baseUrl: server.url,

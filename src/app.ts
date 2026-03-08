@@ -2,6 +2,7 @@ import { ActivityType, Client, Events, GatewayIntentBits } from "discord.js"
 import { Context, Effect, Layer, Runtime } from "effect"
 
 import { AppConfig } from "@/config.ts"
+import { formatErrorResponse } from "@/discord/formatting.ts"
 import { detectInvocation } from "@/discord/triggers.ts"
 import { ChannelSessions } from "@/sessions/registry.ts"
 import { Logger } from "@/util/logging.ts"
@@ -11,6 +12,13 @@ export type DiscordBotShape = {
 }
 
 export class DiscordBot extends Context.Tag("DiscordBot")<DiscordBot, DiscordBotShape>() {}
+
+const formatError = (error: unknown) => {
+  if (error instanceof Error) {
+    return error.message
+  }
+  return String(error)
+}
 
 export const DiscordBotLive = Layer.scoped(
   DiscordBot,
@@ -67,12 +75,22 @@ export const DiscordBotLive = Layer.scoped(
 
       Runtime.runFork(runtime)(
         sessions.submit(message, invocation).pipe(
-          Effect.catchAll((error) =>
-            logger.error("failed to enqueue message", {
+          Effect.catchAll((error) => {
+            const formattedError = formatError(error)
+            return logger.error("failed to enqueue message", {
               channelId: message.channelId,
-              error: String(error),
-            }),
-          ),
+              error: formattedError,
+            }).pipe(
+              Effect.zipRight(
+                Effect.promise(() =>
+                  message.reply({
+                    content: formatErrorResponse("## ❌ Failed to start Opencode", formattedError),
+                    allowedMentions: { repliedUser: false, parse: [] },
+                  }),
+                ).pipe(Effect.ignore),
+              ),
+            )
+          }),
         ),
       )
     })

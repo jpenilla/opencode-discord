@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process"
-import { existsSync } from "node:fs"
-import { cp, mkdir, readdir } from "node:fs/promises"
+import { existsSync, realpathSync } from "node:fs"
+import { cp, lstat, mkdir, mkdtemp, readdir, realpath, rm, symlink } from "node:fs/promises"
 import { createServer } from "node:net"
-import { homedir } from "node:os"
-import { dirname, isAbsolute, join } from "node:path"
+import { homedir, tmpdir } from "node:os"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 
 import type { AppConfigShape } from "@/config.ts"
 
@@ -13,6 +13,17 @@ export type SandboxedServer = {
   backend: ResolvedSandboxBackend
   url: string
   close: () => void
+}
+
+export type ProbedExecutables = {
+  backend: ResolvedSandboxBackend
+  opencodeBin: string
+  bwrapBin?: string
+}
+
+export type StagedSandboxConfig = {
+  configDir: string
+  cleanup: () => Promise<void>
 }
 
 type LaunchSandboxedServerInput = {
@@ -87,14 +98,149 @@ const resolveSandboxBackend = (backend: AppConfigShape["sandboxBackend"]): Resol
   return process.platform === "linux" ? "bwrap" : "unsafe-dev"
 }
 
-const resolveBinary = (command: string) => Bun.which(command) ?? command
+const hasPathSegments = (command: string) => command.includes("/") || command.includes("\\")
 
 const resolveSpawnBinary = (command: string, label: string) => {
-  const resolved = resolveBinary(command)
-  if (isAbsolute(resolved) && !existsSync(resolved)) {
-    throw new Error(`${label} binary not found: ${resolved}`)
+  const located = isAbsolute(command)
+    ? command
+    : hasPathSegments(command)
+      ? resolve(command)
+      : Bun.which(command)
+
+  if (!located) {
+    throw new Error(`${label} binary not found in PATH: ${command}`)
   }
-  return resolved
+
+  if (!existsSync(located)) {
+    throw new Error(`${label} binary not found: ${located}`)
+  }
+
+  try {
+    return realpathSync(located)
+  } catch {
+    return located
+  }
+}
+
+export const probeSandboxExecutables = (
+  config: Pick<AppConfigShape, "bwrapBin" | "opencodeBin" | "sandboxBackend">,
+): ProbedExecutables => {
+  const backend = resolveSandboxBackend(config.sandboxBackend)
+  const opencodeBin = resolveSpawnBinary(config.opencodeBin, "opencode")
+  const bwrapBin = backend === "bwrap" ? resolveSpawnBinary(config.bwrapBin, "bwrap") : undefined
+
+  return {
+    backend,
+    opencodeBin,
+    bwrapBin,
+  }
+}
+
+const copyResolvedEntry = async (source: string, destination: string) => {
+  await mkdir(dirname(destination), { recursive: true })
+  await cp(source, destination, {
+    recursive: true,
+    force: true,
+    dereference: true,
+  })
+}
+
+const bunPackageStoreRoot = (target: string) => {
+  let current = target
+  while (true) {
+    const parent = dirname(current)
+    if (parent === current) {
+      return undefined
+    }
+
+    if (basename(parent) === ".bun") {
+      return current
+    }
+
+    current = parent
+  }
+}
+
+const stageNodeModulesDirectory = async (
+  sourceDir: string,
+  destinationDir: string,
+  destinationNodeModulesRoot: string,
+  copiedStoreRoots: Map<string, string>,
+) => {
+  await mkdir(destinationDir, { recursive: true })
+
+  const entries = await readdir(sourceDir, { withFileTypes: true })
+  for (const entry of entries) {
+    const sourcePath = join(sourceDir, entry.name)
+    const destinationPath = join(destinationDir, entry.name)
+    const stats = await lstat(sourcePath)
+
+    if (stats.isSymbolicLink()) {
+      const resolvedTarget = await realpath(sourcePath)
+      const storeRoot = bunPackageStoreRoot(resolvedTarget)
+      if (!storeRoot) {
+        await copyResolvedEntry(sourcePath, destinationPath)
+        continue
+      }
+
+      let stagedStoreRoot = copiedStoreRoots.get(storeRoot)
+      if (!stagedStoreRoot) {
+        stagedStoreRoot = join(destinationNodeModulesRoot, ".bun", basename(storeRoot))
+        await copyResolvedEntry(storeRoot, stagedStoreRoot)
+        copiedStoreRoots.set(storeRoot, stagedStoreRoot)
+      }
+
+      const stagedTarget = join(stagedStoreRoot, relative(storeRoot, resolvedTarget))
+      await mkdir(dirname(destinationPath), { recursive: true })
+      await symlink(relative(dirname(destinationPath), stagedTarget), destinationPath)
+      continue
+    }
+
+    if (stats.isDirectory()) {
+      await stageNodeModulesDirectory(sourcePath, destinationPath, destinationNodeModulesRoot, copiedStoreRoots)
+      continue
+    }
+
+    await copyResolvedEntry(sourcePath, destinationPath)
+  }
+}
+
+export const stageSandboxConfigDirectory = async (sourceDir: string): Promise<StagedSandboxConfig> => {
+  if (!existsSync(sourceDir)) {
+    throw new Error(`Sandbox config directory not found: ${sourceDir}`)
+  }
+
+  const tempRoot = await mkdtemp(join(tmpdir(), "opencode-discord-config-"))
+  const stagedConfigDir = join(tempRoot, "opencode")
+  const cleanup = async () => {
+    await rm(tempRoot, { recursive: true, force: true })
+  }
+
+  try {
+    await mkdir(stagedConfigDir, { recursive: true })
+
+    const copiedStoreRoots = new Map<string, string>()
+    const entries = await readdir(sourceDir, { withFileTypes: true })
+    for (const entry of entries) {
+      const sourcePath = join(sourceDir, entry.name)
+      const destinationPath = join(stagedConfigDir, entry.name)
+
+      if (entry.name === "node_modules") {
+        await stageNodeModulesDirectory(sourcePath, destinationPath, destinationPath, copiedStoreRoots)
+        continue
+      }
+
+      await copyResolvedEntry(sourcePath, destinationPath)
+    }
+
+    return {
+      configDir: stagedConfigDir,
+      cleanup,
+    }
+  } catch (error) {
+    await cleanup()
+    throw error
+  }
 }
 
 const nextAvailablePort = async () =>

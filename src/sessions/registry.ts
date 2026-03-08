@@ -375,8 +375,24 @@ export const ChannelSessionsLive = Layer.scoped(
           }
 
           const finalizingAck = yield* Deferred.make<void>()
-          yield* Queue.offer(progressQueue, { type: "run-finalizing", ack: finalizingAck })
-          yield* Deferred.await(finalizingAck)
+          const progressFiberExit = yield* progressFiber.poll
+          if (progressFiberExit._tag === "None") {
+            yield* Queue.offer(progressQueue, { type: "run-finalizing", ack: finalizingAck })
+            const finalizingResult = yield* Deferred.await(finalizingAck).pipe(Effect.timeoutOption("2 seconds"))
+            if (finalizingResult._tag === "None") {
+              yield* logger.warn("progress worker finalization timed out", {
+                channelId: session.channelId,
+                sessionId: session.opencode.sessionId,
+              })
+            }
+          } else {
+            yield* logger.warn("progress worker exited before finalization", {
+              channelId: session.channelId,
+              sessionId: session.opencode.sessionId,
+              exit: String(progressFiberExit.value),
+            })
+          }
+
           yield* Effect.promise(() => sendFinalResponse({ message: responseMessage, text: result.transcript }))
           yield* logger.info("completed run", {
             channelId: session.channelId,

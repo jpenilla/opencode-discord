@@ -2,6 +2,9 @@
   "name": "opencode-discord",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "opencode"
+  ],
   "scripts": {
     "dev": "bun --env-file=.env src/index.ts",
     "start": "bun --env-file=.env src/index.ts",
@@ -10,7 +13,6 @@
   "dependencies": {
     "@discordjs/builders": "^1.13.1",
     "@effect/platform-bun": "^0.87.1",
-    "@opencode-ai/plugin": "^1.2.20",
     "@opencode-ai/sdk": "^1.2.20",
     "discord.js": "^14.25.1",
     "effect": "^3.19.19"
