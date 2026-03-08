@@ -1,7 +1,6 @@
 import { Context, Effect, Layer } from "effect"
-import { resolve, relative, isAbsolute } from "node:path"
+import { basename, isAbsolute, relative, resolve } from "node:path"
 import { mkdir, writeFile } from "node:fs/promises"
-import { basename } from "node:path"
 
 import { AppConfig } from "@/config.ts"
 import { ChannelSessions } from "@/sessions/registry.ts"
@@ -25,7 +24,7 @@ type ToolRequest = {
 
 const insideDirectory = (root: string, candidate: string) => {
   const rootPath = resolve(root)
-  const candidatePath = resolve(candidate)
+  const candidatePath = isAbsolute(candidate) ? resolve(candidate) : resolve(rootPath, candidate)
   const rel = relative(rootPath, candidatePath)
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
 }
@@ -96,6 +95,7 @@ export const ToolBridgeLive = Layer.scoped(
           if (!insideDirectory(activeRun.workdir, payload.path)) {
             return json({ error: "path outside session workdir" }, 403)
           }
+          const filePath = isAbsolute(payload.path) ? resolve(payload.path) : resolve(activeRun.workdir, payload.path)
 
           if (!activeRun.discordMessage.channel.isSendable()) {
             return json({ error: "channel not sendable" }, 409)
@@ -103,7 +103,7 @@ export const ToolBridgeLive = Layer.scoped(
 
           await activeRun.discordMessage.channel.send({
             content: payload.caption,
-            files: [resolve(payload.path)],
+            files: [filePath],
             allowedMentions: { parse: [] },
           })
 
@@ -117,6 +117,7 @@ export const ToolBridgeLive = Layer.scoped(
           if (!insideDirectory(activeRun.workdir, payload.path)) {
             return json({ error: "path outside session workdir" }, 403)
           }
+          const imagePath = isAbsolute(payload.path) ? resolve(payload.path) : resolve(activeRun.workdir, payload.path)
 
           if (!activeRun.discordMessage.channel.isSendable()) {
             return json({ error: "channel not sendable" }, 409)
@@ -124,7 +125,7 @@ export const ToolBridgeLive = Layer.scoped(
 
           await activeRun.discordMessage.channel.send({
             content: payload.caption,
-            files: [resolve(payload.path)],
+            files: [imagePath],
             allowedMentions: { parse: [] },
           })
 

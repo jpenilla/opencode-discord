@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 
 import { Chunk, Context, Deferred, Effect, Fiber, FiberSet, Layer, Queue, Ref } from "effect"
 import type { Message } from "discord.js"
+import type { Event } from "@opencode-ai/sdk/v2"
 
 import { AppConfig } from "@/config.ts"
 import { formatErrorResponse } from "@/discord/formatting.ts"
@@ -18,7 +19,6 @@ import {
 } from "@/discord/progress.ts"
 import {
   OpencodeEventQueue,
-  getAssistantMessageUpdated,
   getEventSessionId,
   getPatchPart,
   getPermissionReplied,
@@ -47,6 +47,61 @@ const formatError = (error: unknown) => {
 }
 
 const SKIPPED_TOOL_CARD_NAMES = new Set(["send-file", "send-image", "react", "download-attachments"])
+
+const collectProgressEvents = (event: Event): ReadonlyArray<RunProgressEvent> => {
+  const progressEvents: RunProgressEvent[] = []
+
+  const toolPart = getToolPartUpdated(event)
+  if (toolPart) {
+    progressEvents.push({
+      type: "tool-updated",
+      part: toolPart,
+    })
+  }
+
+  const patchPart = getPatchPart(event)
+  if (patchPart) {
+    progressEvents.push({
+      type: "patch-updated",
+      part: patchPart,
+    })
+  }
+
+  const permission = getPermissionUpdated(event)
+  if (permission) {
+    progressEvents.push({
+      type: "permission-asked",
+      permission,
+    })
+  }
+
+  const permissionReply = getPermissionReplied(event)
+  if (permissionReply) {
+    progressEvents.push({
+      type: "permission-replied",
+      reply: permissionReply,
+    })
+  }
+
+  const sessionStatus = getSessionStatusUpdated(event)
+  if (sessionStatus) {
+    progressEvents.push({
+      type: "session-status",
+      status: sessionStatus.status,
+    })
+  }
+
+  const reasoningPart = getReasoningPart(event)
+  if (reasoningPart?.time.end) {
+    progressEvents.push({
+      type: "reasoning-completed",
+      partId: reasoningPart.id,
+      text: reasoningPart.text,
+    })
+  }
+
+  return progressEvents
+}
 
 export const ChannelSessionsLive = Layer.scoped(
   ChannelSessions,
@@ -83,39 +138,6 @@ export const ChannelSessionsLive = Layer.scoped(
       return null
     }
 
-    const updateActiveRunBySessionId = (sessionId: string, update: (activeRun: ActiveRun) => ActiveRun) =>
-      Ref.update(sessionsRef, (current) => {
-        for (const [channelId, session] of current.entries()) {
-          if (session.opencode.sessionId !== sessionId || !session.activeRun) {
-            continue
-          }
-
-          const updatedRun = update(session.activeRun)
-          if (updatedRun === session.activeRun) {
-            return current
-          }
-
-          const next = new Map(current)
-          next.set(channelId, {
-            ...session,
-            activeRun: updatedRun,
-          })
-          return next
-        }
-        return current
-      })
-
-    const addAssistantMessageId = (sessionId: string, messageId: string) =>
-      updateActiveRunBySessionId(sessionId, (activeRun) => {
-        if (activeRun.assistantMessageIds.includes(messageId)) {
-          return activeRun
-        }
-        return {
-          ...activeRun,
-          assistantMessageIds: [...activeRun.assistantMessageIds, messageId],
-        }
-      })
-
     const progressUpdateForEvent = (event: RunProgressEvent, state: {
       patchPartIds: Set<string>
       toolStates: Map<string, string>
@@ -126,8 +148,6 @@ export const ChannelSessionsLive = Layer.scoped(
       completedReasoningPartIds: Set<string>
     }) => {
       switch (event.type) {
-        case "run-started":
-          return null
         case "run-finalizing":
           return null
         case "reasoning-completed": {
@@ -282,92 +302,11 @@ export const ChannelSessionsLive = Layer.scoped(
               return Effect.void
             }
 
-            const progressEvents: RunProgressEvent[] = []
-            let assistantMessageIds = activeRun.assistantMessageIds
+            const progressEvents = collectProgressEvents(wrapped.payload)
 
-            const assistantMessage = getAssistantMessageUpdated(wrapped.payload)
-            if (assistantMessage) {
-              const messageId = assistantMessage.properties.info.id
-              if (!assistantMessageIds.includes(messageId)) {
-                assistantMessageIds = [...assistantMessageIds, messageId]
-              }
-            }
-
-            const toolPart = getToolPartUpdated(wrapped.payload)
-            if (toolPart) {
-              if (!assistantMessageIds.includes(toolPart.messageID)) {
-                assistantMessageIds = [...assistantMessageIds, toolPart.messageID]
-              }
-              progressEvents.push({
-                type: "tool-updated",
-                part: toolPart,
-              })
-            }
-
-            const patchPart = getPatchPart(wrapped.payload)
-            if (patchPart) {
-              if (!assistantMessageIds.includes(patchPart.messageID)) {
-                assistantMessageIds = [...assistantMessageIds, patchPart.messageID]
-              }
-              progressEvents.push({
-                type: "patch-updated",
-                part: patchPart,
-              })
-            }
-
-            const permission = getPermissionUpdated(wrapped.payload)
-            if (permission) {
-              if (permission.tool?.messageID && !assistantMessageIds.includes(permission.tool.messageID)) {
-                assistantMessageIds = [...assistantMessageIds, permission.tool.messageID]
-              }
-              progressEvents.push({
-                type: "permission-asked",
-                permission,
-              })
-            }
-
-            const permissionReply = getPermissionReplied(wrapped.payload)
-            if (permissionReply) {
-              progressEvents.push({
-                type: "permission-replied",
-                reply: permissionReply,
-              })
-            }
-
-            const sessionStatus = getSessionStatusUpdated(wrapped.payload)
-            if (sessionStatus) {
-              progressEvents.push({
-                type: "session-status",
-                status: sessionStatus.status,
-              })
-            }
-
-            const reasoningPart = getReasoningPart(wrapped.payload)
-            if (reasoningPart) {
-              if (!assistantMessageIds.includes(reasoningPart.messageID)) {
-                assistantMessageIds = [...assistantMessageIds, reasoningPart.messageID]
-              }
-              if (reasoningPart.time.end) {
-                progressEvents.push({
-                  type: "reasoning-completed",
-                  messageId: reasoningPart.messageID,
-                  partId: reasoningPart.id,
-                  text: reasoningPart.text,
-                })
-              }
-            }
-
-            return Effect.gen(function* () {
-              for (const assistantMessageId of assistantMessageIds) {
-                if (!activeRun.assistantMessageIds.includes(assistantMessageId)) {
-                  yield* addAssistantMessageId(sessionId, assistantMessageId)
-                }
-              }
-
-              for (const progressEvent of progressEvents) {
-                yield* Queue.offer(activeRun.progressQueue, progressEvent).pipe(Effect.asVoid)
-              }
-            })
+            return Effect.forEach(progressEvents, (progressEvent) =>
+              Queue.offer(activeRun.progressQueue, progressEvent).pipe(Effect.asVoid),
+            ).pipe(Effect.asVoid)
           }),
         )
       }),
@@ -389,9 +328,7 @@ export const ChannelSessionsLive = Layer.scoped(
           discordMessage: request.message,
           workdir: session.workdir,
           progressQueue,
-          assistantMessageIds: [],
         })
-        yield* Queue.offer(progressQueue, { type: "run-started" })
 
         const stopTyping = startTypingLoop(request.message.channel)
 

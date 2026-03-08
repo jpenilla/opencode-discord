@@ -14,14 +14,12 @@ export type ActiveRun = {
   discordMessage: Message
   workdir: string
   progressQueue: Queue<RunProgressEvent>
-  assistantMessageIds: ReadonlyArray<string>
 }
 
 export type RunProgressEvent =
-  | { type: "run-started" }
   | { type: "run-finalizing"; ack: Deferred<void> }
   | { type: "patch-updated"; part: PatchPart }
-  | { type: "reasoning-completed"; messageId: string; partId: string; text: string }
+  | { type: "reasoning-completed"; partId: string; text: string }
   | { type: "session-status"; status: SessionStatus }
   | { type: "tool-updated"; part: ToolPart }
   | { type: "permission-asked"; permission: PermissionRequest }

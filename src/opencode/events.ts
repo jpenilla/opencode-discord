@@ -1,14 +1,11 @@
 import type {
   Event,
-  EventMessagePartUpdated,
-  EventMessageUpdated,
   PatchPart,
   ReasoningPart,
   EventPermissionReplied,
   EventSessionStatus,
   GlobalEvent,
   PermissionRequest,
-  TextPart,
   ToolPart,
 } from "@opencode-ai/sdk/v2"
 import { Context, Effect, Layer, Queue } from "effect"
@@ -58,13 +55,6 @@ export const getEventSessionId = (event: Event) => {
   }
 }
 
-export const getAssistantMessageUpdated = (event: Event): EventMessageUpdated | null => {
-  if (event.type !== "message.updated" || event.properties.info.role !== "assistant") {
-    return null
-  }
-  return event
-}
-
 export const getToolPartUpdated = (event: Event): ToolPart | null => {
   if (event.type !== "message.part.updated") {
     return null
@@ -93,33 +83,16 @@ export const getSessionStatusUpdated = (event: Event): EventSessionStatus["prope
   return event.properties
 }
 
-export const getMessagePartUpdated = (event: Event): EventMessagePartUpdated | null => {
-  if (event.type !== "message.part.updated") {
-    return null
-  }
-  return event
-}
-
 export const getPatchPart = (event: Event): PatchPart | null => {
-  const partUpdated = getMessagePartUpdated(event)
-  if (!partUpdated || partUpdated.properties.part.type !== "patch") {
+  if (event.type !== "message.part.updated" || event.properties.part.type !== "patch") {
     return null
   }
-  return partUpdated.properties.part
-}
-
-export const getTextPart = (event: Event): TextPart | null => {
-  const partUpdated = getMessagePartUpdated(event)
-  if (!partUpdated || partUpdated.properties.part.type !== "text") {
-    return null
-  }
-  return partUpdated.properties.part
+  return event.properties.part
 }
 
 export const getReasoningPart = (event: Event): ReasoningPart | null => {
-  const partUpdated = getMessagePartUpdated(event)
-  if (!partUpdated || partUpdated.properties.part.type !== "reasoning") {
+  if (event.type !== "message.part.updated" || event.properties.part.type !== "reasoning") {
     return null
   }
-  return partUpdated.properties.part
+  return event.properties.part
 }

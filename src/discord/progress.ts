@@ -1,8 +1,6 @@
 import type { PatchPart } from "@opencode-ai/sdk/v2"
 import type { EventPermissionReplied, PermissionRequest, SessionStatus } from "@opencode-ai/sdk/v2"
 
-export const formatRunStarted = () => "## 🚀 Run started\n- Opencode is working on it"
-
 export const formatPatchUpdated = (part: PatchPart) =>
   part.files.length === 0 ? "## 🧩 Patch updated" : `## 🧩 Patch updated\n- Files touched: ${part.files.length}`
 

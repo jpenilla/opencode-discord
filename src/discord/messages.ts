@@ -72,7 +72,7 @@ export const sendFinalResponse = async (input: {
     if (index === 0) {
       await input.message.reply({
         content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
-        allowedMentions: { repliedUser: false, parse: [] },
+        allowedMentions: { repliedUser: true, parse: [] },
       })
       continue
     }
