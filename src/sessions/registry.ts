@@ -15,7 +15,7 @@ import {
   buildQueuedFollowUpPrompt,
   sendFinalResponse,
   startTypingLoop,
-  summarizeAttachments,
+  summarizeAttachmentAvailability,
   summarizeEmbeds,
 } from "@/discord/messages.ts"
 import {
@@ -105,6 +105,14 @@ const createSessionRuntimeState = (): SessionRuntimeState => ({
   idleCompactionCardsBySessionId: new Map<string, Message>(),
   questionBatchesByRequestId: new Map<string, PendingQuestionBatch>(),
 })
+
+const mergeAttachmentMessages = (target: Map<string, Message>, requests: ReadonlyArray<RunRequest>) => {
+  for (const request of requests) {
+    for (const attachmentMessage of request.attachmentMessages) {
+      target.set(attachmentMessage.id, attachmentMessage)
+    }
+  }
+}
 
 export const ChannelSessionsLive = Layer.scoped(
   ChannelSessions,
@@ -263,6 +271,18 @@ export const ChannelSessionsLive = Layer.scoped(
           rootDir,
           workdir,
         }
+      })
+
+    const collectAttachmentMessages = (message: Message): FallibleEffect<ReadonlyArray<Message>> =>
+      Effect.promise(async () => {
+        const attachmentMessages = new Map<string, Message>([[message.id, message]])
+        if (message.reference?.messageId) {
+          const referenced = await message.fetchReference().catch(() => null)
+          if (referenced) {
+            attachmentMessages.set(referenced.id, referenced)
+          }
+        }
+        return [...attachmentMessages.values()]
       })
 
     const clearSessionGate = (channelId: string, gate: SessionGate) =>
@@ -654,6 +674,7 @@ export const ChannelSessionsLive = Layer.scoped(
         const activeRun: ActiveRun = {
           discordMessage: responseMessage,
           workdir: session.workdir,
+          attachmentMessagesById: new Map<string, Message>(),
           progressQueue,
           followUpQueue,
           acceptFollowUps,
@@ -661,6 +682,7 @@ export const ChannelSessionsLive = Layer.scoped(
           questionOutcome: noQuestionOutcome(),
           interruptRequested: false,
         }
+        mergeAttachmentMessages(activeRun.attachmentMessagesById, initialRequests)
         yield* setActiveRun(session, activeRun)
 
         const stopTyping = Effect.promise(() => activeRun.typing.stop())
@@ -687,6 +709,7 @@ export const ChannelSessionsLive = Layer.scoped(
             })
 
             currentBatch = followUps
+            mergeAttachmentMessages(activeRun.attachmentMessagesById, currentBatch)
             yield* Ref.set(acceptFollowUps, true)
             result = yield* opencode.prompt(
               session.opencode,
@@ -1374,17 +1397,22 @@ export const ChannelSessionsLive = Layer.scoped(
       submit: (message, invocation): FallibleEffect<void> =>
         Effect.gen(function* () {
           const session = yield* getUsableSession(message, "health probe failed before queueing run")
+          const attachmentMessages = yield* collectAttachmentMessages(message)
+          const referencedMessage = attachmentMessages.find((candidate) => candidate.id !== message.id) ?? null
           const prompt = buildOpencodePrompt({
             userTag: message.author.tag,
+            messageId: message.id,
             content: invocation.prompt,
-            replyContext: invocation.replyContext,
-            attachmentSummary: summarizeAttachments(message),
+            referencedMessageContext: invocation.referencedMessageContext,
+            referencedMessageId: invocation.referencedMessageId ?? referencedMessage?.id,
+            attachmentContext: summarizeAttachmentAvailability(message),
             embedSummary: summarizeEmbeds(message),
           })
 
           const request = {
             message,
             prompt,
+            attachmentMessages,
           } satisfies RunRequest
 
           if (session.activeRun) {

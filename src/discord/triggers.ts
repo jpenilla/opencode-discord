@@ -2,7 +2,8 @@ import type { Client, Message } from "discord.js"
 
 export type Invocation = {
   prompt: string
-  replyContext?: string
+  referencedMessageId?: string
+  referencedMessageContext?: string
 }
 
 const cleanMentionText = (content: string, botId: string) =>
@@ -33,15 +34,18 @@ export const detectInvocation = async (input: {
     return null
   }
 
-  let replyContext: string | undefined
-  if (message.reference?.messageId && message.mentions.repliedUser?.id === botUser.id) {
+  let referencedMessageId: string | undefined
+  let referencedMessageContext: string | undefined
+  if (message.reference?.messageId) {
     try {
       const referenced = await message.fetchReference()
-      if (referenced.author.id === botUser.id) {
-        replyContext = referenced.content.trim() || "(no text content)"
+      referencedMessageId = referenced.id
+      referencedMessageContext = referenced.content.trim() || "(no text content)"
+      if (message.mentions.repliedUser?.id === botUser.id && referenced.author.id === botUser.id) {
         return {
           prompt: message.content.trim(),
-          replyContext,
+          referencedMessageId,
+          referencedMessageContext,
         }
       }
     } catch {
@@ -53,6 +57,8 @@ export const detectInvocation = async (input: {
   if (prompt !== null) {
     return {
       prompt,
+      referencedMessageId,
+      referencedMessageContext,
     }
   }
 

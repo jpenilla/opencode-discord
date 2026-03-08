@@ -10,6 +10,7 @@ import type { SessionHandle } from "@/opencode/service.ts"
 export type RunRequest = {
   message: Message
   prompt: string
+  attachmentMessages: ReadonlyArray<Message>
 }
 
 export type QuestionOutcome =
@@ -20,6 +21,7 @@ export type QuestionOutcome =
 export type ActiveRun = {
   discordMessage: Message
   workdir: string
+  attachmentMessagesById: Map<string, Message>
   progressQueue: Queue<RunProgressEvent>
   followUpQueue: Queue<RunRequest>
   acceptFollowUps: Ref<boolean>

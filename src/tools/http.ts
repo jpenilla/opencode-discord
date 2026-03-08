@@ -26,6 +26,7 @@ type ToolRequest = {
   sessionID: string
   path?: string
   directory?: string
+  messageId?: string
   caption?: string
   emoji?: string
   stickerID?: string
@@ -62,14 +63,6 @@ const uniquePath = async (directory: string, filename: string) => {
     }
     attempt += 1
   }
-}
-
-const fetchReferencedMessage = async (message: DiscordMessage) => {
-  if (!message.reference?.messageId) {
-    return null
-  }
-
-  return message.fetchReference().catch(() => null)
 }
 
 const readJsonBody = async (request: IncomingMessage): Promise<ToolRequest | undefined> => {
@@ -271,27 +264,40 @@ export const ToolBridgeLive = Layer.scoped(
         }
 
         if (request.method === "POST" && pathname === "/tool/download-attachments") {
-          const referencedMessage = await fetchReferencedMessage(activeRun.discordMessage)
+          if (!payload.messageId) {
+            sendJson(response, { error: "missing messageId" }, 400)
+            return
+          }
+
           const targetDirectory = resolveSessionPath(activeRun.workdir, payload.directory ?? ".")
           if (!insideDirectory(sessionHomeDir(activeRun.workdir), targetDirectory)) {
             sendJson(response, { error: "directory outside session home" }, 403)
             return
           }
 
-          const attachments = [
-            ...[...activeRun.discordMessage.attachments.values()].map((attachment) => ({
+          const attachmentMessages = [activeRun.attachmentMessagesById.get(payload.messageId)].filter(
+            (message): message is DiscordMessage => !!message,
+          )
+
+          if (attachmentMessages.length === 0) {
+            sendJson(response, { error: `messageId is not available in the current run: ${payload.messageId}` }, 404)
+            return
+          }
+
+          const attachments = attachmentMessages.flatMap((message) =>
+            [...message.attachments.values()].map((attachment) => ({
               attachment,
-              source: "triggering message",
+              messageId: message.id,
             })),
-            ...(referencedMessage
-              ? [...referencedMessage.attachments.values()].map((attachment) => ({
-                  attachment,
-                  source: "replied-to message",
-                }))
-              : []),
-          ]
+          )
           if (attachments.length === 0) {
-            sendJson(response, { error: "no attachments on triggering or replied-to message" }, 409)
+            sendJson(
+              response,
+              {
+                error: `no attachments on Discord message ${payload.messageId}`,
+              },
+              409,
+            )
             return
           }
 
@@ -300,9 +306,9 @@ export const ToolBridgeLive = Layer.scoped(
           const downloaded: Array<{
             savedPath: string
             originalName: string
-            source: string
+            messageId: string
           }> = []
-          for (const { attachment, source } of attachments) {
+          for (const { attachment, messageId } of attachments) {
             const download = await fetch(attachment.url)
             if (!download.ok) {
               sendJson(response, { error: `failed to download attachment: ${attachment.url}` }, 502)
@@ -316,7 +322,7 @@ export const ToolBridgeLive = Layer.scoped(
             downloaded.push({
               savedPath: displaySessionPath(activeRun.workdir, destination),
               originalName: attachment.name ?? attachment.id,
-              source,
+              messageId,
             })
           }
 
@@ -325,8 +331,8 @@ export const ToolBridgeLive = Layer.scoped(
             message: [
               `Downloaded ${downloaded.length} attachment${downloaded.length === 1 ? "" : "s"}:`,
               ...downloaded.map(
-                ({ savedPath, originalName, source }) =>
-                  `- \`${savedPath}\` from ${source} (\`${originalName}\`)`,
+                ({ savedPath, originalName, messageId }) =>
+                  `- \`${savedPath}\` from Discord message \`${messageId}\` (\`${originalName}\`)`,
               ),
             ].join("\n"),
           })

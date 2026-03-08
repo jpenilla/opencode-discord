@@ -1,4 +1,4 @@
-import type { APIEmbedField, Attachment, Embed, Message, SendableChannels } from "discord.js"
+import type { APIEmbedField, Embed, Message, SendableChannels } from "discord.js"
 import { MessageFlags } from "discord.js"
 
 import { splitDiscordMessage } from "@/discord/formatting.ts"
@@ -25,38 +25,33 @@ export const summarizeEmbeds = (message: Message) => {
     .join("\n")
 }
 
-const summarizeAttachment = (attachment: Attachment) => {
-  const parts = [attachment.name ?? attachment.id, `${attachment.size} bytes`]
-  if (attachment.contentType) parts.push(attachment.contentType)
-  parts.push(attachment.url)
-  return `- ${parts.join(" | ")}`
-}
-
-export const summarizeAttachments = (message: Message) => {
-  if (message.attachments.size === 0) {
-    return "None"
-  }
-  return [...message.attachments.values()].map(summarizeAttachment).join("\n")
-}
+export const summarizeAttachmentAvailability = (message: Message) =>
+  message.attachments.size > 0 ? "yes" : "no"
 
 export const buildOpencodePrompt = (input: {
   userTag: string
+  messageId: string
   content: string
-  replyContext?: string
-  attachmentSummary: string
+  referencedMessageContext?: string
+  referencedMessageId?: string
+  attachmentContext: string
   embedSummary: string
 }) => {
   const sections = [
     `Discord user: ${input.userTag}`,
+    `Discord message ID: ${input.messageId}`,
     "Message:",
     input.content.trim() || "(empty message)",
   ]
 
-  if (input.replyContext) {
-    sections.push("", "Replied bot message:", input.replyContext)
+  if (input.referencedMessageContext) {
+    if (input.referencedMessageId) {
+      sections.push("", `Referenced Discord message ID: ${input.referencedMessageId}`)
+    }
+    sections.push("", "Referenced message:", input.referencedMessageContext)
   }
 
-  sections.push("", "Attachment metadata:", input.attachmentSummary)
+  sections.push("", "Attachments:", input.attachmentContext)
   sections.push("", "Embed summary:", input.embedSummary)
 
   return sections.join("\n")
