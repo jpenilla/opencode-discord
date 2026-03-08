@@ -136,32 +136,68 @@ export const sendProgressUpdate = async (input: {
 }
 
 export const startTypingLoop = (channel: Message["channel"]) => {
-  const TYPING_REFRESH_MS = 8_000
+  const INITIAL_TYPING_DELAY_MS = 500
+  const TYPING_REFRESH_MS = 9_000
   let stopped = false
-  let sending = false
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let inFlight: Promise<void> | null = null
+  let stopPromise: Promise<void> | null = null
 
-  const tick = async () => {
-    if (stopped || sending || !channel.isSendable()) {
+  const clearTimer = () => {
+    if (!timer) {
+      return
+    }
+    clearTimeout(timer)
+    timer = null
+  }
+
+  const schedule = (delay: number) => {
+    clearTimer()
+    if (stopped) {
       return
     }
 
-    sending = true
-    try {
-      await channel.sendTyping()
-    } catch {
-      // Keep retrying during the run; transient API/gateway issues should not permanently stop typing.
-    } finally {
-      sending = false
-    }
+    timer = setTimeout(() => {
+      timer = null
+      void tick()
+    }, delay)
   }
 
-  void tick()
-  const interval = setInterval(() => {
-    void tick()
-  }, TYPING_REFRESH_MS)
+  const tick = async () => {
+    if (stopped || inFlight || !channel.isSendable()) {
+      return
+    }
 
-  return () => {
+    const send = (async () => {
+      try {
+        await channel.sendTyping()
+      } catch {
+        // Keep retrying during the run; transient API/gateway issues should not permanently stop typing.
+      }
+    })()
+
+    inFlight = send
+    try {
+      await send
+    } finally {
+      if (inFlight === send) {
+        inFlight = null
+      }
+    }
+
+    schedule(TYPING_REFRESH_MS)
+  }
+
+  schedule(INITIAL_TYPING_DELAY_MS)
+
+  return async () => {
+    if (stopPromise) {
+      return await stopPromise
+    }
+
     stopped = true
-    clearInterval(interval)
+    clearTimer()
+    stopPromise = inFlight ?? Promise.resolve()
+    await stopPromise
   }
 }

@@ -344,7 +344,8 @@ export const ChannelSessionsLive = Layer.scoped(
           acceptFollowUps,
         })
 
-        const stopTyping = startTypingLoop(responseMessage.channel)
+        const stopTypingLoop = startTypingLoop(responseMessage.channel)
+        const stopTyping = Effect.promise(() => stopTypingLoop())
 
         try {
           let currentBatch: ReadonlyArray<RunRequest> = initialRequests
@@ -374,6 +375,7 @@ export const ChannelSessionsLive = Layer.scoped(
             )
           }
 
+          yield* stopTyping
           const finalizingAck = yield* Deferred.make<void>()
           const progressFiberExit = yield* progressFiber.poll
           if (progressFiberExit._tag === "None") {
@@ -405,6 +407,7 @@ export const ChannelSessionsLive = Layer.scoped(
             sessionId: session.opencode.sessionId,
             error: formatError(error),
           })
+          yield* stopTyping
           yield* Effect.promise(() =>
             responseMessage.reply({
               content: formatErrorResponse("## ❌ Opencode failed", formatError(error)),
@@ -412,7 +415,7 @@ export const ChannelSessionsLive = Layer.scoped(
             }),
           )
         } finally {
-          stopTyping()
+          yield* stopTyping
           yield* setActiveRun(session.channelId, null)
           yield* Fiber.interrupt(progressFiber)
         }
