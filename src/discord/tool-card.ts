@@ -200,10 +200,46 @@ const compactUrl = (value: string) => {
   try {
     const url = new URL(value)
     const path = url.pathname === "/" ? "" : url.pathname
-    const query = url.search ? "?" : ""
+    const queryEntries = [...url.searchParams.entries()]
+    const query =
+      queryEntries.length === 0
+        ? ""
+        : `?${queryEntries
+            .slice(0, 2)
+            .map(([key, item]) => `${key}=${truncate(item, 24)}`)
+            .join("&")}${queryEntries.length > 2 ? "&…" : ""}`
     return `${url.hostname}${path}${query}`
   } catch {
     return null
+  }
+}
+
+const parseWebfetchTitle = (title: string) => {
+  const suffixStart = title.lastIndexOf(" (")
+  if (suffixStart === -1 || !title.endsWith(")")) {
+    return null
+  }
+
+  return {
+    url: title.slice(0, suffixStart),
+    contentType: title.slice(suffixStart + 2, -1),
+  }
+}
+
+const summarizeContentType = (value: string) => {
+  const mime = value.split(";")[0]?.trim().toLowerCase()
+  switch (mime) {
+    case "application/json":
+      return "JSON"
+    case "text/html":
+      return "HTML"
+    case "text/plain":
+      return "Text"
+    case "text/markdown":
+    case "text/x-markdown":
+      return "Markdown"
+    default:
+      return mime || value
   }
 }
 
@@ -347,11 +383,35 @@ const formatTaskInputLines: ToolInputFormatter = ({ workdir, input }) => {
   return lines
 }
 
-const formatWebfetchInputLines: ToolInputFormatter = ({ input }) => {
+const formatWebfetchInputLines: ToolInputFormatter = ({ part, input }) => {
   const url = findStringInput(input, ["url", "link"])
-  if (!url) return []
-  const compact = compactUrl(url)
-  return [`- URL: \`${compact ? truncate(compact, 180) : truncate(url, 180)}\``]
+  const format = findStringInput(input, ["format"])
+  const lines: string[] = []
+
+  if (url) {
+    const compact = compactUrl(url)
+    lines.push(`- URL: \`${compact ? truncate(compact, 180) : truncate(url, 180)}\``)
+  }
+
+  if (format && format !== "markdown") {
+    lines.push(`- Format: \`${format}\``)
+  }
+
+  if (part.state.status === "completed") {
+    const title = titleForPart(part)
+    if (title) {
+      const parsed = parseWebfetchTitle(title)
+      if (parsed) {
+        if (url && parsed.url !== url) {
+          const finalUrl = compactUrl(parsed.url)
+          lines.push(`- Final URL: \`${finalUrl ? truncate(finalUrl, 180) : truncate(parsed.url, 180)}\``)
+        }
+        lines.push(`- Response: \`${summarizeContentType(parsed.contentType)}\``)
+      }
+    }
+  }
+
+  return lines
 }
 
 const formatSearchInputLines: ToolInputFormatter = ({ workdir, input }) => {
@@ -474,7 +534,7 @@ const formatToolInputLines = (part: ToolPart, workdir: string) => {
 }
 
 const shouldShowStep = (part: ToolPart, step: string) => {
-  if (part.tool.includes("patch") || part.tool === "todowrite" || part.tool === "grep") {
+  if (part.tool.includes("patch") || part.tool === "todowrite" || part.tool === "grep" || part.tool === "webfetch") {
     return false
   }
   const compact = singleLine(step)

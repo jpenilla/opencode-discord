@@ -3,6 +3,7 @@ import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 
 import { Context, Effect, Layer } from "effect"
+import type { Message as DiscordMessage } from "discord.js"
 
 import { AppConfig } from "@/config.ts"
 import { ChannelSessions } from "@/sessions/registry.ts"
@@ -54,6 +55,14 @@ const uniquePath = async (directory: string, filename: string) => {
     }
     attempt += 1
   }
+}
+
+const fetchReferencedMessage = async (message: DiscordMessage) => {
+  if (!message.reference?.messageId) {
+    return null
+  }
+
+  return message.fetchReference().catch(() => null)
 }
 
 const readJsonBody = async (request: IncomingMessage): Promise<ToolRequest | undefined> => {
@@ -171,22 +180,38 @@ export const ToolBridgeLive = Layer.scoped(
         }
 
         if (request.method === "POST" && pathname === "/tool/download-attachments") {
+          const referencedMessage = await fetchReferencedMessage(activeRun.discordMessage)
           const targetDirectory = resolve(activeRun.workdir, payload.directory ?? ".")
           if (!insideDirectory(activeRun.workdir, targetDirectory)) {
             sendJson(response, { error: "directory outside session workdir" }, 403)
             return
           }
 
-          const attachments = [...activeRun.discordMessage.attachments.values()]
+          const attachments = [
+            ...[...activeRun.discordMessage.attachments.values()].map((attachment) => ({
+              attachment,
+              source: "triggering message",
+            })),
+            ...(referencedMessage
+              ? [...referencedMessage.attachments.values()].map((attachment) => ({
+                  attachment,
+                  source: "replied-to message",
+                }))
+              : []),
+          ]
           if (attachments.length === 0) {
-            sendJson(response, { error: "no attachments on triggering message" }, 409)
+            sendJson(response, { error: "no attachments on triggering or replied-to message" }, 409)
             return
           }
 
           await mkdir(targetDirectory, { recursive: true })
 
-          const downloaded: string[] = []
-          for (const attachment of attachments) {
+          const downloaded: Array<{
+            savedPath: string
+            originalName: string
+            source: string
+          }> = []
+          for (const { attachment, source } of attachments) {
             const download = await fetch(attachment.url)
             if (!download.ok) {
               sendJson(response, { error: `failed to download attachment: ${attachment.url}` }, 502)
@@ -197,14 +222,22 @@ export const ToolBridgeLive = Layer.scoped(
             const filename = sanitizeFilename(attachment.name ?? attachment.id)
             const destination = await uniquePath(targetDirectory, filename)
             await writeFile(destination, new Uint8Array(arrayBuffer))
-            downloaded.push(relative(activeRun.workdir, destination))
+            downloaded.push({
+              savedPath: relative(activeRun.workdir, destination),
+              originalName: attachment.name ?? attachment.id,
+              source,
+            })
           }
 
           sendJson(response, {
             ok: true,
-            message: `Downloaded ${downloaded.length} attachment${downloaded.length === 1 ? "" : "s"}: ${downloaded
-              .map((path) => `./${path}`)
-              .join(", ")}`,
+            message: [
+              `Downloaded ${downloaded.length} attachment${downloaded.length === 1 ? "" : "s"}:`,
+              ...downloaded.map(
+                ({ savedPath, originalName, source }) =>
+                  `- \`./${savedPath}\` from ${source} (\`${originalName}\`)`,
+              ),
+            ].join("\n"),
           })
           return
         }
