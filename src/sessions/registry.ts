@@ -4,7 +4,6 @@ import { tmpdir } from "node:os"
 
 import { Chunk, Context, Deferred, Effect, Fiber, FiberSet, Layer, Queue, Ref } from "effect"
 import type { Message } from "discord.js"
-import type { Event } from "@opencode-ai/sdk/v2"
 
 import { AppConfig } from "@/config.ts"
 import { formatErrorResponse } from "@/discord/formatting.ts"
@@ -13,31 +12,14 @@ import {
   buildOpencodePrompt,
   buildQueuedFollowUpPrompt,
   sendFinalResponse,
-  sendProgressUpdate,
   startTypingLoop,
   summarizeAttachments,
   summarizeEmbeds,
 } from "@/discord/messages.ts"
-import { upsertToolCard } from "@/discord/tool-card.ts"
-import {
-  formatPatchUpdated,
-  formatPermissionAsked,
-  formatPermissionReplied,
-  formatSessionStatus,
-  formatThinkingCompleted,
-} from "@/discord/progress.ts"
-import {
-  OpencodeEventQueue,
-  getEventSessionId,
-  getPatchPart,
-  getPermissionReplied,
-  getPermissionUpdated,
-  getReasoningPart,
-  getSessionStatusUpdated,
-  getToolPartUpdated,
-} from "@/opencode/events.ts"
+import { OpencodeEventQueue, getEventSessionId } from "@/opencode/events.ts"
 import type { Invocation } from "@/discord/triggers.ts"
 import { OpencodeService } from "@/opencode/service.ts"
+import { collectProgressEvents, runProgressWorker } from "@/sessions/progress.ts"
 import type { ActiveRun, ChannelSession, RunProgressEvent, RunRequest } from "@/sessions/session.ts"
 import { Logger } from "@/util/logging.ts"
 
@@ -56,68 +38,22 @@ const formatError = (error: unknown) => {
   return String(error)
 }
 
-const SKIPPED_TOOL_CARD_NAMES = new Set(["send-file", "send-image", "react", "download-attachments"])
 type SessionGate = Deferred.Deferred<ChannelSession, unknown>
 type SessionGateDecision = {
   gate: SessionGate
   owner: boolean
 }
-const sessionTitle = (channelId: string) => `Discord #${channelId}`
-
-const collectProgressEvents = (event: Event): ReadonlyArray<RunProgressEvent> => {
-  const progressEvents: RunProgressEvent[] = []
-
-  const toolPart = getToolPartUpdated(event)
-  if (toolPart) {
-    progressEvents.push({
-      type: "tool-updated",
-      part: toolPart,
-    })
-  }
-
-  const patchPart = getPatchPart(event)
-  if (patchPart) {
-    progressEvents.push({
-      type: "patch-updated",
-      part: patchPart,
-    })
-  }
-
-  const permission = getPermissionUpdated(event)
-  if (permission) {
-    progressEvents.push({
-      type: "permission-asked",
-      permission,
-    })
-  }
-
-  const permissionReply = getPermissionReplied(event)
-  if (permissionReply) {
-    progressEvents.push({
-      type: "permission-replied",
-      reply: permissionReply,
-    })
-  }
-
-  const sessionStatus = getSessionStatusUpdated(event)
-  if (sessionStatus) {
-    progressEvents.push({
-      type: "session-status",
-      status: sessionStatus.status,
-    })
-  }
-
-  const reasoningPart = getReasoningPart(event)
-  if (reasoningPart?.time.end) {
-    progressEvents.push({
-      type: "reasoning-completed",
-      partId: reasoningPart.id,
-      text: reasoningPart.text,
-    })
-  }
-
-  return progressEvents
+type SessionRuntimeState = {
+  sessionsByChannelId: Map<string, ChannelSession>
+  activeRunsBySessionId: Map<string, ActiveRun>
+  gatesByChannelId: Map<string, SessionGate>
 }
+const sessionTitle = (channelId: string) => `Discord #${channelId}`
+const createSessionRuntimeState = (): SessionRuntimeState => ({
+  sessionsByChannelId: new Map<string, ChannelSession>(),
+  activeRunsBySessionId: new Map<string, ActiveRun>(),
+  gatesByChannelId: new Map<string, SessionGate>(),
+})
 
 export const ChannelSessionsLive = Layer.scoped(
   ChannelSessions,
@@ -126,55 +62,96 @@ export const ChannelSessionsLive = Layer.scoped(
     const config = yield* AppConfig
     const opencode = yield* OpencodeService
     const eventQueue = yield* OpencodeEventQueue
-    const sessionsRef = yield* Ref.make(new Map<string, ChannelSession>())
-    const sessionGatesRef = yield* Ref.make(new Map<string, SessionGate>())
+    const stateRef = yield* Ref.make(createSessionRuntimeState())
     const fiberSet = yield* FiberSet.make()
 
-    const setActiveRun = (channelId: string, activeRun: ActiveRun | null) =>
-      Ref.update(sessionsRef, (current) => {
-        const session = current.get(channelId)
-        if (!session) {
-          return current
-        }
-        session.activeRun = activeRun
-        const next = new Map(current)
-        next.set(channelId, session)
-        return next
-      })
-
-    const getSession = (channelId: string) => Ref.get(sessionsRef).pipe(Effect.map((sessions) => sessions.get(channelId)))
+    const getSession = (channelId: string) =>
+      Ref.get(stateRef).pipe(Effect.map((state) => state.sessionsByChannelId.get(channelId)))
+    const getActiveRunBySessionId = (sessionId: string) =>
+      Ref.get(stateRef).pipe(Effect.map((state) => state.activeRunsBySessionId.get(sessionId) ?? null))
     const putSession = (session: ChannelSession) =>
-      Ref.update(sessionsRef, (current) => {
-        const next = new Map(current)
-        next.set(session.channelId, session)
-        return next
+      Ref.update(stateRef, (current) => {
+        const sessionsByChannelId = new Map(current.sessionsByChannelId)
+        sessionsByChannelId.set(session.channelId, session)
+        return {
+          ...current,
+          sessionsByChannelId,
+        }
+      })
+    const setActiveRun = (session: ChannelSession, activeRun: ActiveRun | null) =>
+      Ref.update(stateRef, (current) => {
+        session.activeRun = activeRun
+
+        const sessionsByChannelId = new Map(current.sessionsByChannelId)
+        sessionsByChannelId.set(session.channelId, session)
+
+        const activeRunsBySessionId = new Map(current.activeRunsBySessionId)
+        if (activeRun) {
+          activeRunsBySessionId.set(session.opencode.sessionId, activeRun)
+        } else {
+          activeRunsBySessionId.delete(session.opencode.sessionId)
+        }
+
+        return {
+          ...current,
+          sessionsByChannelId,
+          activeRunsBySessionId,
+        }
+      })
+    const replaceSessionHandle = (session: ChannelSession, replacement: ChannelSession["opencode"]) =>
+      Ref.update(stateRef, (current) => {
+        const previousSessionId = session.opencode.sessionId
+        session.opencode = replacement
+
+        const sessionsByChannelId = new Map(current.sessionsByChannelId)
+        sessionsByChannelId.set(session.channelId, session)
+
+        const activeRunsBySessionId = new Map(current.activeRunsBySessionId)
+        activeRunsBySessionId.delete(previousSessionId)
+
+        return {
+          ...current,
+          sessionsByChannelId,
+          activeRunsBySessionId,
+        }
       })
     const removeWorkdir = (workdir: string) =>
       Effect.promise(() => rm(resolve(workdir), { recursive: true, force: true })).pipe(Effect.ignore)
 
     const clearSessionGate = (channelId: string, gate: SessionGate) =>
-      Ref.update(sessionGatesRef, (current) => {
-        const next = new Map(current)
-        if (next.get(channelId) === gate) {
-          next.delete(channelId)
+      Ref.update(stateRef, (current) => {
+        if (current.gatesByChannelId.get(channelId) !== gate) {
+          return current
         }
-        return next
+
+        const gatesByChannelId = new Map(current.gatesByChannelId)
+        gatesByChannelId.delete(channelId)
+        return {
+          ...current,
+          gatesByChannelId,
+        }
       })
 
     const withSessionGate = (channelId: string, task: Effect.Effect<ChannelSession, unknown>): Effect.Effect<ChannelSession, unknown> =>
       Effect.gen(function* () {
         const gate = yield* Deferred.make<ChannelSession, unknown>()
         const { gate: currentGate, owner } = yield* Ref.modify(
-          sessionGatesRef,
-          (current): readonly [SessionGateDecision, Map<string, SessionGate>] => {
-            const existing = current.get(channelId)
+          stateRef,
+          (current): readonly [SessionGateDecision, SessionRuntimeState] => {
+            const existing = current.gatesByChannelId.get(channelId)
             if (existing) {
               return [{ gate: existing, owner: false }, current]
             }
 
-            const next = new Map(current)
-            next.set(channelId, gate)
-            return [{ gate, owner: true }, next]
+            const gatesByChannelId = new Map(current.gatesByChannelId)
+            gatesByChannelId.set(channelId, gate)
+            return [
+              { gate, owner: true },
+              {
+                ...current,
+                gatesByChannelId,
+              },
+            ]
           },
         )
 
@@ -189,165 +166,6 @@ export const ChannelSessionsLive = Layer.scoped(
         return yield* Deferred.await(currentGate)
       })
 
-    const getActiveRunForSessionId = (sessions: Map<string, ChannelSession>, sessionId: string) => {
-      for (const session of sessions.values()) {
-        if (session.opencode.sessionId === sessionId) {
-          return session.activeRun
-        }
-      }
-      return null
-    }
-
-    const progressUpdateForEvent = (event: RunProgressEvent, state: {
-      patchPartIds: Set<string>
-      toolStates: Map<string, string>
-      toolCards: Map<string, Message>
-      permissionReplies: Map<string, string>
-      pendingPermissions: Set<string>
-      retryStatusKeys: Set<string>
-      completedReasoningPartIds: Set<string>
-    }) => {
-      switch (event.type) {
-        case "run-finalizing":
-          return null
-        case "reasoning-completed": {
-          if (state.completedReasoningPartIds.has(event.partId)) {
-            return null
-          }
-          const thinkingText = event.text.trim()
-          if (thinkingText.length === 0) {
-            return null
-          }
-          state.completedReasoningPartIds.add(event.partId)
-          return formatThinkingCompleted(thinkingText)
-        }
-        case "patch-updated": {
-          if (state.patchPartIds.has(event.part.id)) {
-            return null
-          }
-          state.patchPartIds.add(event.part.id)
-          return formatPatchUpdated(event.part)
-        }
-        case "session-status":
-          if (event.status.type === "retry") {
-            const key = `${event.status.attempt}:${event.status.message}`
-            if (state.retryStatusKeys.has(key)) {
-              return null
-            }
-            state.retryStatusKeys.add(key)
-          }
-          return formatSessionStatus(event.status)
-        case "permission-asked": {
-          if (state.pendingPermissions.has(event.permission.id)) {
-            return null
-          }
-          state.pendingPermissions.add(event.permission.id)
-          return formatPermissionAsked(event.permission)
-        }
-        case "permission-replied": {
-          const previousReply = state.permissionReplies.get(event.reply.requestID)
-          if (previousReply === event.reply.reply) {
-            return null
-          }
-          state.permissionReplies.set(event.reply.requestID, event.reply.reply)
-          return formatPermissionReplied(event.reply)
-        }
-      }
-    }
-
-    const runProgressWorker = (message: Message, workdir: string, queue: Queue.Queue<RunProgressEvent>) =>
-      Effect.gen(function* () {
-        const state = {
-          patchPartIds: new Set<string>(),
-          toolStates: new Map<string, string>(),
-          toolCards: new Map<string, Message>(),
-          todoCards: new Array<Message>(),
-          permissionReplies: new Map<string, string>(),
-          pendingPermissions: new Set<string>(),
-          retryStatusKeys: new Set<string>(),
-          completedReasoningPartIds: new Set<string>(),
-        }
-
-        const isTodoTool = (tool: string) => tool === "todowrite"
-
-        const shouldSkipToolUpdate = (event: Extract<RunProgressEvent, { type: "tool-updated" }>) => {
-          if (SKIPPED_TOOL_CARD_NAMES.has(event.part.tool)) {
-            return true
-          }
-          if (isTodoTool(event.part.tool) && event.part.state.status !== "completed") {
-            return true
-          }
-          const title = event.part.state.status === "running" || event.part.state.status === "completed" ? event.part.state.title : ""
-          const nextKey = `${event.part.state.status}:${title}`
-          const previousKey = state.toolStates.get(event.part.callID)
-          if (previousKey === nextKey) {
-            return true
-          }
-          state.toolStates.set(event.part.callID, nextKey)
-          return false
-        }
-
-        const deletePreviousTodoCards = (currentCard: Message) =>
-          Effect.gen(function* () {
-            for (const previousTodoCard of state.todoCards) {
-              if (previousTodoCard.id === currentCard.id) {
-                continue
-              }
-              yield* Effect.promise(() => previousTodoCard.delete()).pipe(Effect.ignore)
-            }
-            state.todoCards = [currentCard]
-          })
-
-        const handleToolCard = (event: Extract<RunProgressEvent, { type: "tool-updated" }>) =>
-          Effect.gen(function* () {
-            if (shouldSkipToolUpdate(event)) {
-              return
-            }
-
-            const todoTool = isTodoTool(event.part.tool)
-            const existingCard = state.toolCards.get(event.part.callID) ?? null
-            const card = yield* Effect.promise(() =>
-              upsertToolCard({
-                sourceMessage: message,
-                existingCard: todoTool ? null : existingCard,
-                workdir,
-                part: event.part,
-                mode: todoTool ? "always-send" : "edit-or-send",
-              }),
-            )
-            state.toolCards.set(event.part.callID, card)
-
-            if (todoTool) {
-              yield* deletePreviousTodoCards(card)
-            }
-          })
-
-        while (true) {
-          const first = yield* Queue.take(queue)
-          const rest = yield* Queue.takeUpTo(queue, 64)
-          const batch = [first, ...Chunk.toReadonlyArray(rest)]
-
-          for (const event of batch) {
-            if (event.type === "run-finalizing") {
-              progressUpdateForEvent(event, state)
-              yield* Deferred.succeed(event.ack, undefined).pipe(Effect.ignore)
-              continue
-            }
-
-            if (event.type === "tool-updated") {
-              yield* handleToolCard(event)
-              continue
-            }
-
-            const update = progressUpdateForEvent(event, state)
-            if (!update) {
-              continue
-            }
-            yield* Effect.promise(() => sendProgressUpdate({ message, text: update }))
-          }
-        }
-      })
-
     yield* eventQueue.take().pipe(
       Effect.flatMap((wrapped) => {
         const sessionId = getEventSessionId(wrapped.payload)
@@ -355,9 +173,9 @@ export const ChannelSessionsLive = Layer.scoped(
           return Effect.void
         }
 
-        return Ref.get(sessionsRef).pipe(
-          Effect.flatMap((sessions) => {
-            const activeRun = getActiveRunForSessionId(sessions, sessionId)
+        return Ref.get(stateRef).pipe(
+          Effect.flatMap((state) => {
+            const activeRun = state.activeRunsBySessionId.get(sessionId)
             if (!activeRun) {
               return Effect.void
             }
@@ -379,6 +197,41 @@ export const ChannelSessionsLive = Layer.scoped(
       Effect.forkScoped,
     )
 
+    const finishProgressWorker = (
+      session: ChannelSession,
+      progressQueue: Queue.Queue<RunProgressEvent>,
+      progressFiber: Fiber.RuntimeFiber<never, unknown>,
+    ): FallibleEffect<void> =>
+      Effect.gen(function* () {
+        const finalizingAck = yield* Deferred.make<void>()
+        const progressFiberExit = yield* progressFiber.poll
+        if (progressFiberExit._tag === "None") {
+          yield* Queue.offer(progressQueue, { type: "run-finalizing", ack: finalizingAck })
+          const finalizingResult = yield* Deferred.await(finalizingAck).pipe(Effect.timeoutOption("2 seconds"))
+          if (finalizingResult._tag === "None") {
+            yield* logger.warn("progress worker finalization timed out", {
+              channelId: session.channelId,
+              sessionId: session.opencode.sessionId,
+            })
+          }
+          return
+        }
+
+        yield* logger.warn("progress worker exited before finalization", {
+          channelId: session.channelId,
+          sessionId: session.opencode.sessionId,
+          exit: String(progressFiberExit.value),
+        })
+      })
+
+    const sendRunFailure = (message: Message, error: unknown) =>
+      Effect.promise(() =>
+        message.reply({
+          content: formatErrorResponse("## ❌ Opencode failed", formatError(error)),
+          allowedMentions: { repliedUser: false, parse: [] },
+        }),
+      )
+
     const processRequestBatch = (
       session: ChannelSession,
       initialRequests: ReadonlyArray<RunRequest>,
@@ -390,7 +243,7 @@ export const ChannelSessionsLive = Layer.scoped(
         const responseMessage = initialRequests[0]!.message
         const progressFiber = yield* runProgressWorker(responseMessage, session.workdir, progressQueue).pipe(Effect.fork)
 
-        yield* setActiveRun(session.channelId, {
+        yield* setActiveRun(session, {
           discordMessage: responseMessage,
           workdir: session.workdir,
           progressQueue,
@@ -400,6 +253,7 @@ export const ChannelSessionsLive = Layer.scoped(
 
         const stopTypingLoop = startTypingLoop(responseMessage.channel)
         const stopTyping = Effect.promise(() => stopTypingLoop())
+        let failed = false
 
         try {
           let currentBatch: ReadonlyArray<RunRequest> = initialRequests
@@ -430,25 +284,7 @@ export const ChannelSessionsLive = Layer.scoped(
           }
 
           yield* stopTyping
-          const finalizingAck = yield* Deferred.make<void>()
-          const progressFiberExit = yield* progressFiber.poll
-          if (progressFiberExit._tag === "None") {
-            yield* Queue.offer(progressQueue, { type: "run-finalizing", ack: finalizingAck })
-            const finalizingResult = yield* Deferred.await(finalizingAck).pipe(Effect.timeoutOption("2 seconds"))
-            if (finalizingResult._tag === "None") {
-              yield* logger.warn("progress worker finalization timed out", {
-                channelId: session.channelId,
-                sessionId: session.opencode.sessionId,
-              })
-            }
-          } else {
-            yield* logger.warn("progress worker exited before finalization", {
-              channelId: session.channelId,
-              sessionId: session.opencode.sessionId,
-              exit: String(progressFiberExit.value),
-            })
-          }
-
+          yield* finishProgressWorker(session, progressQueue, progressFiber)
           yield* Effect.promise(() => sendFinalResponse({ message: responseMessage, text: result.transcript }))
           yield* logger.info("completed run", {
             channelId: session.channelId,
@@ -462,19 +298,18 @@ export const ChannelSessionsLive = Layer.scoped(
             error: formatError(error),
           })
           yield* stopTyping
-          yield* Effect.promise(() =>
-            responseMessage.reply({
-              content: formatErrorResponse("## ❌ Opencode failed", formatError(error)),
-              allowedMentions: { repliedUser: false, parse: [] },
-            }),
-          )
-          yield* recoverSessionIfUnhealthy(session, responseMessage, "run failed with unhealthy opencode session").pipe(
-            Effect.ignore,
-          )
+          yield* sendRunFailure(responseMessage, error)
+          failed = true
         } finally {
           yield* stopTyping
-          yield* setActiveRun(session.channelId, null)
+          yield* setActiveRun(session, null)
           yield* Fiber.interrupt(progressFiber)
+        }
+
+        if (failed) {
+          yield* ensureSessionHealth(session, responseMessage, "run failed with unhealthy opencode session", false).pipe(
+            Effect.ignore,
+          )
         }
       })
 
@@ -533,7 +368,7 @@ export const ChannelSessionsLive = Layer.scoped(
         }
       })
 
-    const getOrCreateSession = (message: Message): FallibleEffect<ChannelSession> =>
+    const createOrGetSession = (message: Message): FallibleEffect<ChannelSession> =>
       Effect.gen(function* () {
         const existing = yield* getSession(message.channelId)
         if (existing) {
@@ -551,7 +386,7 @@ export const ChannelSessionsLive = Layer.scoped(
         )
       })
 
-    const recoverSession = (
+    const recreateSession = (
       session: ChannelSession,
       message: Message,
       reason: string,
@@ -570,7 +405,7 @@ export const ChannelSessionsLive = Layer.scoped(
 
           const previous = current.opencode
           const replacement = yield* opencode.createSession(current.workdir, sessionTitle(message.channelId))
-          current.opencode = replacement
+          yield* replaceSessionHandle(current, replacement)
           yield* previous.close().pipe(Effect.ignore)
           yield* logger.warn("recovered channel session", {
             channelId: current.channelId,
@@ -584,13 +419,14 @@ export const ChannelSessionsLive = Layer.scoped(
         }),
       )
 
-    const ensureHealthySession = (
+    const ensureSessionHealth = (
       session: ChannelSession,
       message: Message,
       reason: string,
+      allowBusySession = true,
     ): FallibleEffect<ChannelSession> =>
       Effect.gen(function* () {
-        if (session.activeRun) {
+        if (allowBusySession && session.activeRun) {
           return session
         }
 
@@ -599,27 +435,18 @@ export const ChannelSessionsLive = Layer.scoped(
           return session
         }
 
-        return yield* recoverSession(session, message, reason)
+        return yield* recreateSession(session, message, reason)
       })
 
-    const recoverSessionIfUnhealthy = (
-      session: ChannelSession,
-      message: Message,
-      reason: string,
-    ): FallibleEffect<void> =>
-      Effect.gen(function* () {
-        const healthy = yield* opencode.isHealthy(session.opencode)
-        if (healthy) {
-          return
-        }
-
-        yield* recoverSession(session, message, reason)
-      })
+    const getUsableSession = (message: Message, reason: string): FallibleEffect<ChannelSession> =>
+      createOrGetSession(message).pipe(
+        Effect.flatMap((session) => ensureSessionHealth(session, message, reason)),
+      )
 
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
-        const sessions = yield* Ref.get(sessionsRef)
-        for (const session of sessions.values()) {
+        const state = yield* Ref.get(stateRef)
+        for (const session of state.sessionsByChannelId.values()) {
           yield* Queue.shutdown(session.queue)
           yield* session.opencode.close().pipe(Effect.ignore)
           yield* removeWorkdir(session.workdir)
@@ -631,11 +458,7 @@ export const ChannelSessionsLive = Layer.scoped(
     return {
       submit: (message, invocation): FallibleEffect<void> =>
         Effect.gen(function* () {
-          const session = yield* getOrCreateSession(message).pipe(
-            Effect.flatMap((existing) =>
-              ensureHealthySession(existing, message, "health probe failed before queueing run"),
-            ),
-          )
+          const session = yield* getUsableSession(message, "health probe failed before queueing run")
           const prompt = buildOpencodePrompt({
             userTag: message.author.tag,
             content: invocation.prompt,
@@ -670,10 +493,7 @@ export const ChannelSessionsLive = Layer.scoped(
             author: message.author.tag,
           })
         }),
-      getActiveRunBySessionId: (sessionId) =>
-        Ref.get(sessionsRef).pipe(
-          Effect.map((sessions) => getActiveRunForSessionId(sessions, sessionId)),
-        ),
+      getActiveRunBySessionId,
     } satisfies ChannelSessionsShape
   }),
 )

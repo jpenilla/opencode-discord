@@ -108,6 +108,41 @@ const isExpectedAbort = (cause: Cause.Cause<unknown>, signal: AbortSignal) =>
     (error: unknown) => error instanceof DOMException || (error instanceof Error && error.name === "AbortError"),
   )
 
+const forkEventStream = (input: {
+  client: OpencodeClient
+  eventQueue: OpencodeEventQueueShape
+  logger: LoggerShape
+  signal: AbortSignal
+  backend: ResolvedSandboxBackend
+  workdir: string
+}) =>
+  consumeEvents(input).pipe(
+    Effect.tapErrorCause((cause) =>
+      isExpectedAbort(cause, input.signal)
+        ? Effect.void
+        : input.logger.warn("opencode event stream closed unexpectedly", {
+            backend: input.backend,
+            workdir: input.workdir,
+            error: Cause.pretty(cause),
+          }),
+    ),
+    Effect.ignore,
+    Effect.fork,
+  )
+
+const makeSessionCloser = (input: {
+  abortController: AbortController
+  eventFiber: Fiber.RuntimeFiber<void, never>
+  closeServer: () => void
+}) => () =>
+  Effect.gen(function* () {
+    input.abortController.abort()
+    yield* Fiber.interrupt(input.eventFiber)
+    yield* Effect.sync(() => {
+      input.closeServer()
+    })
+  })
+
 export const OpencodeServiceLive = Layer.scoped(
   OpencodeService,
   Effect.gen(function* () {
@@ -183,33 +218,19 @@ export const OpencodeServiceLive = Layer.scoped(
             directory: workdir,
           })
           const abortController = new AbortController()
-          const eventFiber = yield* consumeEvents({
+          const eventFiber = yield* forkEventStream({
             client,
             eventQueue,
             logger,
             signal: abortController.signal,
-          }).pipe(
-            Effect.tapErrorCause((cause) =>
-              isExpectedAbort(cause, abortController.signal)
-                ? Effect.void
-                : logger.warn("opencode event stream closed unexpectedly", {
-                    backend: server.backend,
-                    workdir,
-                    error: Cause.pretty(cause),
-                  }),
-            ),
-            Effect.ignore,
-            Effect.fork,
-          )
-
-          const close = () =>
-            Effect.gen(function* () {
-              abortController.abort()
-              yield* Fiber.interrupt(eventFiber)
-              yield* Effect.sync(() => {
-                server.close()
-              })
-            })
+            backend: server.backend,
+            workdir,
+          })
+          const close = makeSessionCloser({
+            abortController,
+            eventFiber,
+            closeServer: server.close,
+          })
 
           try {
             const result = yield* Effect.promise(() => client.session.create({ title }))

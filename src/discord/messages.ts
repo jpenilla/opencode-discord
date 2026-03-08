@@ -68,6 +68,36 @@ const wrapDiscordPrompts = (heading: string, prompts: ReadonlyArray<string>) =>
     ...prompts.map((prompt, index) => [`<discord-message index="${index + 1}">`, prompt, "</discord-message>"].join("\n")),
   ].join("\n\n")
 
+const splitOutgoingText = (
+  message: Message,
+  text: string,
+  options?: {
+    emptyFallback?: string
+    trim?: boolean
+  },
+) => {
+  let normalized = normalizeOutgoingMentions(message, text)
+  if (options?.trim) {
+    normalized = normalized.trim()
+  }
+  if (!normalized) {
+    normalized = options?.emptyFallback ?? ""
+  }
+  if (!normalized) {
+    return []
+  }
+  return splitDiscordMessage(normalized)
+}
+
+const sendChunks = async (
+  chunks: ReadonlyArray<string>,
+  send: (chunk: string, index: number) => Promise<void>,
+) => {
+  for (const [index, chunk] of chunks.entries()) {
+    await send(chunk, index)
+  }
+}
+
 export const buildBatchedOpencodePrompt = (prompts: ReadonlyArray<string>) => {
   if (prompts.length === 1) {
     return prompts[0] ?? ""
@@ -89,50 +119,50 @@ export const sendFinalResponse = async (input: {
   message: Message
   text: string
 }) => {
-  const safeText = input.text.length > 0 ? normalizeOutgoingMentions(input.message, input.text) : "(no response content)"
-  const chunks = splitDiscordMessage(safeText)
+  const chunks = splitOutgoingText(input.message, input.text, {
+    emptyFallback: "(no response content)",
+  })
 
-  for (const [index, chunk] of chunks.entries()) {
+  await sendChunks(chunks, async (chunk, index) => {
     if (index === 0) {
       await input.message.reply({
         content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
         allowedMentions: { repliedUser: true, parse: ["users", "roles", "everyone"] },
       })
-      continue
+      return
     }
 
     if (!input.message.channel.isSendable()) {
-      continue
+      return
     }
 
     await (input.message.channel as SendableChannels).send({
       content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
       allowedMentions: { parse: ["users", "roles", "everyone"] },
     })
-  }
+  })
 }
 
 export const sendProgressUpdate = async (input: {
   message: Message
   text: string
 }) => {
-  const safeText = normalizeOutgoingMentions(input.message, input.text).trim()
-  if (!safeText) {
-    return
-  }
-
-  const chunks = splitDiscordMessage(safeText)
   if (!input.message.channel.isSendable()) {
     return
   }
 
-  for (const chunk of chunks) {
+  const chunks = splitOutgoingText(input.message, input.text, { trim: true })
+  if (chunks.length === 0) {
+    return
+  }
+
+  await sendChunks(chunks, async (chunk) => {
     await (input.message.channel as SendableChannels).send({
       content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
       allowedMentions: { parse: ["users", "roles", "everyone"] },
       flags: MessageFlags.SuppressNotifications,
     })
-  }
+  })
 }
 
 export const startTypingLoop = (channel: Message["channel"]) => {
