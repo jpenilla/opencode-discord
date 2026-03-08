@@ -351,6 +351,8 @@ const buildWorkerEnvironment = (config: LaunchSandboxedServerInput["config"]) =>
   return Object.fromEntries(allowedEntries)
 }
 
+const sessionHomeDir = (workdir: string) => dirname(resolve(workdir))
+
 const hostXdgHomes = () => {
   const home = homedir()
   return {
@@ -361,13 +363,12 @@ const hostXdgHomes = () => {
   }
 }
 
-const workerXdgHomes = (workdir: string) => {
-  const root = join(workdir, ".opencode-xdg")
+const workerXdgHomes = (homeDir: string) => {
   return {
-    config: join(root, "config"),
-    data: join(root, "data"),
-    state: join(root, "state"),
-    cache: join(root, "cache"),
+    config: join(homeDir, ".config"),
+    data: join(homeDir, ".local", "share"),
+    state: join(homeDir, ".local", "state"),
+    cache: join(homeDir, ".cache"),
   }
 }
 
@@ -397,9 +398,9 @@ const copyConfigDirectory = async (sourceDir: string, destinationDir: string) =>
   }
 }
 
-const stageHostOpencodeState = async (workdir: string) => {
+const stageHostOpencodeState = async (homeDir: string) => {
   const hostXdg = hostXdgHomes()
-  const workerXdg = workerXdgHomes(workdir)
+  const workerXdg = workerXdgHomes(homeDir)
 
   await mkdir(join(workerXdg.config, "opencode"), { recursive: true })
   await mkdir(join(workerXdg.data, "opencode"), { recursive: true })
@@ -443,9 +444,9 @@ const existingReadOnlyPaths = (input: LaunchSandboxedServerInput, opencodeBin: s
 }
 
 const launchUnsafeDevServer = async (input: LaunchSandboxedServerInput, port: number): Promise<SandboxedServer> => {
-  const homeDir = join(input.workdir, ".sandbox-home")
-  const xdg = await stageHostOpencodeState(input.workdir)
-  await mkdir(join(homeDir, ".cache"), { recursive: true })
+  const homeDir = sessionHomeDir(input.workdir)
+  const xdg = await stageHostOpencodeState(homeDir)
+  await mkdir(xdg.cache, { recursive: true })
 
   const opencodeBin = resolveSpawnBinary(input.config.opencodeBin, "opencode")
   const proc = spawn(opencodeBin, ["serve", "--hostname=127.0.0.1", `--port=${port}`], {
@@ -464,9 +465,9 @@ const launchUnsafeDevServer = async (input: LaunchSandboxedServerInput, port: nu
 }
 
 const launchBwrapServer = async (input: LaunchSandboxedServerInput, port: number): Promise<SandboxedServer> => {
-  const homeDir = join(input.workdir, ".sandbox-home")
-  const xdg = await stageHostOpencodeState(input.workdir)
-  await mkdir(join(homeDir, ".cache"), { recursive: true })
+  const homeDir = sessionHomeDir(input.workdir)
+  const xdg = await stageHostOpencodeState(homeDir)
+  await mkdir(xdg.cache, { recursive: true })
 
   const opencodeBin = resolveSpawnBinary(input.config.opencodeBin, "opencode")
   const bwrapBin = resolveSpawnBinary(input.config.bwrapBin, "bwrap")
@@ -490,7 +491,7 @@ const launchBwrapServer = async (input: LaunchSandboxedServerInput, port: number
   ]
 
   const ensuredDirectories = new Set<string>()
-  const writeableMounts = [input.workdir]
+  const writeableMounts = [homeDir]
   for (const mount of writeableMounts) {
     appendParentDirectories(args, mount, ensuredDirectories)
     args.push("--bind", mount, mount)

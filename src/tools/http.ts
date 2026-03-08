@@ -37,6 +37,42 @@ const insideDirectory = (root: string, candidate: string) => {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
 }
 
+const sessionHomeDir = (workdir: string) => dirname(resolve(workdir))
+
+const resolveSessionPath = (workdir: string, candidate: string) => {
+  const normalized = candidate.trim()
+  if (normalized === "~") {
+    return sessionHomeDir(workdir)
+  }
+  if (normalized.startsWith("~/")) {
+    return resolve(sessionHomeDir(workdir), normalized.slice(2))
+  }
+  return isAbsolute(normalized) ? resolve(normalized) : resolve(workdir, normalized)
+}
+
+const formatSessionPath = (workdir: string, candidate: string) => {
+  const resolvedCandidate = resolve(candidate)
+  const resolvedWorkdir = resolve(workdir)
+  const workdirRelative = relative(resolvedWorkdir, resolvedCandidate)
+  if (workdirRelative === "") {
+    return "."
+  }
+  if (!workdirRelative.startsWith("..") && !isAbsolute(workdirRelative)) {
+    return `./${workdirRelative}`
+  }
+
+  const homeDir = sessionHomeDir(workdir)
+  const homeRelative = relative(homeDir, resolvedCandidate)
+  if (homeRelative === "") {
+    return "~"
+  }
+  if (!homeRelative.startsWith("..") && !isAbsolute(homeRelative)) {
+    return `~/${homeRelative}`
+  }
+
+  return candidate
+}
+
 const sendJson = (response: ServerResponse, body: unknown, status = 200) => {
   response.writeHead(status, { "content-type": "application/json" })
   response.end(JSON.stringify(body))
@@ -161,11 +197,12 @@ export const ToolBridgeLive = Layer.scoped(
             sendJson(response, { error: "missing path" }, 400)
             return
           }
-          if (!insideDirectory(activeRun.workdir, payload.path)) {
-            sendJson(response, { error: "path outside session workdir" }, 403)
+          const sessionHome = sessionHomeDir(activeRun.workdir)
+          const filePath = resolveSessionPath(activeRun.workdir, payload.path)
+          if (!insideDirectory(sessionHome, filePath)) {
+            sendJson(response, { error: "path outside session home" }, 403)
             return
           }
-          const filePath = isAbsolute(payload.path) ? resolve(payload.path) : resolve(activeRun.workdir, payload.path)
 
           if (!activeRun.discordMessage.channel.isSendable()) {
             sendJson(response, { error: "channel not sendable" }, 409)
@@ -178,7 +215,7 @@ export const ToolBridgeLive = Layer.scoped(
             allowedMentions: { parse: ["users", "roles", "everyone"] },
           })
 
-          sendJson(response, { ok: true, message: `Sent file ${payload.path}` })
+          sendJson(response, { ok: true, message: `Sent file ${formatSessionPath(activeRun.workdir, filePath)}` })
           return
         }
 
@@ -187,11 +224,12 @@ export const ToolBridgeLive = Layer.scoped(
             sendJson(response, { error: "missing path" }, 400)
             return
           }
-          if (!insideDirectory(activeRun.workdir, payload.path)) {
-            sendJson(response, { error: "path outside session workdir" }, 403)
+          const sessionHome = sessionHomeDir(activeRun.workdir)
+          const imagePath = resolveSessionPath(activeRun.workdir, payload.path)
+          if (!insideDirectory(sessionHome, imagePath)) {
+            sendJson(response, { error: "path outside session home" }, 403)
             return
           }
-          const imagePath = isAbsolute(payload.path) ? resolve(payload.path) : resolve(activeRun.workdir, payload.path)
 
           if (!activeRun.discordMessage.channel.isSendable()) {
             sendJson(response, { error: "channel not sendable" }, 409)
@@ -204,7 +242,7 @@ export const ToolBridgeLive = Layer.scoped(
             allowedMentions: { parse: ["users", "roles", "everyone"] },
           })
 
-          sendJson(response, { ok: true, message: `Sent image ${payload.path}` })
+          sendJson(response, { ok: true, message: `Sent image ${formatSessionPath(activeRun.workdir, imagePath)}` })
           return
         }
 
@@ -271,8 +309,8 @@ export const ToolBridgeLive = Layer.scoped(
         if (request.method === "POST" && pathname === "/tool/download-attachments") {
           const referencedMessage = await fetchReferencedMessage(activeRun.discordMessage)
           const targetDirectory = resolve(activeRun.workdir, payload.directory ?? ".")
-          if (!insideDirectory(activeRun.workdir, targetDirectory)) {
-            sendJson(response, { error: "directory outside session workdir" }, 403)
+          if (!insideDirectory(sessionHomeDir(activeRun.workdir), targetDirectory)) {
+            sendJson(response, { error: "directory outside session home" }, 403)
             return
           }
 
@@ -312,7 +350,7 @@ export const ToolBridgeLive = Layer.scoped(
             const destination = await uniquePath(targetDirectory, filename)
             await writeFile(destination, new Uint8Array(arrayBuffer))
             downloaded.push({
-              savedPath: relative(activeRun.workdir, destination),
+              savedPath: formatSessionPath(activeRun.workdir, destination),
               originalName: attachment.name ?? attachment.id,
               source,
             })
@@ -324,7 +362,7 @@ export const ToolBridgeLive = Layer.scoped(
               `Downloaded ${downloaded.length} attachment${downloaded.length === 1 ? "" : "s"}:`,
               ...downloaded.map(
                 ({ savedPath, originalName, source }) =>
-                  `- \`./${savedPath}\` from ${source} (\`${originalName}\`)`,
+                  `- \`${savedPath}\` from ${source} (\`${originalName}\`)`,
               ),
             ].join("\n"),
           })

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -251,8 +251,19 @@ export const ChannelSessionsLive = Layer.scoped(
           },
         ]
       })
-    const removeWorkdir = (workdir: string) =>
-      Effect.promise(() => rm(resolve(workdir), { recursive: true, force: true })).pipe(Effect.ignore)
+    const removeSessionRoot = (rootDir: string) =>
+      Effect.promise(() => rm(resolve(rootDir), { recursive: true, force: true })).pipe(Effect.ignore)
+
+    const createSessionPaths = () =>
+      Effect.promise(async () => {
+        const rootDir = await mkdtemp(join(tmpdir(), "opencode-discord-"))
+        const workdir = join(rootDir, "home", "workspace")
+        await mkdir(workdir, { recursive: true })
+        return {
+          rootDir,
+          workdir,
+        }
+      })
 
     const clearSessionGate = (channelId: string, gate: SessionGate) =>
       Ref.update(stateRef, (current) => {
@@ -751,7 +762,7 @@ export const ChannelSessionsLive = Layer.scoped(
 
     const createSession = (message: Message): FallibleEffect<ChannelSession> =>
       Effect.gen(function* () {
-        const workdir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "opencode-discord-")))
+        const { rootDir, workdir } = yield* createSessionPaths()
         let opencodeSession: ChannelSession["opencode"] | null = null
 
         try {
@@ -761,6 +772,7 @@ export const ChannelSessionsLive = Layer.scoped(
           const session: ChannelSession = {
             channelId: message.channelId,
             opencode: opencodeSession,
+            rootDir,
             workdir,
             queue,
             activeRun: null,
@@ -782,7 +794,7 @@ export const ChannelSessionsLive = Layer.scoped(
           if (opencodeSession) {
             yield* opencodeSession.close().pipe(Effect.ignore)
           }
-          yield* removeWorkdir(workdir)
+          yield* removeSessionRoot(rootDir)
           throw error
         }
       })
@@ -1352,7 +1364,7 @@ export const ChannelSessionsLive = Layer.scoped(
         for (const session of state.sessionsByChannelId.values()) {
           yield* Queue.shutdown(session.queue)
           yield* session.opencode.close().pipe(Effect.ignore)
-          yield* removeWorkdir(session.workdir)
+          yield* removeSessionRoot(session.rootDir)
         }
         yield* FiberSet.clear(fiberSet)
       }),

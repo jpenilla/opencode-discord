@@ -103,11 +103,11 @@ Repo-local tools live under [`opencode/tools`](./opencode/tools):
 What they do:
 
 - `send-file`
-  Upload a file from the current session workdir to Discord.
+  Upload a file to Discord. Relative paths resolve from the current session workdir and must stay under the synthetic session home.
 - `send-image`
-  Upload an image from the current session workdir to Discord.
+  Upload an image to Discord. Relative paths resolve from the current session workdir and must stay under the synthetic session home.
 - `download-attachments`
-  Download attachments from the triggering message and its replied-to message into the current session workdir.
+  Download attachments from the triggering message and its replied-to message. Relative destinations resolve from the current session workdir and must stay under the synthetic session home.
 - `react`
   Add a reaction to the triggering Discord message.
 - `list-custom-emojis`
@@ -119,8 +119,8 @@ What they do:
 
 Current guardrails:
 
-- File/image paths must stay under the session workdir.
-- Download destinations must stay under the session workdir.
+- File/image paths are resolved from the session workdir when relative and must stay under the synthetic session home.
+- Download destinations are resolved from the session workdir when relative and must stay under the synthetic session home.
 - Reactions target only the triggering message.
 - Emoji/sticker availability is filtered by the current Discord context and permissions.
 
@@ -190,7 +190,8 @@ Startup behavior:
 `bwrap` behavior:
 
 - Each worker runs with a dedicated temp workdir.
-- The session workdir is the writable project area.
+- Each worker gets a synthetic home directory, and the OpenCode session cwd is `$HOME/workspace`.
+- The session workdir is the writable project area inside that synthetic home.
 - `/tmp` inside the sandbox is a tmpfs.
 - The repo-local OpenCode config/tool workspace is staged into a temporary copy first and mounted read-only.
 - Only a small env allowlist plus `SANDBOX_ENV_PASSTHROUGH` is inherited.
@@ -212,7 +213,7 @@ Behavior:
 
 Important caveat:
 
-- The current path confinement checks for file/image/download tools are lexical (`resolve`/`relative`), not `realpath`-based. Symlinks inside the session workdir are therefore not a hard security boundary.
+- The current path confinement checks for file/image/download tools are lexical (`resolve`/`relative`), not `realpath`-based. Symlinks inside the synthetic session home are therefore not a hard security boundary.
 
 ## Running
 
@@ -243,7 +244,7 @@ bun run typecheck
 ## Operational Notes
 
 - The bot uses the repo-local [`opencode`](./opencode) workspace for its custom Discord tools.
-- Host OpenCode config/auth/model state is copied into worker-specific XDG state before workers start.
+- Host OpenCode config/auth/model state is copied into worker-specific XDG state under the synthetic home before workers start.
 - Logs are structured JSON to stdout.
 - Logs can include backend choice, workdirs, server URLs, bridge socket paths, and raw OpenCode event properties, so treat them as potentially sensitive.
 - Outgoing final replies and tool sends allow normal Discord mentions; be careful if you let OpenCode generate arbitrary mention-like text in shared channels.
