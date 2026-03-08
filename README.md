@@ -1,60 +1,144 @@
 # opencode-discord
 
-Discord bot frontend for [OpenCode](https://github.com/sst/opencode).
+Discord frontend for [OpenCode](https://github.com/sst/opencode).
 
-The bot keeps one long-lived OpenCode session per Discord text channel, runs each channel serially, and bridges a small set of Discord actions back into OpenCode tools.
+This project runs OpenCode behind a Discord bot. Each Discord text channel gets its own long-lived OpenCode session and temp workdir, so channel conversations stay isolated while still feeling persistent across messages.
 
-## Behavior
+## Overview
 
-- Supports standard guild text channels only.
-- Ignores DMs, threads, forum posts, announcement channels, and other channel types for now.
-- Triggers on:
-  - bot mention
-  - leading trigger phrase, default `hey opencode`
-  - replying to a bot message with reply ping enabled
-- Keeps one session and one temp workdir per Discord channel for the lifetime of the process.
-- Different channels run concurrently.
-- Additional same-channel messages that arrive during an active run are folded into that active run.
-- Final assistant output is sent only after completion and split across multiple Discord messages when needed.
-- Sends compact progress and tool updates during runs.
-- Recreates a channel's OpenCode server on the existing workdir if a health probe shows the session is dead.
+What the bot does:
 
-## Discord Tools
+- Creates one OpenCode session per Discord channel.
+- Lets different channels run concurrently.
+- Reuses the same channel session across messages for the lifetime of the process.
+- Bridges a small set of Discord-native actions back into OpenCode as tools.
+- Supports interactive OpenCode question prompts with Discord components and modals.
+- Exposes slash commands for compaction and interruption.
+
+Current scope:
+
+- Supported: standard guild text channels.
+- Ignored: DMs, threads, forum posts, announcement channels, and bot-authored messages.
+- State is in memory only.
+- Session workdirs live under `/tmp`.
+
+## How Invocation Works
+
+The bot starts a run when a user message in a supported channel does one of these:
+
+- Mentions the bot.
+- Starts with the configured trigger phrase.
+- Replies to a bot message with reply ping enabled.
+
+Behavior details:
+
+- Trigger phrase matching is case-insensitive.
+- Reply-without-ping does not count as a trigger.
+- Reply-to-bot invocation includes the replied bot message text as reply context for the next run.
+
+Default trigger phrase: `hey opencode`
+
+## Session Model
+
+- The first triggered message in a channel creates that channel’s OpenCode session and workdir.
+- Each channel runs serially.
+- Different channels can run at the same time.
+- Same-channel follow-ups that arrive during an active run are folded into that run instead of starting a second concurrent run.
+- If a channel session becomes unhealthy, the bot recreates the OpenCode worker on the same workdir.
+
+Important lifecycle note:
+
+- Restarting the bot resets all in-memory session state.
+
+## Discord UX
+
+During a run, the bot may show:
+
+- typing indicator
+- progress updates
+- tool cards
+- compaction cards
+- interactive question cards
+
+Final assistant output is sent only after completion and is chunked safely across multiple Discord messages when needed.
+
+Question prompts:
+
+- OpenCode question batches are rendered as interactive Discord cards.
+- The card shows one question at a time.
+- Supports single-select and multi-select questions.
+- Supports optional custom answers through a modal when the question allows it.
+- Supports paging through both questions and large option sets.
+- Only the user who started the run can answer the question batch.
+- Rejected, expired, or replaced prompts are updated in place.
+
+## Slash Commands
+
+The bot syncs these guild commands on startup and when it joins a new guild:
+
+- `/compact`
+  Compact the current channel session when no run is active.
+- `/interrupt`
+  Interrupt the active run in the current channel.
+
+Command behavior:
+
+- Both commands acknowledge privately to the caller.
+- `/compact` also posts in-channel compaction status.
+- `/interrupt` also posts an in-channel interruption card.
+- Both commands are restricted to standard guild text channels.
+
+## Discord Tools Exposed To OpenCode
 
 Repo-local tools live under [`opencode/tools`](./opencode/tools):
 
+- `download-attachments`
+- `list-custom-emojis`
+- `list-stickers`
+- `react`
 - `send-file`
 - `send-image`
 - `send-sticker`
-- `react`
-- `list-custom-emojis`
-- `list-stickers`
+
+What they do:
+
+- `send-file`
+  Upload a file from the current session workdir to Discord.
+- `send-image`
+  Upload an image from the current session workdir to Discord.
 - `download-attachments`
+  Download attachments from the triggering message and its replied-to message into the current session workdir.
+- `react`
+  Add a reaction to the triggering Discord message.
+- `list-custom-emojis`
+  List usable custom emoji in the current Discord context.
+- `list-stickers`
+  List usable stickers in the current Discord context.
+- `send-sticker`
+  Send a sticker that is usable in the current Discord context.
 
-Tool bridge enforcement:
+Current guardrails:
 
-- file and image paths must stay inside the current session workdir
-- reactions are limited to the triggering Discord message
-- attachment downloads are written into the current session workdir
+- File/image paths must stay under the session workdir.
+- Download destinations must stay under the session workdir.
+- Reactions target only the triggering message.
+- Emoji/sticker availability is filtered by the current Discord context and permissions.
 
-## Sandbox
+Implementation note:
 
-The bot launches a dedicated OpenCode server per channel session.
-
-Sandbox backends:
-
-- `auto`
-- `bwrap`
-- `unsafe-dev`
-
-On Linux, `auto` selects `bwrap`. Startup probes required executables up front. For `bwrap`, the bot stages a temp copy of the repo-local OpenCode tool config so the sandbox only gets a narrow read-only view of the tool install instead of the full repo dependency tree.
+- OpenCode scans top-level files in `opencode/tools/*.ts` as tool modules.
+- Shared helpers should live under a subdirectory such as [`opencode/tools/lib`](./opencode/tools/lib), not as another top-level file in `opencode/tools/`.
 
 ## Requirements
 
 - Bun
+- `opencode` installed on the host
+- OpenCode already authenticated on the host
 - a Discord bot token
-- `opencode` installed and authenticated
-- `bwrap` installed if using the `bwrap` backend
+- a Discord application with Message Content intent enabled
+- `bwrap` installed if you want the `bwrap` sandbox backend
+
+OpenCode/provider auth is expected to come from normal host OpenCode state, not from ad hoc environment variables.
 
 ## Configuration
 
@@ -63,13 +147,72 @@ See [`.env.example`](./.env.example).
 Main variables:
 
 - `DISCORD_TOKEN`
+  Discord bot token. Required.
 - `TRIGGER_PHRASE`
+  Leading text trigger. Default: `hey opencode`
 - `SANDBOX_BACKEND`
+  One of `auto`, `bwrap`, or `unsafe-dev`
 - `OPENCODE_BIN`
+  Path or command name for the OpenCode CLI. Default: `opencode`
 - `BWRAP_BIN`
+  Path or command name for Bubblewrap. Default: `bwrap`
 - `DISCORD_TOOL_BRIDGE_SOCKET`
+  Optional explicit Unix socket path for the local Discord tool bridge
 - `SANDBOX_READ_ONLY_PATHS`
+  Optional comma-separated read-only bind list for the `bwrap` backend
 - `SANDBOX_ENV_PASSTHROUGH`
+  Optional comma-separated extra env vars to pass through to sandboxed workers
+
+Notes:
+
+- `DISCORD_TOKEN` is the only required env var.
+- `SANDBOX_READ_ONLY_PATHS` replaces the default `bwrap` read-only bind list; it does not append to it.
+- `SANDBOX_ENV_PASSTHROUGH` is for additional env vars only. OpenCode auth should usually come from host state.
+
+## Sandbox Behavior
+
+Supported backends:
+
+- `auto`
+- `bwrap`
+- `unsafe-dev`
+
+Backend selection:
+
+- On Linux, `auto` resolves to `bwrap`.
+- On non-Linux platforms, `auto` resolves to `unsafe-dev`.
+
+Startup behavior:
+
+- Required executables are probed eagerly at startup.
+- If the selected backend cannot be started, the bot fails closed.
+
+`bwrap` behavior:
+
+- Each worker runs with a dedicated temp workdir.
+- The session workdir is the writable project area.
+- `/tmp` inside the sandbox is a tmpfs.
+- The repo-local OpenCode config/tool workspace is staged into a temporary copy first and mounted read-only.
+- Only a small env allowlist plus `SANDBOX_ENV_PASSTHROUGH` is inherited.
+
+Important caveat:
+
+- The current `bwrap` profile is not a network-isolated sandbox.
+
+## Tool Bridge
+
+The Discord bridge between OpenCode tools and the bot process is a local HTTP server on a Unix socket.
+
+Behavior:
+
+- The socket path is generated automatically unless `DISCORD_TOOL_BRIDGE_SOCKET` is set.
+- A per-process random token authenticates bridge requests.
+- Workers receive `OPENCODE_DISCORD_BRIDGE_SOCKET` and `OPENCODE_DISCORD_BRIDGE_TOKEN`.
+- Bridge requests are rejected unless there is an active run for the supplied `sessionID`.
+
+Important caveat:
+
+- The current path confinement checks for file/image/download tools are lexical (`resolve`/`relative`), not `realpath`-based. Symlinks inside the session workdir are therefore not a hard security boundary.
 
 ## Running
 
@@ -79,10 +222,16 @@ Install dependencies:
 bun install
 ```
 
-Start the bot:
+Run in development:
 
 ```bash
 bun run dev
+```
+
+Run normally:
+
+```bash
+bun run start
 ```
 
 Typecheck:
@@ -91,8 +240,10 @@ Typecheck:
 bun run typecheck
 ```
 
-## Notes
+## Operational Notes
 
-- Session state is in memory only. Restarting the bot resets channel sessions.
-- Session workdirs live under `/tmp` and are removed on process shutdown.
-- The `bwrap` sandbox gets a read-only staged copy of the repo-local OpenCode config and tools, not the live repo tree.
+- The bot uses the repo-local [`opencode`](./opencode) workspace for its custom Discord tools.
+- Host OpenCode config/auth/model state is copied into worker-specific XDG state before workers start.
+- Logs are structured JSON to stdout.
+- Logs can include backend choice, workdirs, server URLs, bridge socket paths, and raw OpenCode event properties, so treat them as potentially sensitive.
+- Outgoing final replies and tool sends allow normal Discord mentions; be careful if you let OpenCode generate arbitrary mention-like text in shared channels.
