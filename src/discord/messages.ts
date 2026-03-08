@@ -28,31 +28,46 @@ export const summarizeEmbeds = (message: Message) => {
 export const summarizeAttachmentAvailability = (message: Message) =>
   message.attachments.size > 0 ? "yes" : "no"
 
-export const buildOpencodePrompt = (input: {
+type PromptMessageContext = {
   userTag: string
   messageId: string
   content: string
-  referencedMessageContext?: string
-  referencedMessageId?: string
   attachmentContext: string
   embedSummary: string
+}
+
+export const promptMessageContext = (message: Message, contentOverride?: string): PromptMessageContext => ({
+  userTag: message.author.tag,
+  messageId: message.id,
+  content: (contentOverride ?? message.content).trim() || "(empty message)",
+  attachmentContext: summarizeAttachmentAvailability(message),
+  embedSummary: summarizeEmbeds(message),
+})
+
+const appendPromptMessageContext = (
+  sections: string[],
+  context: PromptMessageContext,
+  prefix = "",
+) => {
+  sections.push(`${prefix}Discord user: ${context.userTag}`)
+  sections.push(`${prefix}Discord message ID: ${context.messageId}`)
+  sections.push(`${prefix}Message:`)
+  sections.push(context.content)
+  sections.push("", `${prefix}Attachments:`, context.attachmentContext)
+  sections.push("", `${prefix}Embed summary:`, context.embedSummary)
+}
+
+export const buildOpencodePrompt = (input: {
+  message: PromptMessageContext
+  referencedMessage?: PromptMessageContext
 }) => {
-  const sections = [
-    `Discord user: ${input.userTag}`,
-    `Discord message ID: ${input.messageId}`,
-    "Message:",
-    input.content.trim() || "(empty message)",
-  ]
+  const sections: string[] = []
+  appendPromptMessageContext(sections, input.message)
 
-  if (input.referencedMessageContext) {
-    if (input.referencedMessageId) {
-      sections.push("", `Referenced Discord message ID: ${input.referencedMessageId}`)
-    }
-    sections.push("", "Referenced message:", input.referencedMessageContext)
+  if (input.referencedMessage) {
+    sections.push("")
+    appendPromptMessageContext(sections, input.referencedMessage, "Referenced ")
   }
-
-  sections.push("", "Attachments:", input.attachmentContext)
-  sections.push("", "Embed summary:", input.embedSummary)
 
   return sections.join("\n")
 }

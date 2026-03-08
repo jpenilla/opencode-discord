@@ -13,10 +13,9 @@ import {
   buildBatchedOpencodePrompt,
   buildOpencodePrompt,
   buildQueuedFollowUpPrompt,
+  promptMessageContext,
   sendFinalResponse,
   startTypingLoop,
-  summarizeAttachmentAvailability,
-  summarizeEmbeds,
 } from "@/discord/messages.ts"
 import {
   buildQuestionAnswers,
@@ -1400,13 +1399,8 @@ export const ChannelSessionsLive = Layer.scoped(
           const attachmentMessages = yield* collectAttachmentMessages(message)
           const referencedMessage = attachmentMessages.find((candidate) => candidate.id !== message.id) ?? null
           const prompt = buildOpencodePrompt({
-            userTag: message.author.tag,
-            messageId: message.id,
-            content: invocation.prompt,
-            referencedMessageContext: invocation.referencedMessageContext,
-            referencedMessageId: invocation.referencedMessageId ?? referencedMessage?.id,
-            attachmentContext: summarizeAttachmentAvailability(message),
-            embedSummary: summarizeEmbeds(message),
+            message: promptMessageContext(message, invocation.prompt),
+            referencedMessage: referencedMessage ? promptMessageContext(referencedMessage) : undefined,
           })
 
           const request = {
