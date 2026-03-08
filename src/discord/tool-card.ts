@@ -1,7 +1,7 @@
 import { ContainerBuilder, TextDisplayBuilder } from "@discordjs/builders"
 import { MessageFlags, type Message, type SendableChannels } from "discord.js"
 import type { ToolPart } from "@opencode-ai/sdk/v2"
-import { dirname, resolve } from "node:path"
+import { displaySessionPath } from "@/sandbox/session-paths.ts"
 
 const EDIT_TOOL_CARDS = true
 
@@ -116,89 +116,7 @@ const findUnknownInput = (input: Record<string, unknown>, keys: readonly string[
   return null
 }
 
-const pathAliases = (path: string) => {
-  const normalized = resolve(path)
-  const aliases = new Set<string>([normalized])
-  if (normalized.startsWith("/private/")) {
-    aliases.add(normalized.slice("/private".length))
-  } else if (normalized.startsWith("/var/")) {
-    aliases.add(`/private${normalized}`)
-  }
-  return [...aliases]
-}
-
-const workdirAliases = (workdir: string) => pathAliases(workdir)
-
-const sessionHomeAliases = (workdir: string) => pathAliases(dirname(resolve(workdir)))
-
-const normalizePathToken = (token: string, workdir: string) => {
-  const trimmed = token.trim()
-  if (
-    trimmed === "." ||
-    trimmed === ".." ||
-    trimmed.startsWith("./") ||
-    trimmed.startsWith("../")
-  ) {
-    return resolve(workdir, trimmed)
-  }
-  if (trimmed.startsWith("/")) {
-    return resolve(trimmed)
-  }
-  return trimmed.startsWith("./") ? trimmed.slice(2) : trimmed
-}
-
-const relativeToWorkdir = (path: string, workdir: string) => {
-  const normalized = normalizePathToken(path, workdir)
-  for (const alias of workdirAliases(workdir)) {
-    const candidates = [alias]
-    if (alias.startsWith("/")) {
-      candidates.push(alias.slice(1))
-    }
-
-    for (const candidate of candidates) {
-      if (normalized === candidate) {
-        return "."
-      }
-      if (normalized.startsWith(`${candidate}/`)) {
-        return `./${normalized.slice(candidate.length + 1)}`
-      }
-    }
-  }
-
-  return null
-}
-
-const relativeToSessionHome = (path: string, workdir: string) => {
-  const normalized = normalizePathToken(path, workdir)
-  for (const alias of sessionHomeAliases(workdir)) {
-    const candidates = [alias]
-    if (alias.startsWith("/")) {
-      candidates.push(alias.slice(1))
-    }
-
-    for (const candidate of candidates) {
-      if (normalized === candidate) {
-        return "~"
-      }
-      if (normalized.startsWith(`${candidate}/`)) {
-        return `~/${normalized.slice(candidate.length + 1)}`
-      }
-    }
-  }
-
-  return null
-}
-
-const displayPath = (path: string, workdir: string) => {
-  const rel = relativeToWorkdir(path, workdir) ?? relativeToSessionHome(path, workdir)
-  if (!rel) {
-    return path
-  }
-  if (rel === "." || rel === "~") {
-    return rel
-  }
-  return rel.startsWith(".") || rel.startsWith("~") ? rel : `./${rel}`
-}
+const displayPath = (path: string, workdir: string) => displaySessionPath(workdir, path)
 
 const normalizeDisplayText = (value: string, workdir: string) => {
   return value.replace(/(?:\/private)?\/[^\s`"'|)]+/g, (token) => displayPath(token, workdir))

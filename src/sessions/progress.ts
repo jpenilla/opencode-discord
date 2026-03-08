@@ -7,16 +7,12 @@ import { sendProgressUpdate } from "@/discord/messages.ts"
 import { upsertToolCard } from "@/discord/tool-card.ts"
 import {
   formatPatchUpdated,
-  formatPermissionAsked,
-  formatPermissionReplied,
   formatSessionStatus,
   formatThinkingCompleted,
 } from "@/discord/progress.ts"
 import {
   getCompactionPart,
   getPatchPart,
-  getPermissionReplied,
-  getPermissionUpdated,
   getReasoningPart,
   getSessionCompacted,
   getSessionStatusUpdated,
@@ -42,8 +38,6 @@ type ProgressState = {
   todoCards: Message[]
   compactionCard: Message | null
   compactionPartIds: Set<string>
-  permissionReplies: Map<string, string>
-  pendingPermissions: Set<string>
   retryStatusKeys: Set<string>
   completedReasoningPartIds: Set<string>
 }
@@ -55,8 +49,6 @@ const createProgressState = (): ProgressState => ({
   todoCards: [],
   compactionCard: null,
   compactionPartIds: new Set<string>(),
-  permissionReplies: new Map<string, string>(),
-  pendingPermissions: new Set<string>(),
   retryStatusKeys: new Set<string>(),
   completedReasoningPartIds: new Set<string>(),
 })
@@ -120,21 +112,6 @@ const progressUpdateForEvent = (event: RunProgressEvent, state: ProgressState) =
         state.retryStatusKeys.add(key)
       }
       return formatSessionStatus(event.status)
-    case "permission-asked": {
-      if (state.pendingPermissions.has(event.permission.id)) {
-        return null
-      }
-      state.pendingPermissions.add(event.permission.id)
-      return formatPermissionAsked(event.permission)
-    }
-    case "permission-replied": {
-      const previousReply = state.permissionReplies.get(event.reply.requestID)
-      if (previousReply === event.reply.reply) {
-        return null
-      }
-      state.permissionReplies.set(event.reply.requestID, event.reply.reply)
-      return formatPermissionReplied(event.reply)
-    }
   }
 }
 
@@ -231,22 +208,6 @@ export const collectProgressEvents = (event: Event): ReadonlyArray<RunProgressEv
     progressEvents.push({
       type: "patch-updated",
       part: patchPart,
-    })
-  }
-
-  const permission = getPermissionUpdated(event)
-  if (permission) {
-    progressEvents.push({
-      type: "permission-asked",
-      permission,
-    })
-  }
-
-  const permissionReply = getPermissionReplied(event)
-  if (permissionReply) {
-    progressEvents.push({
-      type: "permission-replied",
-      reply: permissionReply,
     })
   }
 

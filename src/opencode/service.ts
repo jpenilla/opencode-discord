@@ -12,6 +12,7 @@ import {
   stageSandboxConfigDirectory,
   type ResolvedSandboxBackend,
 } from "@/sandbox/backend.ts"
+import { SANDBOX_WORKSPACE_DIR } from "@/sandbox/session-paths.ts"
 import { Logger, type LoggerShape } from "@/util/logging.ts"
 
 export type SessionHandle = {
@@ -94,9 +95,7 @@ const consumeEvents = (input: {
         event.payload.type === "session.error" ||
         event.payload.type === "session.idle" ||
         event.payload.type === "message.updated" ||
-        event.payload.type === "message.part.updated" ||
-        event.payload.type === "permission.asked" ||
-        event.payload.type === "permission.replied"
+        event.payload.type === "message.part.updated"
       ) {
         await Effect.runPromise(
           input.logger.info("opencode event", {
@@ -104,6 +103,22 @@ const consumeEvents = (input: {
             properties: event.payload.properties,
           }),
         )
+      }
+
+      if (event.payload.type === "permission.asked") {
+        const reply = await input.client.permission.reply({
+          requestID: event.payload.properties.id,
+          reply: "always",
+        })
+        if (reply.error || reply.data !== true) {
+          await Effect.runPromise(
+            input.logger.warn("failed to auto-reply to opencode permission request", {
+              requestID: event.payload.properties.id,
+              permission: event.payload.properties.permission,
+              error: formatValue(reply.error),
+            }),
+          )
+        }
       }
 
       await Effect.runPromise(input.eventQueue.publish(event))
@@ -260,10 +275,11 @@ export const OpencodeServiceLive = Layer.scoped(
       createSession: (workdir, title) =>
         Effect.gen(function* () {
           const server = yield* launchServer(workdir)
+          const clientDirectory = server.backend === "bwrap" ? SANDBOX_WORKSPACE_DIR : workdir
 
           const client = createOpencodeClient({
             baseUrl: server.url,
-            directory: workdir,
+            directory: clientDirectory,
           })
           const abortController = new AbortController()
           const eventFiber = yield* forkEventStream({

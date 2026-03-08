@@ -6,6 +6,7 @@ import { homedir, tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 
 import type { AppConfigShape } from "@/config.ts"
+import { SANDBOX_HOME_DIR, SANDBOX_WORKSPACE_DIR, sessionHomeDir } from "@/sandbox/session-paths.ts"
 
 export type ResolvedSandboxBackend = "unsafe-dev" | "bwrap"
 
@@ -351,8 +352,6 @@ const buildWorkerEnvironment = (config: LaunchSandboxedServerInput["config"]) =>
   return Object.fromEntries(allowedEntries)
 }
 
-const sessionHomeDir = (workdir: string) => dirname(resolve(workdir))
-
 const hostXdgHomes = () => {
   const home = homedir()
   return {
@@ -466,8 +465,8 @@ const launchUnsafeDevServer = async (input: LaunchSandboxedServerInput, port: nu
 
 const launchBwrapServer = async (input: LaunchSandboxedServerInput, port: number): Promise<SandboxedServer> => {
   const homeDir = sessionHomeDir(input.workdir)
-  const xdg = await stageHostOpencodeState(homeDir)
-  await mkdir(xdg.cache, { recursive: true })
+  const hostXdg = await stageHostOpencodeState(homeDir)
+  await mkdir(hostXdg.cache, { recursive: true })
 
   const opencodeBin = resolveSpawnBinary(input.config.opencodeBin, "opencode")
   const bwrapBin = resolveSpawnBinary(input.config.bwrapBin, "bwrap")
@@ -491,10 +490,10 @@ const launchBwrapServer = async (input: LaunchSandboxedServerInput, port: number
   ]
 
   const ensuredDirectories = new Set<string>()
-  const writeableMounts = [homeDir]
-  for (const mount of writeableMounts) {
-    appendParentDirectories(args, mount, ensuredDirectories)
-    args.push("--bind", mount, mount)
+  const writeableMounts = [[homeDir, SANDBOX_HOME_DIR]] as const
+  for (const [source, destination] of writeableMounts) {
+    appendParentDirectories(args, destination, ensuredDirectories)
+    args.push("--bind", source, destination)
   }
 
   appendParentDirectories(args, SANDBOX_TOOL_BRIDGE_SOCKET_PATH, ensuredDirectories)
@@ -505,7 +504,12 @@ const launchBwrapServer = async (input: LaunchSandboxedServerInput, port: number
     args.push("--ro-bind", mount, mount)
   }
 
-  const environment = baseServerEnvironment(input, homeDir, xdg, SANDBOX_TOOL_BRIDGE_SOCKET_PATH)
+  const environment = baseServerEnvironment(
+    input,
+    SANDBOX_HOME_DIR,
+    workerXdgHomes(SANDBOX_HOME_DIR),
+    SANDBOX_TOOL_BRIDGE_SOCKET_PATH,
+  )
   for (const [key, value] of Object.entries(environment)) {
     if (value === undefined) {
       continue
@@ -513,7 +517,7 @@ const launchBwrapServer = async (input: LaunchSandboxedServerInput, port: number
     args.push("--setenv", key, value)
   }
 
-  args.push("--chdir", input.workdir, opencodeBin, "serve", "--hostname=127.0.0.1", `--port=${port}`)
+  args.push("--chdir", SANDBOX_WORKSPACE_DIR, opencodeBin, "serve", "--hostname=127.0.0.1", `--port=${port}`)
 
   const proc = spawn(bwrapBin, args, {
     cwd: input.workdir,

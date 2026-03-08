@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
+import { basename, dirname, isAbsolute, resolve } from "node:path"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 
 import { Context, Effect, Layer } from "effect"
@@ -12,6 +12,7 @@ import {
   listUsableStickers,
   normalizeReactionEmoji,
 } from "@/discord/assets.ts"
+import { displaySessionPath, insideAliasedRoot, resolveSessionPath, sessionHomeDir } from "@/sandbox/session-paths.ts"
 import { ChannelSessions } from "@/sessions/registry.ts"
 import { Logger } from "@/util/logging.ts"
 
@@ -33,44 +34,7 @@ type ToolRequest = {
 const insideDirectory = (root: string, candidate: string) => {
   const rootPath = resolve(root)
   const candidatePath = isAbsolute(candidate) ? resolve(candidate) : resolve(rootPath, candidate)
-  const rel = relative(rootPath, candidatePath)
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
-}
-
-const sessionHomeDir = (workdir: string) => dirname(resolve(workdir))
-
-const resolveSessionPath = (workdir: string, candidate: string) => {
-  const normalized = candidate.trim()
-  if (normalized === "~") {
-    return sessionHomeDir(workdir)
-  }
-  if (normalized.startsWith("~/")) {
-    return resolve(sessionHomeDir(workdir), normalized.slice(2))
-  }
-  return isAbsolute(normalized) ? resolve(normalized) : resolve(workdir, normalized)
-}
-
-const formatSessionPath = (workdir: string, candidate: string) => {
-  const resolvedCandidate = resolve(candidate)
-  const resolvedWorkdir = resolve(workdir)
-  const workdirRelative = relative(resolvedWorkdir, resolvedCandidate)
-  if (workdirRelative === "") {
-    return "."
-  }
-  if (!workdirRelative.startsWith("..") && !isAbsolute(workdirRelative)) {
-    return `./${workdirRelative}`
-  }
-
-  const homeDir = sessionHomeDir(workdir)
-  const homeRelative = relative(homeDir, resolvedCandidate)
-  if (homeRelative === "") {
-    return "~"
-  }
-  if (!homeRelative.startsWith("..") && !isAbsolute(homeRelative)) {
-    return `~/${homeRelative}`
-  }
-
-  return candidate
+  return insideAliasedRoot(rootPath, candidatePath)
 }
 
 const sendJson = (response: ServerResponse, body: unknown, status = 200) => {
@@ -215,7 +179,7 @@ export const ToolBridgeLive = Layer.scoped(
             allowedMentions: { parse: ["users", "roles", "everyone"] },
           })
 
-          sendJson(response, { ok: true, message: `Sent file ${formatSessionPath(activeRun.workdir, filePath)}` })
+          sendJson(response, { ok: true, message: `Sent file ${displaySessionPath(activeRun.workdir, filePath)}` })
           return
         }
 
@@ -242,7 +206,7 @@ export const ToolBridgeLive = Layer.scoped(
             allowedMentions: { parse: ["users", "roles", "everyone"] },
           })
 
-          sendJson(response, { ok: true, message: `Sent image ${formatSessionPath(activeRun.workdir, imagePath)}` })
+          sendJson(response, { ok: true, message: `Sent image ${displaySessionPath(activeRun.workdir, imagePath)}` })
           return
         }
 
@@ -308,7 +272,7 @@ export const ToolBridgeLive = Layer.scoped(
 
         if (request.method === "POST" && pathname === "/tool/download-attachments") {
           const referencedMessage = await fetchReferencedMessage(activeRun.discordMessage)
-          const targetDirectory = resolve(activeRun.workdir, payload.directory ?? ".")
+          const targetDirectory = resolveSessionPath(activeRun.workdir, payload.directory ?? ".")
           if (!insideDirectory(sessionHomeDir(activeRun.workdir), targetDirectory)) {
             sendJson(response, { error: "directory outside session home" }, 403)
             return
@@ -350,7 +314,7 @@ export const ToolBridgeLive = Layer.scoped(
             const destination = await uniquePath(targetDirectory, filename)
             await writeFile(destination, new Uint8Array(arrayBuffer))
             downloaded.push({
-              savedPath: formatSessionPath(activeRun.workdir, destination),
+              savedPath: displaySessionPath(activeRun.workdir, destination),
               originalName: attachment.name ?? attachment.id,
               source,
             })
