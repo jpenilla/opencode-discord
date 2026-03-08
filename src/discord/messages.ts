@@ -98,21 +98,11 @@ export const sendProgressUpdate = async (input: {
   }
 
   const chunks = splitDiscordMessage(safeText)
+  if (!input.message.channel.isSendable()) {
+    return
+  }
 
-  for (const [index, chunk] of chunks.entries()) {
-    if (index === 0) {
-      await input.message.reply({
-        content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
-        allowedMentions: { repliedUser: false, parse: [] },
-        flags: MessageFlags.SuppressNotifications,
-      })
-      continue
-    }
-
-    if (!input.message.channel.isSendable()) {
-      continue
-    }
-
+  for (const chunk of chunks) {
     await (input.message.channel as SendableChannels).send({
       content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
       allowedMentions: { parse: [] },

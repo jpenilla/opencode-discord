@@ -13,11 +13,7 @@ export const formatSessionStatus = (status: SessionStatus) => {
     case "idle":
       return null
     case "retry":
-      return [
-        "## 🔁 Retrying",
-        `- Attempt: ${status.attempt}`,
-        `- Reason: ${status.message}`,
-      ].join("\n")
+      return `*↻ retry ${status.attempt}: ${status.message}*`
   }
 }
 

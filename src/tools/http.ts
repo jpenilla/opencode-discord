@@ -1,5 +1,7 @@
 import { Context, Effect, Layer } from "effect"
 import { resolve, relative, isAbsolute } from "node:path"
+import { mkdir, writeFile } from "node:fs/promises"
+import { basename } from "node:path"
 
 import { AppConfig } from "@/config.ts"
 import { ChannelSessions } from "@/sessions/registry.ts"
@@ -16,6 +18,7 @@ const LOCALHOST = "127.0.0.1"
 type ToolRequest = {
   sessionID: string
   path?: string
+  directory?: string
   caption?: string
   emoji?: string
 }
@@ -32,6 +35,28 @@ const json = (body: unknown, status = 200) =>
     status,
     headers: { "content-type": "application/json" },
   })
+
+const sanitizeFilename = (value: string) => {
+  const name = basename(value).trim()
+  const safe = name.replace(/[/\\:\0]/g, "_")
+  return safe.length > 0 ? safe : "attachment.bin"
+}
+
+const uniquePath = async (directory: string, filename: string) => {
+  const dot = filename.lastIndexOf(".")
+  const base = dot > 0 ? filename.slice(0, dot) : filename
+  const ext = dot > 0 ? filename.slice(dot) : ""
+
+  let attempt = 0
+  while (true) {
+    const candidate = resolve(directory, attempt === 0 ? filename : `${base}-${attempt}${ext}`)
+    const file = Bun.file(candidate)
+    if (!(await file.exists())) {
+      return candidate
+    }
+    attempt += 1
+  }
+}
 
 export const ToolBridgeLive = Layer.scoped(
   ToolBridge,
@@ -112,6 +137,41 @@ export const ToolBridgeLive = Layer.scoped(
           }
           await activeRun.discordMessage.react(payload.emoji)
           return json({ ok: true, message: `Added reaction ${payload.emoji}` })
+        }
+
+        if (request.method === "POST" && request.url.endsWith("/tool/download-attachments")) {
+          const targetDirectory = resolve(activeRun.workdir, payload.directory ?? ".")
+          if (!insideDirectory(activeRun.workdir, targetDirectory)) {
+            return json({ error: "directory outside session workdir" }, 403)
+          }
+
+          const attachments = [...activeRun.discordMessage.attachments.values()]
+          if (attachments.length === 0) {
+            return json({ error: "no attachments on triggering message" }, 409)
+          }
+
+          await mkdir(targetDirectory, { recursive: true })
+
+          const downloaded: string[] = []
+          for (const attachment of attachments) {
+            const response = await fetch(attachment.url)
+            if (!response.ok) {
+              return json({ error: `failed to download attachment: ${attachment.url}` }, 502)
+            }
+
+            const arrayBuffer = await response.arrayBuffer()
+            const filename = sanitizeFilename(attachment.name ?? attachment.id)
+            const destination = await uniquePath(targetDirectory, filename)
+            await writeFile(destination, new Uint8Array(arrayBuffer))
+            downloaded.push(relative(activeRun.workdir, destination))
+          }
+
+          return json({
+            ok: true,
+            message: `Downloaded ${downloaded.length} attachment${downloaded.length === 1 ? "" : "s"}: ${downloaded
+              .map((path) => `./${path}`)
+              .join(", ")}`,
+          })
         }
 
         return json({ error: "not found" }, 404)

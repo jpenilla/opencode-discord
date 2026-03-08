@@ -44,7 +44,7 @@ const formatError = (error: unknown) => {
   return String(error)
 }
 
-const SKIPPED_TOOL_CARD_NAMES = new Set(["send-file", "react"])
+const SKIPPED_TOOL_CARD_NAMES = new Set(["send-file", "send-image", "react", "download-attachments"])
 
 export const ChannelSessionsLive = Layer.scoped(
   ChannelSessions,
@@ -165,10 +165,65 @@ export const ChannelSessionsLive = Layer.scoped(
           patchPartIds: new Set<string>(),
           toolStates: new Map<string, string>(),
           toolCards: new Map<string, Message>(),
+          todoCards: new Array<Message>(),
           permissionReplies: new Map<string, string>(),
           pendingPermissions: new Set<string>(),
           retryStatusKeys: new Set<string>(),
         }
+
+        const isTodoTool = (tool: string) => tool === "todowrite"
+
+        const shouldSkipToolUpdate = (event: Extract<RunProgressEvent, { type: "tool-updated" }>) => {
+          if (SKIPPED_TOOL_CARD_NAMES.has(event.part.tool)) {
+            return true
+          }
+          if (isTodoTool(event.part.tool) && event.part.state.status !== "completed") {
+            return true
+          }
+          const title = event.part.state.status === "running" || event.part.state.status === "completed" ? event.part.state.title : ""
+          const nextKey = `${event.part.state.status}:${title}`
+          const previousKey = state.toolStates.get(event.part.callID)
+          if (previousKey === nextKey) {
+            return true
+          }
+          state.toolStates.set(event.part.callID, nextKey)
+          return false
+        }
+
+        const deletePreviousTodoCards = (currentCard: Message) =>
+          Effect.gen(function* () {
+            for (const previousTodoCard of state.todoCards) {
+              if (previousTodoCard.id === currentCard.id) {
+                continue
+              }
+              yield* Effect.promise(() => previousTodoCard.delete()).pipe(Effect.ignore)
+            }
+            state.todoCards = [currentCard]
+          })
+
+        const handleToolCard = (event: Extract<RunProgressEvent, { type: "tool-updated" }>) =>
+          Effect.gen(function* () {
+            if (shouldSkipToolUpdate(event)) {
+              return
+            }
+
+            const todoTool = isTodoTool(event.part.tool)
+            const existingCard = state.toolCards.get(event.part.callID) ?? null
+            const card = yield* Effect.promise(() =>
+              upsertToolCard({
+                sourceMessage: message,
+                existingCard: todoTool ? null : existingCard,
+                workdir,
+                part: event.part,
+                mode: todoTool ? "always-send" : "edit-or-send",
+              }),
+            )
+            state.toolCards.set(event.part.callID, card)
+
+            if (todoTool) {
+              yield* deletePreviousTodoCards(card)
+            }
+          })
 
         while (true) {
           const first = yield* Queue.take(queue)
@@ -177,27 +232,7 @@ export const ChannelSessionsLive = Layer.scoped(
 
           for (const event of batch) {
             if (event.type === "tool-updated") {
-              if (SKIPPED_TOOL_CARD_NAMES.has(event.part.tool)) {
-                continue
-              }
-              const title = event.part.state.status === "running" || event.part.state.status === "completed" ? event.part.state.title : ""
-              const nextKey = `${event.part.state.status}:${title}`
-              const previousKey = state.toolStates.get(event.part.callID)
-              if (previousKey === nextKey) {
-                continue
-              }
-              state.toolStates.set(event.part.callID, nextKey)
-
-              const existingCard = state.toolCards.get(event.part.callID) ?? null
-              const toolCard = yield* Effect.promise(() =>
-                upsertToolCard({
-                  sourceMessage: message,
-                  existingCard,
-                  workdir,
-                  part: event.part,
-                }),
-              )
-              state.toolCards.set(event.part.callID, toolCard)
+              yield* handleToolCard(event)
               continue
             }
 
