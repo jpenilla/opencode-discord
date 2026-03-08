@@ -97,7 +97,7 @@ const questionAnswer = (question: QuestionInfo, draft: QuestionDraft): QuestionA
 const questionAnswered = (question: QuestionInfo, draft: QuestionDraft) => questionAnswer(question, draft).length > 0
 
 const answerSummary = (answers: ReadonlyArray<string>) =>
-  answers.length === 0 ? "*(none yet)*" : answers.map((answer) => `- \`${compact(answer, 180)}\``).join("\n")
+  answers.length === 0 ? "*(none yet)*" : answers.map((answer) => `\`${compact(answer, 180)}\``).join("\n")
 
 const answerCount = (request: QuestionRequest, drafts: ReadonlyArray<QuestionDraft>) =>
   request.questions.reduce((count, question, index) => count + (questionAnswered(question, drafts[index] ?? emptyQuestionDraft()) ? 1 : 0), 0)
@@ -196,9 +196,14 @@ const renderQuestionMeta = (input: PendingQuestionBatchView) => {
     .join(" • ")
 }
 
+const renderQuestionTitle = (question: QuestionInfo) => {
+  const header = question.header.trim()
+  return header && !/^q\d+$/i.test(header) ? `**${header}**` : null
+}
+
 const renderActiveQuestionText = (input: PendingQuestionBatchView) => {
   const question = input.request.questions[input.page]!
-  return lines(`### ${question.header}`, question.question)
+  return lines(renderQuestionTitle(question), question.question)
 }
 
 const renderAnswerText = (input: PendingQuestionBatchView) => {
@@ -229,11 +234,10 @@ const renderQuestionHints = (input: PendingQuestionBatchView) => {
 
 const renderResolvedQuestionSection = (question: QuestionInfo, answers: ReadonlyArray<string>) =>
   lines(
-    `### ${question.header}`,
+    renderQuestionTitle(question),
     question.question,
     answers.length > 0
       ? lines(
-          "",
           "**Answer**",
           answerSummary(answers),
         )
@@ -263,8 +267,11 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
   )
 
   if (input.status === "answered" || input.status === "rejected" || input.status === "expired") {
-    for (const section of renderResolvedQuestionSections(input)) {
-      container.addSeparatorComponents(new SeparatorBuilder())
+    const resolvedSections = renderResolvedQuestionSections(input).filter(Boolean)
+    for (const [index, section] of resolvedSections.entries()) {
+      if (index > 0) {
+        container.addSeparatorComponents(new SeparatorBuilder())
+      }
       container.addTextDisplayComponents(new TextDisplayBuilder().setContent(section))
     }
     return container
