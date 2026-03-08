@@ -25,7 +25,10 @@ Repo-local tools live under [`opencode/tools`](./opencode/tools):
 
 - `send-file`
 - `send-image`
+- `send-sticker`
 - `react`
+- `list-custom-emojis`
+- `list-stickers`
 - `download-attachments`
 
 Tool bridge enforcement:

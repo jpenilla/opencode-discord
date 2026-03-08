@@ -6,6 +6,12 @@ import { Context, Effect, Layer } from "effect"
 import type { Message as DiscordMessage } from "discord.js"
 
 import { AppConfig } from "@/config.ts"
+import {
+  formatCustomEmoji,
+  listUsableCustomEmojis,
+  listUsableStickers,
+  normalizeReactionEmoji,
+} from "@/discord/assets.ts"
 import { ChannelSessions } from "@/sessions/registry.ts"
 import { Logger } from "@/util/logging.ts"
 
@@ -21,6 +27,7 @@ type ToolRequest = {
   directory?: string
   caption?: string
   emoji?: string
+  stickerID?: string
 }
 
 const insideDirectory = (root: string, candidate: string) => {
@@ -77,6 +84,36 @@ const readJsonBody = async (request: IncomingMessage): Promise<ToolRequest | und
 
   const raw = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8")
   return JSON.parse(raw) as ToolRequest
+}
+
+const formatEmojiList = (message: DiscordMessage) => {
+  const emojis = listUsableCustomEmojis(message)
+  if (emojis.length === 0) {
+    return "No custom emojis are available in this context."
+  }
+
+  return [
+    "Custom emojis available in this context:",
+    ...emojis.map((emoji) => {
+      const reactionInput = `${emoji.animated ? "a:" : ""}${emoji.name}:${emoji.id}`
+      return `- ${formatCustomEmoji(emoji)} \`:${emoji.name}:\` react=\`${reactionInput}\` guild=\`${emoji.guild.name}\``
+    }),
+  ].join("\n")
+}
+
+const formatStickerList = (message: DiscordMessage) => {
+  const stickers = listUsableStickers(message)
+  if (stickers.length === 0) {
+    return "No stickers are available in this context."
+  }
+
+  return [
+    "Stickers available in this context:",
+    ...stickers.map((sticker) => {
+      const tags = sticker.tags ? ` tags=\`${sticker.tags}\`` : ""
+      return `- \`${sticker.id}\` \`${sticker.name}\` guild=\`${sticker.guild?.name ?? "unknown"}\`${tags}`
+    }),
+  ].join("\n")
 }
 
 export const ToolBridgeLive = Layer.scoped(
@@ -169,13 +206,61 @@ export const ToolBridgeLive = Layer.scoped(
           return
         }
 
+        if (request.method === "POST" && pathname === "/tool/list-custom-emojis") {
+          sendJson(response, {
+            ok: true,
+            message: formatEmojiList(activeRun.discordMessage),
+          })
+          return
+        }
+
+        if (request.method === "POST" && pathname === "/tool/list-stickers") {
+          sendJson(response, {
+            ok: true,
+            message: formatStickerList(activeRun.discordMessage),
+          })
+          return
+        }
+
+        if (request.method === "POST" && pathname === "/tool/send-sticker") {
+          if (!payload.stickerID) {
+            sendJson(response, { error: "missing stickerID" }, 400)
+            return
+          }
+
+          const sticker = listUsableStickers(activeRun.discordMessage).find((candidate) => candidate.id === payload.stickerID)
+          if (!sticker) {
+            sendJson(response, { error: "sticker is not available in this context" }, 403)
+            return
+          }
+
+          if (!activeRun.discordMessage.channel.isSendable()) {
+            sendJson(response, { error: "channel not sendable" }, 409)
+            return
+          }
+
+          await activeRun.discordMessage.channel.send({
+            content: payload.caption,
+            stickers: [sticker.id],
+            allowedMentions: { parse: ["users", "roles", "everyone"] },
+          })
+
+          sendJson(response, { ok: true, message: `Sent sticker ${sticker.name} (${sticker.id})` })
+          return
+        }
+
         if (request.method === "POST" && pathname === "/tool/react") {
           if (!payload.emoji) {
             sendJson(response, { error: "missing emoji" }, 400)
             return
           }
-          await activeRun.discordMessage.react(payload.emoji)
-          sendJson(response, { ok: true, message: `Added reaction ${payload.emoji}` })
+          const emoji = normalizeReactionEmoji(activeRun.discordMessage, payload.emoji)
+          if (!emoji) {
+            sendJson(response, { error: "invalid or unavailable emoji" }, 400)
+            return
+          }
+          await activeRun.discordMessage.react(emoji)
+          sendJson(response, { ok: true, message: `Added reaction ${emoji}` })
           return
         }
 

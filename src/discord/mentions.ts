@@ -1,5 +1,7 @@
 import type { Message } from "discord.js"
 
+import { formatCustomEmoji, listUsableCustomEmojis } from "@/discord/assets.ts"
+
 const buildUserMentionIndex = (message: Message) => {
   const byAlias = new Map<string, Set<string>>()
   const addAlias = (alias: string, id: string) => {
@@ -50,12 +52,30 @@ const resolveSingle = (ids: Set<string> | undefined) => {
   return [...ids][0] ?? null
 }
 
+const buildEmojiMentionIndex = (message: Message) => {
+  const byAlias = new Map<string, Set<string>>()
+
+  for (const emoji of listUsableCustomEmojis(message)) {
+    const alias = emoji.name.trim().toLowerCase()
+    if (!alias) {
+      continue
+    }
+
+    const existing = byAlias.get(alias) ?? new Set<string>()
+    existing.add(formatCustomEmoji(emoji))
+    byAlias.set(alias, existing)
+  }
+
+  return byAlias
+}
+
 export const normalizeOutgoingMentions = (message: Message, text: string) => {
   const userByAlias = buildUserMentionIndex(message)
   const roleByAlias = buildRoleMentionIndex(message)
+  const emojiByAlias = buildEmojiMentionIndex(message)
 
   const candidateRegex = /(^|[\s([{"'])@([A-Za-z0-9_.-]+)/g
-  return text.replace(candidateRegex, (match, prefix: string, rawAlias: string) => {
+  const withMentions = text.replace(candidateRegex, (match, prefix: string, rawAlias: string) => {
     const alias = rawAlias.toLowerCase()
     if (alias === "everyone" || alias === "here") {
       return match
@@ -72,5 +92,11 @@ export const normalizeOutgoingMentions = (message: Message, text: string) => {
     }
 
     return match
+  })
+
+  const emojiRegex = /(^|[\s([{"']):([A-Za-z0-9_]{2,32}):/g
+  return withMentions.replace(emojiRegex, (match, prefix: string, rawAlias: string) => {
+    const emoji = resolveSingle(emojiByAlias.get(rawAlias.toLowerCase()))
+    return emoji ? `${prefix}${emoji}` : match
   })
 }
