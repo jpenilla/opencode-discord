@@ -34,7 +34,7 @@ export const detectInvocation = async (input: {
   }
 
   let replyContext: string | undefined
-  if (message.reference?.messageId) {
+  if (message.reference?.messageId && message.mentions.repliedUser?.id === botUser.id) {
     try {
       const referenced = await message.fetchReference()
       if (referenced.author.id === botUser.id) {
