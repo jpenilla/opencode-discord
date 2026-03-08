@@ -126,15 +126,17 @@ export const startTypingLoop = (channel: Message["channel"]) => {
 
   const tick = async () => {
     while (active) {
+      if (!channel.isSendable()) {
+        await Bun.sleep(5_000)
+        continue
+      }
+
       try {
-        if (!channel.isSendable()) {
-          return
-        }
         await channel.sendTyping()
       } catch {
-        return
+        // Keep retrying during the run; transient API/gateway issues should not permanently stop typing.
       }
-      await Bun.sleep(7_000)
+      await Bun.sleep(5_000)
     }
   }
 

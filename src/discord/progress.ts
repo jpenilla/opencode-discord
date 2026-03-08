@@ -4,11 +4,7 @@ import type { EventPermissionReplied, PermissionRequest, SessionStatus } from "@
 export const formatRunStarted = () => "## 🚀 Run started\n- Opencode is working on it"
 
 export const formatPatchUpdated = (part: PatchPart) =>
-  part.files.length === 0
-    ? "## 🧩 Patch updated\n- Opencode recorded a patch"
-    : ["## 🧩 Patch updated", `- Files: ${part.files.slice(0, 4).map((file) => `\`${file}\``).join(", ")}`].join("\n")
-
-export const formatTextReady = () => "## ✍️ Response draft updated\n- Assistant text content was updated"
+  part.files.length === 0 ? "## 🧩 Patch updated" : `## 🧩 Patch updated\n- Files touched: ${part.files.length}`
 
 export const formatSessionStatus = (status: SessionStatus) => {
   switch (status.type) {

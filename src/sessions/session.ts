@@ -13,13 +13,12 @@ export type ActiveRun = {
   discordMessage: Message
   workdir: string
   progressQueue: Queue<RunProgressEvent>
-  assistantMessageId: string | null
+  assistantMessageIds: ReadonlyArray<string>
 }
 
 export type RunProgressEvent =
   | { type: "run-started" }
   | { type: "patch-updated"; part: PatchPart }
-  | { type: "text-ready"; partId: string }
   | { type: "session-status"; status: SessionStatus }
   | { type: "tool-updated"; part: ToolPart }
   | { type: "permission-asked"; permission: PermissionRequest }
