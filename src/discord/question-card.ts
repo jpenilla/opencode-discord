@@ -226,10 +226,15 @@ const renderQuestionHints = (input: PendingQuestionBatchView) => {
     return null
   }
 
-  return lines(
-    "**How to answer**",
-    ...hints.map((hint) => `- ${hint}`),
-  )
+  return hints.length === 1
+    ? lines(
+        "**How to answer**",
+        hints[0]!,
+      )
+    : lines(
+        "**How to answer**",
+        ...hints.map((hint) => `- ${hint}`),
+      )
 }
 
 const renderResolvedQuestionSection = (question: QuestionInfo, answers: ReadonlyArray<string>) =>
@@ -260,7 +265,7 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
   container.addTextDisplayComponents(
     new TextDisplayBuilder().setContent(
       lines(
-        `## ${statusTitle(input.status)}`,
+        `**${statusTitle(input.status)}**`,
         input.status === "active" || input.status === "submitting" ? renderQuestionMeta(input) : `${input.request.questions.length} question${input.request.questions.length === 1 ? "" : "s"}`,
       ),
     ),
