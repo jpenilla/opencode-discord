@@ -7,6 +7,13 @@ import {
   type Sticker,
 } from "discord.js"
 
+export type UsableSticker = {
+  sticker: Sticker
+  guildId: string | null
+  guildName: string | null
+  packName: string | null
+}
+
 const currentContextPermissions = (message: Message) => {
   if (!message.inGuild() || !message.client.user) {
     return null
@@ -25,10 +32,10 @@ const sortByContextAndName = <T extends { id: string; name: string }>(
     return leftContext - rightContext || left.name.localeCompare(right.name) || left.id.localeCompare(right.id)
   })
 
-const uniqueById = <T extends { id: string }>(items: Iterable<T>) => {
+const uniqueBy = <T>(items: Iterable<T>, keyOf: (item: T) => string) => {
   const unique = new Map<string, T>()
   for (const item of items) {
-    unique.set(item.id, item)
+    unique.set(keyOf(item), item)
   }
   return [...unique.values()]
 }
@@ -62,26 +69,38 @@ export const listUsableCustomEmojis = (message: Message): GuildEmoji[] => {
       : []),
   ]
 
-  const usable = uniqueById(
+  const usable = uniqueBy(
     candidates.filter(
       (emoji) =>
         emoji.available !== false &&
         canUseEmojiRoles(emoji) &&
         (emoji.guild.id === currentGuildId || allowExternal),
     ),
+    (emoji) => emoji.id,
   )
 
   return sortByContextAndName(usable, currentGuildId, (emoji) => emoji.guild.id)
 }
 
-export const listUsableStickers = (message: Message): Sticker[] => {
+const sortUsableStickers = (items: ReadonlyArray<UsableSticker>, currentGuildId: string) =>
+  [...items].sort((left, right) => {
+    const leftContext = left.guildId === currentGuildId ? 0 : left.guildId !== null ? 1 : 2
+    const rightContext = right.guildId === currentGuildId ? 0 : right.guildId !== null ? 1 : 2
+    return (
+      leftContext - rightContext ||
+      left.sticker.name.localeCompare(right.sticker.name) ||
+      left.sticker.id.localeCompare(right.sticker.id)
+    )
+  })
+
+export const listUsableStickers = async (message: Message): Promise<UsableSticker[]> => {
   if (!message.inGuild()) {
     return []
   }
 
   const allowExternal = currentContextPermissions(message)?.has(PermissionFlagsBits.UseExternalStickers) ?? false
   const currentGuildId = message.guild.id
-  const candidates = [
+  const guildCandidates = [
     ...message.guild.stickers.cache.values(),
     ...(allowExternal
       ? [...message.client.guilds.cache.values()]
@@ -90,17 +109,37 @@ export const listUsableStickers = (message: Message): Sticker[] => {
       : []),
   ]
 
-  const usable = uniqueById(
-    candidates.filter(
-      (sticker) =>
-        sticker.guildId !== null &&
-        sticker.available !== false &&
-        sticker.type === StickerType.Guild &&
-        (sticker.guildId === currentGuildId || allowExternal),
-    ),
+  const standardCandidates = [...(await message.client.fetchStickerPacks()).values()].flatMap((pack) =>
+    [...pack.stickers.values()].map((sticker) => ({
+      sticker,
+      guildId: null,
+      guildName: null,
+      packName: pack.name,
+    })),
   )
 
-  return sortByContextAndName(usable, currentGuildId, (sticker) => sticker.guildId)
+  const usable = uniqueBy(
+    [
+      ...guildCandidates
+        .filter(
+          (sticker) =>
+            sticker.guildId !== null &&
+            sticker.available !== false &&
+            sticker.type === StickerType.Guild &&
+            (sticker.guildId === currentGuildId || allowExternal),
+        )
+        .map((sticker) => ({
+          sticker,
+          guildId: sticker.guildId,
+          guildName: sticker.guild?.name ?? null,
+          packName: null,
+        })),
+      ...standardCandidates.filter(({ sticker }) => sticker.type === StickerType.Standard),
+    ],
+    ({ sticker }) => sticker.id,
+  )
+
+  return sortUsableStickers(usable, currentGuildId)
 }
 
 export const normalizeReactionEmoji = (message: Message, input: string): string | null => {

@@ -166,7 +166,6 @@ export const sendProgressUpdate = async (input: {
 }
 
 export const startTypingLoop = (channel: Message["channel"]) => {
-  const INITIAL_TYPING_DELAY_MS = 500
   const TYPING_REFRESH_MS = 9_000
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -218,7 +217,7 @@ export const startTypingLoop = (channel: Message["channel"]) => {
     schedule(TYPING_REFRESH_MS)
   }
 
-  schedule(INITIAL_TYPING_DELAY_MS)
+  void tick()
 
   return async () => {
     if (stopPromise) {

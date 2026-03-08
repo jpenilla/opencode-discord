@@ -21,7 +21,15 @@ import {
 } from "@/opencode/events.ts"
 import type { RunProgressEvent } from "@/sessions/session.ts"
 
-const SKIPPED_TOOL_CARD_NAMES = new Set(["send-file", "send-image", "react", "download-attachments"])
+const SKIPPED_TOOL_CARD_NAMES = new Set([
+  "send-file",
+  "send-image",
+  "react",
+  "download-attachments",
+  "list-custom-emojis",
+  "list-stickers",
+  "send-sticker",
+])
 
 type ProgressState = {
   patchPartIds: Set<string>

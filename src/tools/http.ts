@@ -101,8 +101,8 @@ const formatEmojiList = (message: DiscordMessage) => {
   ].join("\n")
 }
 
-const formatStickerList = (message: DiscordMessage) => {
-  const stickers = listUsableStickers(message)
+const formatStickerList = async (message: DiscordMessage) => {
+  const stickers = await listUsableStickers(message)
   if (stickers.length === 0) {
     return "No stickers are available in this context."
   }
@@ -110,8 +110,10 @@ const formatStickerList = (message: DiscordMessage) => {
   return [
     "Stickers available in this context:",
     ...stickers.map((sticker) => {
-      const tags = sticker.tags ? ` tags=\`${sticker.tags}\`` : ""
-      return `- \`${sticker.id}\` \`${sticker.name}\` guild=\`${sticker.guild?.name ?? "unknown"}\`${tags}`
+      const tags = sticker.sticker.tags ? ` tags=\`${sticker.sticker.tags}\`` : ""
+      const source =
+        sticker.guildName !== null ? ` guild=\`${sticker.guildName}\`` : ` pack=\`${sticker.packName ?? "unknown"}\``
+      return `- \`${sticker.sticker.id}\` \`${sticker.sticker.name}\`${source}${tags}`
     }),
   ].join("\n")
 }
@@ -217,7 +219,7 @@ export const ToolBridgeLive = Layer.scoped(
         if (request.method === "POST" && pathname === "/tool/list-stickers") {
           sendJson(response, {
             ok: true,
-            message: formatStickerList(activeRun.discordMessage),
+            message: await formatStickerList(activeRun.discordMessage),
           })
           return
         }
@@ -228,7 +230,9 @@ export const ToolBridgeLive = Layer.scoped(
             return
           }
 
-          const sticker = listUsableStickers(activeRun.discordMessage).find((candidate) => candidate.id === payload.stickerID)
+          const sticker = (await listUsableStickers(activeRun.discordMessage)).find(
+            (candidate) => candidate.sticker.id === payload.stickerID,
+          )
           if (!sticker) {
             sendJson(response, { error: "sticker is not available in this context" }, 403)
             return
@@ -241,11 +245,11 @@ export const ToolBridgeLive = Layer.scoped(
 
           await activeRun.discordMessage.channel.send({
             content: payload.caption,
-            stickers: [sticker.id],
+            stickers: [sticker.sticker.id],
             allowedMentions: { parse: ["users", "roles", "everyone"] },
           })
 
-          sendJson(response, { ok: true, message: `Sent sticker ${sticker.name} (${sticker.id})` })
+          sendJson(response, { ok: true, message: `Sent sticker ${sticker.sticker.name} (${sticker.sticker.id})` })
           return
         }
 
