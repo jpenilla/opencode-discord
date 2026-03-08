@@ -4,6 +4,7 @@ import type { Deferred } from "effect/Deferred"
 import type { Queue } from "effect/Queue"
 import type { Ref } from "effect/Ref"
 
+import type { TypingLoop } from "@/discord/messages.ts"
 import type { SessionHandle } from "@/opencode/service.ts"
 
 export type RunRequest = {
@@ -17,6 +18,7 @@ export type ActiveRun = {
   progressQueue: Queue<RunProgressEvent>
   followUpQueue: Queue<RunRequest>
   acceptFollowUps: Ref<boolean>
+  typing: TypingLoop
 }
 
 export type RunProgressEvent =

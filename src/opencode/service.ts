@@ -1,4 +1,4 @@
-import { createOpencodeClient, type GlobalEvent, type OpencodeClient } from "@opencode-ai/sdk/v2"
+import { createOpencodeClient, type GlobalEvent, type OpencodeClient, type QuestionAnswer } from "@opencode-ai/sdk/v2"
 import { Cause, Chunk, Context, Effect, Fiber, Layer } from "effect"
 import { fileURLToPath } from "node:url"
 
@@ -30,6 +30,8 @@ export type PromptResult = {
 export type OpencodeServiceShape = {
   createSession: (workdir: string, title: string) => Effect.Effect<SessionHandle>
   prompt: (session: SessionHandle, prompt: string) => Effect.Effect<PromptResult>
+  replyToQuestion: (session: SessionHandle, requestID: string, answers: Array<QuestionAnswer>) => Effect.Effect<void>
+  rejectQuestion: (session: SessionHandle, requestID: string) => Effect.Effect<void>
   isHealthy: (session: SessionHandle) => Effect.Effect<boolean>
 }
 
@@ -274,6 +276,31 @@ export const OpencodeServiceLive = Layer.scoped(
             messageId: result.data.info.id,
             transcript: renderTranscript(result.data.parts),
           } satisfies PromptResult
+        }),
+      replyToQuestion: (session, requestID, answers) =>
+        Effect.gen(function* () {
+          const result = yield* Effect.promise(() =>
+            session.client.question.reply({
+              requestID,
+              answers,
+            }),
+          )
+
+          if (result.error || result.data !== true) {
+            throw new Error(`Failed to reply to opencode question: ${formatValue(result.error)}`)
+          }
+        }),
+      rejectQuestion: (session, requestID) =>
+        Effect.gen(function* () {
+          const result = yield* Effect.promise(() =>
+            session.client.question.reject({
+              requestID,
+            }),
+          )
+
+          if (result.error || result.data !== true) {
+            throw new Error(`Failed to reject opencode question: ${formatValue(result.error)}`)
+          }
         }),
       isHealthy: (session) =>
         Effect.promise(() => session.client.global.health()).pipe(

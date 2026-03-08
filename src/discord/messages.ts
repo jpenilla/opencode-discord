@@ -165,9 +165,16 @@ export const sendProgressUpdate = async (input: {
   })
 }
 
-export const startTypingLoop = (channel: Message["channel"]) => {
+export type TypingLoop = {
+  pause: () => Promise<void>
+  resume: () => void
+  stop: () => Promise<void>
+}
+
+export const startTypingLoop = (channel: Message["channel"]): TypingLoop => {
   const TYPING_REFRESH_MS = 9_000
   let stopped = false
+  let paused = false
   let timer: ReturnType<typeof setTimeout> | null = null
   let inFlight: Promise<void> | null = null
   let stopPromise: Promise<void> | null = null
@@ -182,7 +189,7 @@ export const startTypingLoop = (channel: Message["channel"]) => {
 
   const schedule = (delay: number) => {
     clearTimer()
-    if (stopped) {
+    if (stopped || paused) {
       return
     }
 
@@ -193,7 +200,7 @@ export const startTypingLoop = (channel: Message["channel"]) => {
   }
 
   const tick = async () => {
-    if (stopped || inFlight || !channel.isSendable()) {
+    if (stopped || paused || inFlight || !channel.isSendable()) {
       return
     }
 
@@ -219,14 +226,31 @@ export const startTypingLoop = (channel: Message["channel"]) => {
 
   void tick()
 
-  return async () => {
-    if (stopPromise) {
-      return await stopPromise
-    }
+  return {
+    pause: async () => {
+      paused = true
+      clearTimer()
+      if (inFlight) {
+        await inFlight
+      }
+    },
+    resume: () => {
+      if (stopped || !paused) {
+        return
+      }
+      paused = false
+      void tick()
+    },
+    stop: async () => {
+      if (stopPromise) {
+        return await stopPromise
+      }
 
-    stopped = true
-    clearTimer()
-    stopPromise = inFlight ?? Promise.resolve()
-    await stopPromise
+      stopped = true
+      paused = true
+      clearTimer()
+      stopPromise = inFlight ?? Promise.resolve()
+      await stopPromise
+    },
   }
 }

@@ -1,4 +1,4 @@
-import { ActivityType, ChannelType, Client, Events, GatewayIntentBits } from "discord.js"
+import { ActivityType, ChannelType, Client, Events, GatewayIntentBits, MessageFlags } from "discord.js"
 import { Context, Effect, Layer, Runtime } from "effect"
 
 import { AppConfig } from "@/config.ts"
@@ -88,6 +88,32 @@ export const DiscordBotLive = Layer.scoped(
                     allowedMentions: { repliedUser: false, parse: [] },
                   }),
                 ).pipe(Effect.ignore),
+              ),
+            )
+          }),
+        ),
+      )
+    })
+
+    client.on(Events.InteractionCreate, (interaction) => {
+      Runtime.runFork(runtime)(
+        sessions.handleInteraction(interaction).pipe(
+          Effect.catchAll((error) => {
+            const formattedError = formatError(error)
+            return logger.error("failed to handle interaction", {
+              interactionId: interaction.id,
+              error: formattedError,
+            }).pipe(
+              Effect.zipRight(
+                interaction.isRepliable() && !interaction.replied && !interaction.deferred
+                  ? Effect.promise(() =>
+                      interaction.reply({
+                        content: formatErrorResponse("## ❌ Failed to process interaction", formattedError),
+                        flags: MessageFlags.Ephemeral,
+                        allowedMentions: { parse: [] },
+                      }),
+                    ).pipe(Effect.ignore)
+                  : Effect.void,
               ),
             )
           }),

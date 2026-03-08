@@ -1,6 +1,9 @@
 import type {
   Event,
+  EventQuestionReplied,
+  EventQuestionRejected,
   PatchPart,
+  QuestionRequest,
   ReasoningPart,
   EventPermissionReplied,
   EventSessionStatus,
@@ -95,4 +98,25 @@ export const getReasoningPart = (event: Event): ReasoningPart | null => {
     return null
   }
   return event.properties.part
+}
+
+export const getQuestionAsked = (event: Event): QuestionRequest | null => {
+  if (event.type !== "question.asked") {
+    return null
+  }
+  return event.properties
+}
+
+export const getQuestionReplied = (event: Event): EventQuestionReplied["properties"] | null => {
+  if (event.type !== "question.replied") {
+    return null
+  }
+  return event.properties
+}
+
+export const getQuestionRejected = (event: Event): EventQuestionRejected["properties"] | null => {
+  if (event.type !== "question.rejected") {
+    return null
+  }
+  return event.properties
 }

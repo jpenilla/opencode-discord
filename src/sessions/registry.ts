@@ -3,7 +3,8 @@ import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 
 import { Chunk, Context, Deferred, Effect, Fiber, FiberSet, Layer, Queue, Ref } from "effect"
-import type { Message } from "discord.js"
+import type { Interaction, Message } from "discord.js"
+import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
 
 import { AppConfig } from "@/config.ts"
 import { formatErrorResponse } from "@/discord/formatting.ts"
@@ -16,7 +17,30 @@ import {
   summarizeAttachments,
   summarizeEmbeds,
 } from "@/discord/messages.ts"
-import { OpencodeEventQueue, getEventSessionId } from "@/opencode/events.ts"
+import {
+  buildQuestionAnswers,
+  buildQuestionModal,
+  clearQuestionDraft,
+  createQuestionMessageCreate,
+  createQuestionMessageEdit,
+  parseQuestionActionId,
+  QUESTION_OPTIONS_PER_PAGE,
+  questionOptionPageCount,
+  questionDrafts,
+  questionInteractionReply,
+  readQuestionModalValue,
+  setQuestionCustomAnswer,
+  setQuestionOptionSelection,
+  type QuestionBatchStatus,
+  type QuestionDraft,
+} from "@/discord/question-card.ts"
+import {
+  OpencodeEventQueue,
+  getEventSessionId,
+  getQuestionAsked,
+  getQuestionRejected,
+  getQuestionReplied,
+} from "@/opencode/events.ts"
 import type { Invocation } from "@/discord/triggers.ts"
 import { OpencodeService } from "@/opencode/service.ts"
 import { collectProgressEvents, runProgressWorker } from "@/sessions/progress.ts"
@@ -26,6 +50,7 @@ import { Logger } from "@/util/logging.ts"
 export type ChannelSessionsShape = {
   submit: (message: Message, invocation: Invocation) => Effect.Effect<void, unknown>
   getActiveRunBySessionId: (sessionId: string) => Effect.Effect<ActiveRun | null>
+  handleInteraction: (interaction: Interaction) => Effect.Effect<boolean, unknown>
 }
 
 export class ChannelSessions extends Context.Tag("ChannelSessions")<ChannelSessions, ChannelSessionsShape>() {}
@@ -43,16 +68,31 @@ type SessionGateDecision = {
   gate: SessionGate
   owner: boolean
 }
+type PendingQuestionBatch = {
+  request: QuestionRequest
+  session: ChannelSession
+  ownerId: string
+  message: Message | null
+  page: number
+  optionPages: number[]
+  drafts: QuestionDraft[]
+  status: QuestionBatchStatus | "expired"
+  resolvedAnswers?: Array<QuestionAnswer>
+}
 type SessionRuntimeState = {
   sessionsByChannelId: Map<string, ChannelSession>
+  sessionsBySessionId: Map<string, ChannelSession>
   activeRunsBySessionId: Map<string, ActiveRun>
   gatesByChannelId: Map<string, SessionGate>
+  questionBatchesByRequestId: Map<string, PendingQuestionBatch>
 }
 const sessionTitle = (channelId: string) => `Discord #${channelId}`
 const createSessionRuntimeState = (): SessionRuntimeState => ({
   sessionsByChannelId: new Map<string, ChannelSession>(),
+  sessionsBySessionId: new Map<string, ChannelSession>(),
   activeRunsBySessionId: new Map<string, ActiveRun>(),
   gatesByChannelId: new Map<string, SessionGate>(),
+  questionBatchesByRequestId: new Map<string, PendingQuestionBatch>(),
 })
 
 export const ChannelSessionsLive = Layer.scoped(
@@ -69,13 +109,18 @@ export const ChannelSessionsLive = Layer.scoped(
       Ref.get(stateRef).pipe(Effect.map((state) => state.sessionsByChannelId.get(channelId)))
     const getActiveRunBySessionId = (sessionId: string) =>
       Ref.get(stateRef).pipe(Effect.map((state) => state.activeRunsBySessionId.get(sessionId) ?? null))
+    const getQuestionBatch = (requestId: string) =>
+      Ref.get(stateRef).pipe(Effect.map((state) => state.questionBatchesByRequestId.get(requestId) ?? null))
     const putSession = (session: ChannelSession) =>
       Ref.update(stateRef, (current) => {
         const sessionsByChannelId = new Map(current.sessionsByChannelId)
         sessionsByChannelId.set(session.channelId, session)
+        const sessionsBySessionId = new Map(current.sessionsBySessionId)
+        sessionsBySessionId.set(session.opencode.sessionId, session)
         return {
           ...current,
           sessionsByChannelId,
+          sessionsBySessionId,
         }
       })
     const setActiveRun = (session: ChannelSession, activeRun: ActiveRun | null) =>
@@ -84,6 +129,8 @@ export const ChannelSessionsLive = Layer.scoped(
 
         const sessionsByChannelId = new Map(current.sessionsByChannelId)
         sessionsByChannelId.set(session.channelId, session)
+        const sessionsBySessionId = new Map(current.sessionsBySessionId)
+        sessionsBySessionId.set(session.opencode.sessionId, session)
 
         const activeRunsBySessionId = new Map(current.activeRunsBySessionId)
         if (activeRun) {
@@ -95,6 +142,7 @@ export const ChannelSessionsLive = Layer.scoped(
         return {
           ...current,
           sessionsByChannelId,
+          sessionsBySessionId,
           activeRunsBySessionId,
         }
       })
@@ -105,6 +153,9 @@ export const ChannelSessionsLive = Layer.scoped(
 
         const sessionsByChannelId = new Map(current.sessionsByChannelId)
         sessionsByChannelId.set(session.channelId, session)
+        const sessionsBySessionId = new Map(current.sessionsBySessionId)
+        sessionsBySessionId.delete(previousSessionId)
+        sessionsBySessionId.set(replacement.sessionId, session)
 
         const activeRunsBySessionId = new Map(current.activeRunsBySessionId)
         activeRunsBySessionId.delete(previousSessionId)
@@ -112,8 +163,59 @@ export const ChannelSessionsLive = Layer.scoped(
         return {
           ...current,
           sessionsByChannelId,
+          sessionsBySessionId,
           activeRunsBySessionId,
         }
+      })
+    const putQuestionBatch = (batch: PendingQuestionBatch) =>
+      Ref.update(stateRef, (current) => {
+        const questionBatchesByRequestId = new Map(current.questionBatchesByRequestId)
+        questionBatchesByRequestId.set(batch.request.id, batch)
+        return {
+          ...current,
+          questionBatchesByRequestId,
+        }
+      })
+    const updateQuestionBatch = (requestId: string, update: (batch: PendingQuestionBatch) => PendingQuestionBatch | null) =>
+      Ref.modify(stateRef, (current): readonly [PendingQuestionBatch | null, SessionRuntimeState] => {
+        const existing = current.questionBatchesByRequestId.get(requestId)
+        if (!existing) {
+          return [null, current]
+        }
+
+        const nextBatch = update(existing)
+        const questionBatchesByRequestId = new Map(current.questionBatchesByRequestId)
+        if (nextBatch) {
+          questionBatchesByRequestId.set(requestId, nextBatch)
+        } else {
+          questionBatchesByRequestId.delete(requestId)
+        }
+
+        return [
+          nextBatch,
+          {
+            ...current,
+            questionBatchesByRequestId,
+          },
+        ]
+      })
+    const removeQuestionBatch = (requestId: string) =>
+      Ref.modify(stateRef, (current): readonly [PendingQuestionBatch | null, SessionRuntimeState] => {
+        const existing = current.questionBatchesByRequestId.get(requestId) ?? null
+        if (!existing) {
+          return [null, current]
+        }
+
+        const questionBatchesByRequestId = new Map(current.questionBatchesByRequestId)
+        questionBatchesByRequestId.delete(requestId)
+
+        return [
+          existing,
+          {
+            ...current,
+            questionBatchesByRequestId,
+          },
+        ]
       })
     const removeWorkdir = (workdir: string) =>
       Effect.promise(() => rm(resolve(workdir), { recursive: true, force: true })).pipe(Effect.ignore)
@@ -166,6 +268,198 @@ export const ChannelSessionsLive = Layer.scoped(
         return yield* Deferred.await(currentGate)
       })
 
+    const questionBatchView = (batch: PendingQuestionBatch) => ({
+      request: batch.request,
+      page: batch.page,
+      optionPages: batch.optionPages,
+      drafts: batch.drafts,
+      status: batch.status,
+      resolvedAnswers: batch.resolvedAnswers,
+    })
+
+    const hasPendingQuestionsForSession = (state: SessionRuntimeState, sessionId: string) =>
+      [...state.questionBatchesByRequestId.values()].some(
+        (batch) =>
+          batch.session.opencode.sessionId === sessionId &&
+          (batch.status === "active" || batch.status === "submitting"),
+      )
+
+    const syncTypingForSession = (sessionId: string) =>
+      Ref.get(stateRef).pipe(
+        Effect.flatMap((state) => {
+          const activeRun = state.activeRunsBySessionId.get(sessionId)
+          if (!activeRun) {
+            return Effect.void
+          }
+
+          if (hasPendingQuestionsForSession(state, sessionId)) {
+            return Effect.promise(() => activeRun.typing.pause())
+          }
+
+          return Effect.sync(() => {
+            activeRun.typing.resume()
+          })
+        }),
+      )
+
+    const editQuestionMessage = (batch: PendingQuestionBatch) => {
+      if (!batch.message) {
+        return Effect.void
+      }
+
+      return Effect.promise(() => batch.message!.edit(createQuestionMessageEdit(questionBatchView(batch)))).pipe(
+        Effect.asVoid,
+      )
+    }
+
+    const handleQuestionAsked = (
+      session: ChannelSession,
+      activeRun: ActiveRun,
+      request: QuestionRequest,
+    ): FallibleEffect<void> =>
+      Effect.gen(function* () {
+        const existing = yield* getQuestionBatch(request.id)
+        if (existing) {
+          return
+        }
+
+        yield* Effect.promise(() => activeRun.typing.pause())
+
+        const batch: PendingQuestionBatch = {
+          request,
+          session,
+          ownerId: activeRun.discordMessage.author.id,
+          message: null,
+          page: 0,
+          optionPages: request.questions.map(() => 0),
+          drafts: questionDrafts(request),
+          status: "active",
+        }
+
+        try {
+          const questionMessage = yield* Effect.promise(() =>
+            activeRun.discordMessage.reply({
+              ...createQuestionMessageCreate(questionBatchView(batch)),
+              allowedMentions: { repliedUser: false, parse: [] },
+            }),
+          )
+
+          yield* putQuestionBatch({
+            ...batch,
+            message: questionMessage,
+          })
+
+          yield* logger.info("posted question batch", {
+            channelId: session.channelId,
+            sessionId: session.opencode.sessionId,
+            requestId: request.id,
+            questionCount: request.questions.length,
+          })
+        } catch (error) {
+          yield* logger.error("failed to post question batch", {
+            channelId: session.channelId,
+            sessionId: session.opencode.sessionId,
+            requestId: request.id,
+            error: formatError(error),
+          })
+
+          yield* opencode.rejectQuestion(session.opencode, request.id).pipe(
+            Effect.tap(() =>
+              logger.warn("rejected question batch after UI failure", {
+                channelId: session.channelId,
+                sessionId: session.opencode.sessionId,
+                requestId: request.id,
+              }),
+            ),
+            Effect.catchAll((rejectError) =>
+              logger.error("failed to reject question batch after UI failure", {
+                channelId: session.channelId,
+                sessionId: session.opencode.sessionId,
+                requestId: request.id,
+                error: formatError(rejectError),
+              }),
+            ),
+          )
+
+          yield* syncTypingForSession(session.opencode.sessionId)
+        }
+      })
+
+    const finalizeQuestionBatch = (
+      requestId: string,
+      status: "answered" | "rejected",
+      resolvedAnswers?: Array<QuestionAnswer>,
+    ): FallibleEffect<void> =>
+      Effect.gen(function* () {
+        const batch = yield* updateQuestionBatch(requestId, (current) => ({
+          ...current,
+          status,
+          resolvedAnswers,
+        }))
+        if (!batch) {
+          return
+        }
+
+        yield* editQuestionMessage(batch).pipe(
+          Effect.catchAll((error) =>
+            logger.warn("failed to edit finalized question batch", {
+              channelId: batch.session.channelId,
+              sessionId: batch.session.opencode.sessionId,
+              requestId,
+              error: formatError(error),
+            }),
+          ),
+        )
+        yield* removeQuestionBatch(requestId)
+        yield* syncTypingForSession(batch.session.opencode.sessionId)
+      })
+
+    const expireQuestionBatchesForSession = (sessionId: string): FallibleEffect<void> =>
+      Effect.gen(function* () {
+        const expired = yield* Ref.modify(stateRef, (current): readonly [PendingQuestionBatch[], SessionRuntimeState] => {
+          const stale = [...current.questionBatchesByRequestId.values()].filter(
+            (batch) =>
+              batch.session.opencode.sessionId === sessionId &&
+              (batch.status === "active" || batch.status === "submitting"),
+          )
+          if (stale.length === 0) {
+            return [[], current]
+          }
+
+          const questionBatchesByRequestId = new Map(current.questionBatchesByRequestId)
+          for (const batch of stale) {
+            questionBatchesByRequestId.delete(batch.request.id)
+          }
+
+          return [
+            stale.map((batch) => ({
+              ...batch,
+              status: "expired" as const,
+            })),
+            {
+              ...current,
+              questionBatchesByRequestId,
+            },
+          ]
+        })
+
+        yield* Effect.forEach(
+          expired,
+          (batch) =>
+            editQuestionMessage(batch).pipe(
+              Effect.catchAll((error) =>
+                logger.warn("failed to expire question batch message", {
+                  channelId: batch.session.channelId,
+                  sessionId: batch.session.opencode.sessionId,
+                  requestId: batch.request.id,
+                  error: formatError(error),
+                }),
+              ),
+            ),
+          { concurrency: "unbounded" },
+        ).pipe(Effect.asVoid)
+      })
+
     yield* eventQueue.take().pipe(
       Effect.flatMap((wrapped) => {
         const sessionId = getEventSessionId(wrapped.payload)
@@ -176,15 +470,31 @@ export const ChannelSessionsLive = Layer.scoped(
         return Ref.get(stateRef).pipe(
           Effect.flatMap((state) => {
             const activeRun = state.activeRunsBySessionId.get(sessionId)
-            if (!activeRun) {
+            const session = state.sessionsBySessionId.get(sessionId)
+            if (!activeRun || !session) {
               return Effect.void
             }
 
             const progressEvents = collectProgressEvents(wrapped.payload)
+            const questionAsked = getQuestionAsked(wrapped.payload)
+            const questionReplied = getQuestionReplied(wrapped.payload)
+            const questionRejected = getQuestionRejected(wrapped.payload)
 
-            return Effect.forEach(progressEvents, (progressEvent) =>
-              Queue.offer(activeRun.progressQueue, progressEvent).pipe(Effect.asVoid),
-            ).pipe(Effect.asVoid)
+            return Effect.gen(function* () {
+              if (questionAsked) {
+                yield* handleQuestionAsked(session, activeRun, questionAsked)
+              }
+              if (questionReplied) {
+                yield* finalizeQuestionBatch(questionReplied.requestID, "answered", questionReplied.answers)
+              }
+              if (questionRejected) {
+                yield* finalizeQuestionBatch(questionRejected.requestID, "rejected")
+              }
+
+              yield* Effect.forEach(progressEvents, (progressEvent) =>
+                Queue.offer(activeRun.progressQueue, progressEvent).pipe(Effect.asVoid),
+              ).pipe(Effect.asVoid)
+            })
           }),
         )
       }),
@@ -243,16 +553,17 @@ export const ChannelSessionsLive = Layer.scoped(
         const responseMessage = initialRequests[0]!.message
         const progressFiber = yield* runProgressWorker(responseMessage, session.workdir, progressQueue).pipe(Effect.fork)
 
+        const typing = startTypingLoop(responseMessage.channel)
         yield* setActiveRun(session, {
           discordMessage: responseMessage,
           workdir: session.workdir,
           progressQueue,
           followUpQueue,
           acceptFollowUps,
+          typing,
         })
 
-        const stopTypingLoop = startTypingLoop(responseMessage.channel)
-        const stopTyping = Effect.promise(() => stopTypingLoop())
+        const stopTyping = Effect.promise(() => typing.stop())
         let failed = false
 
         try {
@@ -303,6 +614,7 @@ export const ChannelSessionsLive = Layer.scoped(
         } finally {
           yield* stopTyping
           yield* setActiveRun(session, null)
+          yield* expireQuestionBatchesForSession(session.opencode.sessionId)
           yield* Fiber.interrupt(progressFiber)
         }
 
@@ -443,6 +755,315 @@ export const ChannelSessionsLive = Layer.scoped(
         Effect.flatMap((session) => ensureSessionHealth(session, message, reason)),
       )
 
+    const replyToQuestionInteraction = (interaction: Interaction, message: string) => {
+      if (!interaction.isButton() && !interaction.isStringSelectMenu() && !interaction.isModalSubmit()) {
+        return Effect.void
+      }
+      if (interaction.replied || interaction.deferred) {
+        return Effect.void
+      }
+      return Effect.promise(() => interaction.reply(questionInteractionReply(message))).pipe(Effect.ignore)
+    }
+
+    const persistQuestionBatch = (
+      requestId: string,
+      update: (batch: PendingQuestionBatch) => PendingQuestionBatch | null,
+    ): FallibleEffect<PendingQuestionBatch | null> => updateQuestionBatch(requestId, update)
+
+    const currentQuestionDraft = (batch: PendingQuestionBatch, questionIndex: number) =>
+      batch.drafts[questionIndex] ?? clearQuestionDraft()
+
+    const applyQuestionUpdate = (
+      interaction: Interaction,
+      requestId: string,
+      update: (batch: PendingQuestionBatch) => PendingQuestionBatch | null,
+    ): FallibleEffect<boolean> =>
+      Effect.gen(function* () {
+        if (!interaction.isButton() && !interaction.isStringSelectMenu()) {
+          return false
+        }
+
+        const batch = yield* persistQuestionBatch(requestId, update)
+        if (!batch) {
+          yield* replyToQuestionInteraction(interaction, "This question prompt is no longer active.")
+          return true
+        }
+
+        yield* Effect.promise(() => interaction.update(createQuestionMessageEdit(questionBatchView(batch))))
+        return true
+      })
+
+    const handleQuestionInteraction = (interaction: Interaction): FallibleEffect<boolean> =>
+      Effect.gen(function* () {
+        if (!interaction.isButton() && !interaction.isStringSelectMenu() && !interaction.isModalSubmit()) {
+          return false
+        }
+
+        const action = parseQuestionActionId(interaction.customId)
+        if (!action) {
+          return false
+        }
+
+        const batch = yield* getQuestionBatch(action.requestID)
+        if (!batch) {
+          yield* replyToQuestionInteraction(interaction, "This question prompt has expired.")
+          return true
+        }
+
+        if (interaction.user.id !== batch.ownerId) {
+          yield* replyToQuestionInteraction(interaction, "Only the user who started this run can answer these questions.")
+          return true
+        }
+
+        if ((interaction.isButton() || interaction.isStringSelectMenu()) && batch.message && interaction.message.id !== batch.message.id) {
+          yield* replyToQuestionInteraction(interaction, "This question prompt has been replaced.")
+          return true
+        }
+
+        if (batch.status !== "active") {
+          yield* replyToQuestionInteraction(interaction, "This question prompt is already being finalized.")
+          return true
+        }
+
+        switch (action.kind) {
+          case "question-prev":
+            return yield* applyQuestionUpdate(interaction, action.requestID, (current) => ({
+              ...current,
+              page: Math.max(0, current.page - 1),
+            }))
+          case "question-next":
+            return yield* applyQuestionUpdate(interaction, action.requestID, (current) => ({
+              ...current,
+              page: Math.min(current.request.questions.length - 1, current.page + 1),
+            }))
+          case "option-prev":
+            return yield* applyQuestionUpdate(interaction, action.requestID, (current) => {
+              const optionPages = [...current.optionPages]
+              optionPages[action.questionIndex] = Math.max(0, (optionPages[action.questionIndex] ?? 0) - 1)
+              return {
+                ...current,
+                page: action.questionIndex,
+                optionPages,
+              }
+            })
+          case "option-next":
+            return yield* applyQuestionUpdate(interaction, action.requestID, (current) => {
+              const question = current.request.questions[action.questionIndex]
+              if (!question) {
+                return current
+              }
+              const maxOptionPage = Math.max(0, questionOptionPageCount(question) - 1)
+              const optionPages = [...current.optionPages]
+              optionPages[action.questionIndex] = Math.min(maxOptionPage, (optionPages[action.questionIndex] ?? 0) + 1)
+              return {
+                ...current,
+                page: action.questionIndex,
+                optionPages,
+              }
+            })
+          case "clear":
+            return yield* applyQuestionUpdate(interaction, action.requestID, (current) => {
+              const drafts = [...current.drafts]
+              drafts[action.questionIndex] = clearQuestionDraft()
+              return {
+                ...current,
+                page: action.questionIndex,
+                drafts,
+              }
+            })
+          case "select":
+            if (!interaction.isStringSelectMenu()) {
+              return false
+            }
+            return yield* applyQuestionUpdate(interaction, action.requestID, (current) => {
+              const question = current.request.questions[action.questionIndex]
+              if (!question) {
+                return current
+              }
+
+              const page = current.optionPages[action.questionIndex] ?? 0
+              const visibleOptions = question.options
+                .slice(
+                  page * QUESTION_OPTIONS_PER_PAGE,
+                  page * QUESTION_OPTIONS_PER_PAGE + QUESTION_OPTIONS_PER_PAGE,
+                )
+                .map((option) => option.label)
+              const drafts = [...current.drafts]
+              drafts[action.questionIndex] = setQuestionOptionSelection({
+                question,
+                draft: currentQuestionDraft(current, action.questionIndex),
+                visibleOptions,
+                selectedOptions: interaction.values,
+              })
+              return {
+                ...current,
+                page: action.questionIndex,
+                drafts,
+              }
+            })
+          case "custom":
+            if (!interaction.isButton()) {
+              return false
+            }
+
+            {
+              const question = batch.request.questions[action.questionIndex]
+              if (!question || question.custom === false) {
+                yield* replyToQuestionInteraction(interaction, "This question does not allow a custom answer.")
+                return true
+              }
+
+              yield* Effect.promise(() =>
+                interaction.showModal(
+                  buildQuestionModal({
+                    requestID: action.requestID,
+                    questionIndex: action.questionIndex,
+                    question,
+                    draft: currentQuestionDraft(batch, action.questionIndex),
+                  }),
+                ),
+              )
+              return true
+            }
+          case "modal":
+            if (!interaction.isModalSubmit()) {
+              return false
+            }
+
+            {
+              const question = batch.request.questions[action.questionIndex]
+              if (!question || question.custom === false) {
+                yield* replyToQuestionInteraction(interaction, "This question does not allow a custom answer.")
+                return true
+              }
+
+              const customAnswer = readQuestionModalValue(interaction)
+              if (!customAnswer) {
+                yield* Effect.promise(() =>
+                  interaction.reply(questionInteractionReply("Custom answer cannot be empty.")),
+                ).pipe(Effect.ignore)
+                return true
+              }
+
+              const updated = yield* persistQuestionBatch(action.requestID, (current) => {
+                const drafts = [...current.drafts]
+                drafts[action.questionIndex] = setQuestionCustomAnswer(
+                  question,
+                  currentQuestionDraft(current, action.questionIndex),
+                  customAnswer,
+                )
+                return {
+                  ...current,
+                  page: action.questionIndex,
+                  drafts,
+                }
+              })
+              if (!updated) {
+                yield* replyToQuestionInteraction(interaction, "This question prompt has expired.")
+                return true
+              }
+
+              yield* editQuestionMessage(updated).pipe(
+                Effect.catchAll((error) =>
+                  logger.warn("failed to edit question batch after modal submit", {
+                    channelId: updated.session.channelId,
+                    sessionId: updated.session.opencode.sessionId,
+                    requestId: updated.request.id,
+                    error: formatError(error),
+                  }),
+                ),
+              )
+              yield* Effect.promise(() =>
+                interaction.reply(questionInteractionReply("Saved custom answer.")),
+              ).pipe(Effect.ignore)
+              return true
+            }
+          case "submit":
+            if (!interaction.isButton()) {
+              return false
+            }
+
+            {
+              const submitting = yield* persistQuestionBatch(action.requestID, (current) => ({
+                ...current,
+                status: "submitting",
+              }))
+              if (!submitting) {
+                yield* replyToQuestionInteraction(interaction, "This question prompt has expired.")
+                return true
+              }
+
+              yield* Effect.promise(() =>
+                interaction.update(createQuestionMessageEdit(questionBatchView(submitting))),
+              )
+
+              const answers = buildQuestionAnswers(submitting.request, submitting.drafts)
+              const submitResult = yield* opencode.replyToQuestion(submitting.session.opencode, submitting.request.id, answers).pipe(
+                Effect.either,
+              )
+              if (submitResult._tag === "Left") {
+                const restored = yield* persistQuestionBatch(action.requestID, (current) => ({
+                  ...current,
+                  status: "active",
+                }))
+                if (restored) {
+                  yield* editQuestionMessage(restored).pipe(Effect.ignore)
+                }
+                yield* Effect.promise(() =>
+                  interaction.followUp(
+                    questionInteractionReply(`Failed to submit answers: ${formatError(submitResult.left)}`),
+                  ),
+                ).pipe(Effect.ignore)
+                return true
+              }
+
+              yield* finalizeQuestionBatch(submitting.request.id, "answered", answers)
+              return true
+            }
+          case "reject":
+            if (!interaction.isButton()) {
+              return false
+            }
+
+            {
+              const rejecting = yield* persistQuestionBatch(action.requestID, (current) => ({
+                ...current,
+                status: "submitting",
+              }))
+              if (!rejecting) {
+                yield* replyToQuestionInteraction(interaction, "This question prompt has expired.")
+                return true
+              }
+
+              yield* Effect.promise(() =>
+                interaction.update(createQuestionMessageEdit(questionBatchView(rejecting))),
+              )
+
+              const rejectResult = yield* opencode.rejectQuestion(rejecting.session.opencode, rejecting.request.id).pipe(
+                Effect.either,
+              )
+              if (rejectResult._tag === "Left") {
+                const restored = yield* persistQuestionBatch(action.requestID, (current) => ({
+                  ...current,
+                  status: "active",
+                }))
+                if (restored) {
+                  yield* editQuestionMessage(restored).pipe(Effect.ignore)
+                }
+                yield* Effect.promise(() =>
+                  interaction.followUp(
+                    questionInteractionReply(`Failed to reject questions: ${formatError(rejectResult.left)}`),
+                  ),
+                ).pipe(Effect.ignore)
+                return true
+              }
+
+              yield* finalizeQuestionBatch(rejecting.request.id, "rejected")
+              return true
+            }
+        }
+      })
+
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
         const state = yield* Ref.get(stateRef)
@@ -494,6 +1115,7 @@ export const ChannelSessionsLive = Layer.scoped(
           })
         }),
       getActiveRunBySessionId,
+      handleInteraction: handleQuestionInteraction,
     } satisfies ChannelSessionsShape
   }),
 )

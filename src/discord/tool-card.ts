@@ -42,8 +42,6 @@ const toolEmoji = (tool: string) => {
   switch (tool) {
     case "invalid":
       return "⚠️"
-    case "question":
-      return "❓"
     case "bash":
       return "💻"
     case "read":
@@ -459,11 +457,6 @@ const formatTodoInputLines: ToolInputFormatter = ({ input }) => {
   return lines
 }
 
-const formatQuestionInputLines: ToolInputFormatter = ({ workdir, input }) => {
-  const question = findStringInput(input, ["question", "prompt", "header"])
-  return question ? [`- Question: ${formatTextValue(question, workdir, 180)}`] : []
-}
-
 const formatPlanExitInputLines: ToolInputFormatter = ({ workdir, input }) => {
   const reason = findStringInput(input, ["reason", "message", "status"])
   return reason ? [`- Exit: ${formatTextValue(reason, workdir, 180)}`] : []
@@ -502,7 +495,6 @@ const TOOL_INPUT_FORMATTERS: Record<string, ToolInputFormatter> = {
   skill: formatSkillInputLines,
   todoread: formatTodoInputLines,
   todowrite: formatTodoInputLines,
-  question: formatQuestionInputLines,
   plan_exit: formatPlanExitInputLines,
   batch: formatBatchInputLines,
   lsp: formatLspInputLines,

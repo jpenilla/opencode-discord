@@ -29,6 +29,7 @@ const SKIPPED_TOOL_CARD_NAMES = new Set([
   "list-custom-emojis",
   "list-stickers",
   "send-sticker",
+  "question",
 ])
 
 type ProgressState = {
