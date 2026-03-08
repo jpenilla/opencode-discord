@@ -30,6 +30,7 @@ export type PromptResult = {
 export type OpencodeServiceShape = {
   createSession: (workdir: string, title: string) => Effect.Effect<SessionHandle>
   prompt: (session: SessionHandle, prompt: string) => Effect.Effect<PromptResult>
+  isHealthy: (session: SessionHandle) => Effect.Effect<boolean>
 }
 
 export class OpencodeService extends Context.Tag("OpencodeService")<OpencodeService, OpencodeServiceShape>() {}
@@ -253,6 +254,11 @@ export const OpencodeServiceLive = Layer.scoped(
             transcript: renderTranscript(result.data.parts),
           } satisfies PromptResult
         }),
+      isHealthy: (session) =>
+        Effect.promise(() => session.client.global.health()).pipe(
+          Effect.map((result) => !result.error && result.data?.healthy === true),
+          Effect.catchAll(() => Effect.succeed(false)),
+        ),
     } satisfies OpencodeServiceShape
   }),
 )

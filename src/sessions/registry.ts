@@ -42,7 +42,7 @@ import type { ActiveRun, ChannelSession, RunProgressEvent, RunRequest } from "@/
 import { Logger } from "@/util/logging.ts"
 
 export type ChannelSessionsShape = {
-  submit: (message: Message, invocation: Invocation) => Effect.Effect<void>
+  submit: (message: Message, invocation: Invocation) => Effect.Effect<void, unknown>
   getActiveRunBySessionId: (sessionId: string) => Effect.Effect<ActiveRun | null>
 }
 
@@ -56,6 +56,11 @@ const formatError = (error: unknown) => {
 }
 
 const SKIPPED_TOOL_CARD_NAMES = new Set(["send-file", "send-image", "react", "download-attachments"])
+type SessionGate = Deferred.Deferred<ChannelSession, unknown>
+type SessionGateDecision = {
+  gate: SessionGate
+  owner: boolean
+}
 
 const collectProgressEvents = (event: Event): ReadonlyArray<RunProgressEvent> => {
   const progressEvents: RunProgressEvent[] = []
@@ -120,23 +125,57 @@ export const ChannelSessionsLive = Layer.scoped(
     const opencode = yield* OpencodeService
     const eventQueue = yield* OpencodeEventQueue
     const sessionsRef = yield* Ref.make(new Map<string, ChannelSession>())
+    const sessionGatesRef = yield* Ref.make(new Map<string, SessionGate>())
     const fiberSet = yield* FiberSet.make()
 
     const setActiveRun = (channelId: string, activeRun: ActiveRun | null) =>
       Ref.update(sessionsRef, (current) => {
-        const next = new Map(current)
-        const session = next.get(channelId)
+        const session = current.get(channelId)
         if (!session) {
           return current
         }
-        next.set(channelId, {
-          ...session,
-          activeRun,
-        })
+        session.activeRun = activeRun
+        const next = new Map(current)
+        next.set(channelId, session)
         return next
       })
 
     const getSession = (channelId: string) => Ref.get(sessionsRef).pipe(Effect.map((sessions) => sessions.get(channelId)))
+
+    const clearSessionGate = (channelId: string, gate: SessionGate) =>
+      Ref.update(sessionGatesRef, (current) => {
+        const next = new Map(current)
+        if (next.get(channelId) === gate) {
+          next.delete(channelId)
+        }
+        return next
+      })
+
+    const withSessionGate = (channelId: string, task: Effect.Effect<ChannelSession, unknown>): Effect.Effect<ChannelSession, unknown> =>
+      Effect.gen(function* () {
+        const gate = yield* Deferred.make<ChannelSession, unknown>()
+        const { gate: currentGate, owner } = yield* Ref.modify(
+          sessionGatesRef,
+          (current): readonly [SessionGateDecision, Map<string, SessionGate>] => {
+            const existing = current.get(channelId)
+            if (existing) {
+              return [{ gate: existing, owner: false }, current]
+            }
+
+            const next = new Map(current)
+            next.set(channelId, gate)
+            return [{ gate, owner: true }, next]
+          },
+        )
+
+        if (owner) {
+          const exit = yield* task.pipe(Effect.exit)
+          yield* Deferred.done(currentGate, exit).pipe(Effect.ignore)
+          yield* clearSessionGate(channelId, currentGate)
+        }
+
+        return yield* Deferred.await(currentGate)
+      })
 
     const getActiveRunForSessionId = (sessions: Map<string, ChannelSession>, sessionId: string) => {
       for (const session of sessions.values()) {
@@ -328,7 +367,10 @@ export const ChannelSessionsLive = Layer.scoped(
       Effect.forkScoped,
     )
 
-    const processRequestBatch = (session: ChannelSession, initialRequests: ReadonlyArray<RunRequest>) =>
+    const processRequestBatch = (
+      session: ChannelSession,
+      initialRequests: ReadonlyArray<RunRequest>,
+    ): Effect.Effect<void, unknown> =>
       Effect.gen(function* () {
         const progressQueue = yield* Queue.unbounded<RunProgressEvent>()
         const followUpQueue = yield* Queue.unbounded<RunRequest>()
@@ -414,6 +456,9 @@ export const ChannelSessionsLive = Layer.scoped(
               allowedMentions: { repliedUser: false, parse: [] },
             }),
           )
+          yield* recoverSessionIfUnhealthy(session, responseMessage, "run failed with unhealthy opencode session").pipe(
+            Effect.ignore,
+          )
         } finally {
           yield* stopTyping
           yield* setActiveRun(session.channelId, null)
@@ -421,7 +466,7 @@ export const ChannelSessionsLive = Layer.scoped(
         }
       })
 
-    const worker = (session: ChannelSession) =>
+    const worker = (session: ChannelSession): Effect.Effect<never> =>
       Effect.forever(
         Queue.take(session.queue).pipe(
           Effect.flatMap((first) =>
@@ -438,45 +483,129 @@ export const ChannelSessionsLive = Layer.scoped(
         ),
       )
 
-    const createSession = (message: Message) =>
+    const createSession = (message: Message): Effect.Effect<ChannelSession, unknown> =>
       Effect.gen(function* () {
         const workdir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "opencode-discord-")))
-        const opencodeSession = yield* opencode.createSession(workdir, `Discord #${message.channelId}`)
-        const queue = yield* Queue.unbounded<RunRequest>()
+        let opencodeSession: ChannelSession["opencode"] | null = null
 
-        const session: ChannelSession = {
-          channelId: message.channelId,
-          opencode: opencodeSession,
-          workdir,
-          queue,
-          activeRun: null,
+        try {
+          opencodeSession = yield* opencode.createSession(workdir, `Discord #${message.channelId}`)
+          const queue = yield* Queue.unbounded<RunRequest>()
+
+          const session: ChannelSession = {
+            channelId: message.channelId,
+            opencode: opencodeSession,
+            workdir,
+            queue,
+            activeRun: null,
+          }
+
+          yield* FiberSet.run(fiberSet, worker(session))
+          yield* Ref.update(sessionsRef, (current) => {
+            const next = new Map(current)
+            next.set(message.channelId, session)
+            return next
+          })
+
+          yield* logger.info("created channel session", {
+            channelId: message.channelId,
+            sessionId: opencodeSession.sessionId,
+            backend: opencodeSession.backend,
+            workdir,
+            triggerPhrase: config.triggerPhrase,
+          })
+
+          return session
+        } catch (error) {
+          if (opencodeSession) {
+            yield* opencodeSession.close().pipe(Effect.ignore)
+          }
+          yield* Effect.promise(() => rm(resolve(workdir), { recursive: true, force: true })).pipe(Effect.ignore)
+          throw error
         }
-
-        yield* Ref.update(sessionsRef, (current) => {
-          const next = new Map(current)
-          next.set(message.channelId, session)
-          return next
-        })
-
-        yield* FiberSet.run(fiberSet, worker(session))
-        yield* logger.info("created channel session", {
-          channelId: message.channelId,
-          sessionId: opencodeSession.sessionId,
-          backend: opencodeSession.backend,
-          workdir,
-          triggerPhrase: config.triggerPhrase,
-        })
-
-        return session
       })
 
-    const getOrCreateSession = (message: Message) =>
+    const getOrCreateSession = (message: Message): Effect.Effect<ChannelSession, unknown> =>
       Effect.gen(function* () {
         const existing = yield* getSession(message.channelId)
         if (existing) {
           return existing
         }
-        return yield* createSession(message)
+        return yield* withSessionGate(
+          message.channelId,
+          Effect.gen(function* () {
+            const current = yield* getSession(message.channelId)
+            if (current) {
+              return current
+            }
+            return yield* createSession(message)
+          }),
+        )
+      })
+
+    const recoverSession = (
+      session: ChannelSession,
+      message: Message,
+      reason: string,
+    ): Effect.Effect<ChannelSession, unknown> =>
+      withSessionGate(
+        message.channelId,
+        Effect.gen(function* () {
+          const current = yield* getSession(message.channelId)
+          if (!current) {
+            return yield* createSession(message)
+          }
+
+          if (current.opencode.sessionId !== session.opencode.sessionId) {
+            return current
+          }
+
+          const previous = current.opencode
+          const replacement = yield* opencode.createSession(current.workdir, `Discord #${message.channelId}`)
+          current.opencode = replacement
+          yield* previous.close().pipe(Effect.ignore)
+          yield* logger.warn("recovered channel session", {
+            channelId: current.channelId,
+            previousSessionId: previous.sessionId,
+            sessionId: replacement.sessionId,
+            backend: replacement.backend,
+            workdir: current.workdir,
+            reason,
+          })
+          return current
+        }),
+      )
+
+    const ensureHealthySession = (
+      session: ChannelSession,
+      message: Message,
+      reason: string,
+    ): Effect.Effect<ChannelSession, unknown> =>
+      Effect.gen(function* () {
+        if (session.activeRun) {
+          return session
+        }
+
+        const healthy = yield* opencode.isHealthy(session.opencode)
+        if (healthy) {
+          return session
+        }
+
+        return yield* recoverSession(session, message, reason)
+      })
+
+    const recoverSessionIfUnhealthy = (
+      session: ChannelSession,
+      message: Message,
+      reason: string,
+    ): Effect.Effect<void, unknown> =>
+      Effect.gen(function* () {
+        const healthy = yield* opencode.isHealthy(session.opencode)
+        if (healthy) {
+          return
+        }
+
+        yield* recoverSession(session, message, reason)
       })
 
     yield* Effect.addFinalizer(() =>
@@ -492,13 +621,13 @@ export const ChannelSessionsLive = Layer.scoped(
     )
 
     return {
-      submit: (message, invocation) =>
+      submit: (message, invocation): Effect.Effect<void, unknown> =>
         Effect.gen(function* () {
-          yield* getOrCreateSession(message)
-          const session = yield* getSession(message.channelId)
-          if (!session) {
-            throw new Error(`Channel session not found for ${message.channelId}`)
-          }
+          const session = yield* getOrCreateSession(message).pipe(
+            Effect.flatMap((existing) =>
+              ensureHealthySession(existing, message, "health probe failed before queueing run"),
+            ),
+          )
           const prompt = buildOpencodePrompt({
             userTag: message.author.tag,
             content: invocation.prompt,

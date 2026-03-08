@@ -1,4 +1,4 @@
-import { ActivityType, Client, Events, GatewayIntentBits } from "discord.js"
+import { ActivityType, ChannelType, Client, Events, GatewayIntentBits } from "discord.js"
 import { Context, Effect, Layer, Runtime } from "effect"
 
 import { AppConfig } from "@/config.ts"
@@ -56,7 +56,7 @@ export const DiscordBotLive = Layer.scoped(
       if (!message.inGuild()) {
         return
       }
-      if (!message.channel.isTextBased()) {
+      if (message.channel.type !== ChannelType.GuildText) {
         return
       }
       if (message.author.bot) {
