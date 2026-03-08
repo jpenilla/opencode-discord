@@ -1,4 +1,5 @@
 import type { APIEmbedField, Attachment, Embed, Message, SendableChannels } from "discord.js"
+import { MessageFlags } from "discord.js"
 
 import { splitDiscordMessage } from "@/discord/formatting.ts"
 
@@ -83,6 +84,39 @@ export const sendFinalResponse = async (input: {
     await (input.message.channel as SendableChannels).send({
       content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
       allowedMentions: { parse: [] },
+    })
+  }
+}
+
+export const sendProgressUpdate = async (input: {
+  message: Message
+  text: string
+}) => {
+  const safeText = input.text.trim()
+  if (!safeText) {
+    return
+  }
+
+  const chunks = splitDiscordMessage(safeText)
+
+  for (const [index, chunk] of chunks.entries()) {
+    if (index === 0) {
+      await input.message.reply({
+        content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
+        allowedMentions: { repliedUser: false, parse: [] },
+        flags: MessageFlags.SuppressNotifications,
+      })
+      continue
+    }
+
+    if (!input.message.channel.isSendable()) {
+      continue
+    }
+
+    await (input.message.channel as SendableChannels).send({
+      content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
+      allowedMentions: { parse: [] },
+      flags: MessageFlags.SuppressNotifications,
     })
   }
 }

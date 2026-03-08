@@ -1,8 +1,9 @@
-import { createOpencode, createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk"
+import { createOpencode, createOpencodeClient, type GlobalEvent, type OpencodeClient } from "@opencode-ai/sdk/v2"
 import { Cause, Chunk, Context, Effect, Layer } from "effect"
 import { fileURLToPath } from "node:url"
 
 import { AppConfig } from "@/config.ts"
+import { OpencodeEventQueue, type OpencodeEventQueueShape } from "@/opencode/events.ts"
 import { renderTranscript } from "@/opencode/transcript.ts"
 import { Logger, type LoggerShape } from "@/util/logging.ts"
 
@@ -43,6 +44,7 @@ const formatValue = (value: unknown) => {
 
 const consumeEvents = (input: {
   client: OpencodeClient
+  eventQueue: OpencodeEventQueueShape
   logger: LoggerShape
   signal: AbortSignal
 }) =>
@@ -59,25 +61,30 @@ const consumeEvents = (input: {
     })
 
     for await (const wrapped of events.stream) {
-      const payload = (wrapped as { payload?: { type?: string; properties?: Record<string, unknown> } }).payload
-      if (!payload?.type) {
+      if (!wrapped || typeof wrapped !== "object" || !("payload" in wrapped)) {
         continue
       }
 
+      const event = wrapped as GlobalEvent
+
       if (
-        payload.type === "session.status" ||
-        payload.type === "session.error" ||
-        payload.type === "session.idle" ||
-        payload.type === "message.updated" ||
-        payload.type === "message.part.updated"
+        event.payload.type === "session.status" ||
+        event.payload.type === "session.error" ||
+        event.payload.type === "session.idle" ||
+        event.payload.type === "message.updated" ||
+        event.payload.type === "message.part.updated" ||
+        event.payload.type === "permission.asked" ||
+        event.payload.type === "permission.replied"
       ) {
         await Effect.runPromise(
           input.logger.info("opencode event", {
-            type: payload.type,
-            properties: payload.properties,
+            type: event.payload.type,
+            properties: event.payload.properties,
           }),
         )
       }
+
+      await Effect.runPromise(input.eventQueue.publish(event))
     }
   })
 
@@ -92,6 +99,7 @@ export const OpencodeServiceLive = Layer.scoped(
   OpencodeService,
   Effect.gen(function* () {
     const config = yield* AppConfig
+    const eventQueue = yield* OpencodeEventQueue
     const logger = yield* Logger
     yield* logger.info("starting opencode server", {
       configDir: OPENCODE_CONFIG_DIR,
@@ -168,6 +176,7 @@ export const OpencodeServiceLive = Layer.scoped(
 
     yield* consumeEvents({
       client: runtime.client,
+      eventQueue,
       logger,
       signal: abortController.signal,
     }).pipe(
@@ -189,7 +198,7 @@ export const OpencodeServiceLive = Layer.scoped(
             baseUrl: runtime.server.url,
             directory: workdir,
           })
-          const result = yield* Effect.promise(() => client.session.create({ body: { title } }))
+          const result = yield* Effect.promise(() => client.session.create({ title }))
           if (result.error || !result.data) {
             throw new Error(`Failed to create opencode session: ${formatValue(result.error)}`)
           }
@@ -209,10 +218,8 @@ export const OpencodeServiceLive = Layer.scoped(
         Effect.gen(function* () {
           const result = yield* Effect.promise(() =>
             session.client.session.prompt({
-              path: { id: session.sessionId },
-              body: {
-                parts: [{ type: "text", text: prompt }],
-              },
+              sessionID: session.sessionId,
+              parts: [{ type: "text", text: prompt }],
             }),
           )
 

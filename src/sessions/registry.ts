@@ -2,15 +2,41 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 
-import { Context, Effect, FiberSet, Layer, Queue, Ref } from "effect"
+import { Chunk, Context, Effect, Fiber, FiberSet, Layer, Queue, Ref } from "effect"
 import type { Message } from "discord.js"
 
 import { AppConfig } from "@/config.ts"
 import { formatErrorResponse } from "@/discord/formatting.ts"
-import { buildOpencodePrompt, sendFinalResponse, startTypingLoop, summarizeAttachments, summarizeEmbeds } from "@/discord/messages.ts"
+import { buildOpencodePrompt, sendFinalResponse, sendProgressUpdate, startTypingLoop, summarizeAttachments, summarizeEmbeds } from "@/discord/messages.ts"
+import {
+  formatAssistantMessageCompleted,
+  formatAssistantMessageStarted,
+  formatPatchUpdated,
+  formatPermissionAsked,
+  formatPermissionReplied,
+  formatRunStarted,
+  formatSessionStatus,
+  formatStepFinished,
+  formatStepStarted,
+  formatTextReady,
+  formatToolUpdate,
+} from "@/discord/progress.ts"
+import {
+  OpencodeEventQueue,
+  getAssistantMessageUpdated,
+  getEventSessionId,
+  getPatchPart,
+  getPermissionReplied,
+  getPermissionUpdated,
+  getSessionStatusUpdated,
+  getStepFinishPart,
+  getStepStartPart,
+  getTextPart,
+  getToolPartUpdated,
+} from "@/opencode/events.ts"
 import type { Invocation } from "@/discord/triggers.ts"
 import { OpencodeService } from "@/opencode/service.ts"
-import type { ActiveRun, ChannelSession, RunRequest } from "@/sessions/session.ts"
+import type { ActiveRun, ChannelSession, RunProgressEvent, RunRequest } from "@/sessions/session.ts"
 import { Logger } from "@/util/logging.ts"
 
 export type ChannelSessionsShape = {
@@ -33,6 +59,7 @@ export const ChannelSessionsLive = Layer.scoped(
     const logger = yield* Logger
     const config = yield* AppConfig
     const opencode = yield* OpencodeService
+    const eventQueue = yield* OpencodeEventQueue
     const sessionsRef = yield* Ref.make(new Map<string, ChannelSession>())
     const fiberSet = yield* FiberSet.make()
 
@@ -52,12 +79,319 @@ export const ChannelSessionsLive = Layer.scoped(
 
     const getSession = (channelId: string) => Ref.get(sessionsRef).pipe(Effect.map((sessions) => sessions.get(channelId)))
 
+    const getActiveRunForSessionId = (sessions: Map<string, ChannelSession>, sessionId: string) => {
+      for (const session of sessions.values()) {
+        if (session.opencode.sessionId === sessionId) {
+          return session.activeRun
+        }
+      }
+      return null
+    }
+
+    const updateActiveRunBySessionId = (sessionId: string, update: (activeRun: ActiveRun) => ActiveRun) =>
+      Ref.update(sessionsRef, (current) => {
+        for (const [channelId, session] of current.entries()) {
+          if (session.opencode.sessionId !== sessionId || !session.activeRun) {
+            continue
+          }
+
+          const updatedRun = update(session.activeRun)
+          if (updatedRun === session.activeRun) {
+            return current
+          }
+
+          const next = new Map(current)
+          next.set(channelId, {
+            ...session,
+            activeRun: updatedRun,
+          })
+          return next
+        }
+        return current
+      })
+
+    const progressUpdateForEvent = (event: RunProgressEvent, state: {
+      assistantMessageIds: Set<string>
+      completedAssistantMessageIds: Set<string>
+      stepIds: Set<string>
+      finishedStepIds: Set<string>
+      textPartIds: Set<string>
+      patchPartIds: Set<string>
+      toolStates: Map<string, string>
+      permissionReplies: Map<string, string>
+      pendingPermissions: Set<string>
+      retryStatusKeys: Set<string>
+    }) => {
+      switch (event.type) {
+        case "run-started":
+          return formatRunStarted()
+        case "assistant-message-started": {
+          if (state.assistantMessageIds.has(event.messageId)) {
+            return null
+          }
+          state.assistantMessageIds.add(event.messageId)
+          return formatAssistantMessageStarted(state.assistantMessageIds.size)
+        }
+        case "assistant-message-completed": {
+          if (state.completedAssistantMessageIds.has(event.messageId)) {
+            return null
+          }
+          state.completedAssistantMessageIds.add(event.messageId)
+          return formatAssistantMessageCompleted()
+        }
+        case "step-started": {
+          if (state.stepIds.has(event.stepId)) {
+            return null
+          }
+          state.stepIds.add(event.stepId)
+          return formatStepStarted(state.stepIds.size)
+        }
+        case "step-finished": {
+          if (state.finishedStepIds.has(event.part.id)) {
+            return null
+          }
+          state.finishedStepIds.add(event.part.id)
+          return formatStepFinished(event.part)
+        }
+        case "patch-updated": {
+          if (state.patchPartIds.has(event.part.id)) {
+            return null
+          }
+          state.patchPartIds.add(event.part.id)
+          return formatPatchUpdated(event.part)
+        }
+        case "text-ready": {
+          if (state.textPartIds.has(event.partId)) {
+            return null
+          }
+          state.textPartIds.add(event.partId)
+          return formatTextReady()
+        }
+        case "session-status":
+          if (event.status.type === "retry") {
+            const key = `${event.status.attempt}:${event.status.message}`
+            if (state.retryStatusKeys.has(key)) {
+              return null
+            }
+            state.retryStatusKeys.add(key)
+          }
+          return formatSessionStatus(event.status)
+        case "tool-updated": {
+          const title = event.part.state.status === "running" || event.part.state.status === "completed" ? event.part.state.title : ""
+          const nextKey = `${event.part.state.status}:${title}`
+          const previousKey = state.toolStates.get(event.part.callID)
+          if (previousKey === nextKey) {
+            return null
+          }
+          state.toolStates.set(event.part.callID, nextKey)
+          return formatToolUpdate(event.part)
+        }
+        case "permission-asked": {
+          if (state.pendingPermissions.has(event.permission.id)) {
+            return null
+          }
+          state.pendingPermissions.add(event.permission.id)
+          return formatPermissionAsked(event.permission)
+        }
+        case "permission-replied": {
+          const previousReply = state.permissionReplies.get(event.reply.requestID)
+          if (previousReply === event.reply.reply) {
+            return null
+          }
+          state.permissionReplies.set(event.reply.requestID, event.reply.reply)
+          return formatPermissionReplied(event.reply)
+        }
+      }
+    }
+
+    const runProgressWorker = (message: Message, queue: Queue.Queue<RunProgressEvent>) =>
+      Effect.gen(function* () {
+        const state = {
+          assistantMessageIds: new Set<string>(),
+          completedAssistantMessageIds: new Set<string>(),
+          stepIds: new Set<string>(),
+          finishedStepIds: new Set<string>(),
+          textPartIds: new Set<string>(),
+          patchPartIds: new Set<string>(),
+          toolStates: new Map<string, string>(),
+          permissionReplies: new Map<string, string>(),
+          pendingPermissions: new Set<string>(),
+          retryStatusKeys: new Set<string>(),
+        }
+
+        while (true) {
+          const first = yield* Queue.take(queue)
+          const rest = yield* Queue.takeUpTo(queue, 64)
+          const batch = [first, ...Chunk.toReadonlyArray(rest)]
+
+          for (const event of batch) {
+            const update = progressUpdateForEvent(event, state)
+            if (!update) {
+              continue
+            }
+            yield* Effect.promise(() => sendProgressUpdate({ message, text: update }))
+          }
+        }
+      })
+
+    yield* eventQueue.take().pipe(
+      Effect.flatMap((wrapped) => {
+        const sessionId = getEventSessionId(wrapped.payload)
+        if (!sessionId) {
+          return Effect.void
+        }
+
+        return Ref.get(sessionsRef).pipe(
+          Effect.flatMap((sessions) => {
+            const activeRun = getActiveRunForSessionId(sessions, sessionId)
+            if (!activeRun) {
+              return Effect.void
+            }
+
+            const progressEvents: RunProgressEvent[] = []
+            let assistantMessageId = activeRun.assistantMessageId
+
+            const assistantMessage = getAssistantMessageUpdated(wrapped.payload)
+            if (assistantMessage) {
+              const messageId = assistantMessage.properties.info.id
+              if (!assistantMessageId) {
+                assistantMessageId = messageId
+                progressEvents.push({
+                  type: "assistant-message-started",
+                  messageId,
+                })
+              } else if (assistantMessageId !== messageId) {
+                return Effect.void
+              }
+
+              if ("completed" in assistantMessage.properties.info.time && assistantMessage.properties.info.time.completed) {
+                progressEvents.push({
+                  type: "assistant-message-completed",
+                  messageId,
+                })
+              }
+            }
+
+            const toolPart = getToolPartUpdated(wrapped.payload)
+            if (toolPart) {
+              if (!assistantMessageId || toolPart.messageID !== assistantMessageId) {
+                return Effect.void
+              }
+              progressEvents.push({
+                type: "tool-updated",
+                part: toolPart,
+              })
+            }
+
+            const stepStartPart = getStepStartPart(wrapped.payload)
+            if (stepStartPart) {
+              if (!assistantMessageId || stepStartPart.messageID !== assistantMessageId) {
+                return Effect.void
+              }
+              progressEvents.push({
+                type: "step-started",
+                stepId: stepStartPart.id,
+              })
+            }
+
+            const stepFinishPart = getStepFinishPart(wrapped.payload)
+            if (stepFinishPart) {
+              if (!assistantMessageId || stepFinishPart.messageID !== assistantMessageId) {
+                return Effect.void
+              }
+              progressEvents.push({
+                type: "step-finished",
+                part: stepFinishPart,
+              })
+            }
+
+            const patchPart = getPatchPart(wrapped.payload)
+            if (patchPart) {
+              if (!assistantMessageId || patchPart.messageID !== assistantMessageId) {
+                return Effect.void
+              }
+              progressEvents.push({
+                type: "patch-updated",
+                part: patchPart,
+              })
+            }
+
+            const textPart = getTextPart(wrapped.payload)
+            if (textPart) {
+              if (!assistantMessageId || textPart.messageID !== assistantMessageId) {
+                return Effect.void
+              }
+              if (textPart.text.trim().length > 0) {
+                progressEvents.push({
+                  type: "text-ready",
+                  partId: textPart.id,
+                })
+              }
+            }
+
+            const permission = getPermissionUpdated(wrapped.payload)
+            if (permission) {
+              if (assistantMessageId && permission.tool?.messageID && permission.tool.messageID !== assistantMessageId) {
+                return Effect.void
+              }
+              progressEvents.push({
+                type: "permission-asked",
+                permission,
+              })
+            }
+
+            const permissionReply = getPermissionReplied(wrapped.payload)
+            if (permissionReply) {
+              progressEvents.push({
+                type: "permission-replied",
+                reply: permissionReply,
+              })
+            }
+
+            const sessionStatus = getSessionStatusUpdated(wrapped.payload)
+            if (sessionStatus) {
+              progressEvents.push({
+                type: "session-status",
+                status: sessionStatus.status,
+              })
+            }
+
+            return Effect.gen(function* () {
+              if (assistantMessageId && assistantMessageId !== activeRun.assistantMessageId) {
+                yield* updateActiveRunBySessionId(sessionId, (current) => ({
+                  ...current,
+                  assistantMessageId,
+                }))
+              }
+
+              for (const progressEvent of progressEvents) {
+                yield* Queue.offer(activeRun.progressQueue, progressEvent).pipe(Effect.asVoid)
+              }
+            })
+          }),
+        )
+      }),
+      Effect.forever,
+      Effect.catchAll((error) =>
+        logger.error("opencode event dispatcher failed", {
+          error: formatError(error),
+        }),
+      ),
+      Effect.forkScoped,
+    )
+
     const processRequest = (session: ChannelSession, request: RunRequest) =>
       Effect.gen(function* () {
+        const progressQueue = yield* Queue.unbounded<RunProgressEvent>()
+        const progressFiber = yield* runProgressWorker(request.message, progressQueue).pipe(Effect.fork)
+
         yield* setActiveRun(session.channelId, {
           discordMessage: request.message,
           workdir: session.workdir,
+          progressQueue,
+          assistantMessageId: null,
         })
+        yield* Queue.offer(progressQueue, { type: "run-started" })
 
         const stopTyping = startTypingLoop(request.message.channel)
 
@@ -84,6 +418,7 @@ export const ChannelSessionsLive = Layer.scoped(
         } finally {
           stopTyping()
           yield* setActiveRun(session.channelId, null)
+          yield* Fiber.interrupt(progressFiber)
         }
       })
 
@@ -176,14 +511,7 @@ export const ChannelSessionsLive = Layer.scoped(
         }),
       getActiveRunBySessionId: (sessionId) =>
         Ref.get(sessionsRef).pipe(
-          Effect.map((sessions) => {
-            for (const session of sessions.values()) {
-              if (session.opencode.sessionId === sessionId) {
-                return session.activeRun
-              }
-            }
-            return null
-          }),
+          Effect.map((sessions) => getActiveRunForSessionId(sessions, sessionId)),
         ),
     } satisfies ChannelSessionsShape
   }),
