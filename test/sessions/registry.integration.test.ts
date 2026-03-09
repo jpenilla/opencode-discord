@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { ChannelType, type Interaction, type Message, type MessageCreateOptions, type MessageEditOptions, type SendableChannels } from "discord.js"
 import { Deferred, Effect, Layer, Queue, Ref } from "effect"
 
@@ -12,11 +15,13 @@ import { SessionStore, type PersistedChannelSession, type SessionStoreShape } fr
 import { Logger, type LoggerShape } from "@/util/logging.ts"
 import { unsafeEffect, unsafeStub } from "../support/stub.ts"
 
+const TEST_STATE_DIR = join(tmpdir(), `.opencode-discord-test-storage-${process.pid}`)
+
 const makeConfig = (): AppConfigShape => ({
   discordToken: "discord-token",
   triggerPhrase: "hey opencode",
   sessionInstructions: "",
-  stateDir: "./storage-test",
+  stateDir: TEST_STATE_DIR,
   sessionIdleTimeoutMs: 30 * 60 * 1_000,
   toolBridgeSocketPath: "/tmp/bridge.sock",
   toolBridgeToken: "bridge-token",
@@ -25,6 +30,14 @@ const makeConfig = (): AppConfigShape => ({
   bwrapBin: "bwrap",
   sandboxReadOnlyPaths: [],
   sandboxEnvPassthrough: [],
+})
+
+beforeAll(async () => {
+  await rm(TEST_STATE_DIR, { recursive: true, force: true })
+})
+
+afterAll(async () => {
+  await rm(TEST_STATE_DIR, { recursive: true, force: true })
 })
 
 const makeLogger = (): LoggerShape => ({
