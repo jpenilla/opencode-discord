@@ -3,6 +3,7 @@ import { Effect } from "effect"
 import type { Message } from "discord.js"
 
 import { collectAttachmentMessages, resolveReferencedMessage } from "@/sessions/message-context.ts"
+import { unsafeStub } from "../support/stub.ts"
 
 const makeMessage = (input: {
   id: string
@@ -10,7 +11,7 @@ const makeMessage = (input: {
   fetchReference?: () => Promise<Message>
   attachmentCount?: number
 }) =>
-  ({
+  unsafeStub<Message>({
     id: input.id,
     reference: input.reference,
     attachments: new Map(
@@ -20,7 +21,7 @@ const makeMessage = (input: {
       ]),
     ),
     fetchReference: input.fetchReference,
-  }) as unknown as Message
+  })
 
 describe("resolveReferencedMessage", () => {
   test("returns null when the message is not a reply", async () => {
@@ -80,12 +81,12 @@ describe("collectAttachmentMessages", () => {
   })
 
   test("dedupes when the referenced message resolves to the same id", async () => {
+    const self = makeMessage({ id: "m-1" })
     const message = makeMessage({
       id: "m-1",
       reference: { messageId: "m-1" },
+      fetchReference: async () => self,
     })
-    const self = makeMessage({ id: "m-1" })
-    ;(message.fetchReference as unknown) = async () => self
 
     const result = await Effect.runPromise(collectAttachmentMessages(message))
     expect(result.map((entry) => entry.id)).toEqual(["m-1"])

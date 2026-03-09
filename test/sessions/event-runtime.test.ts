@@ -5,18 +5,19 @@ import type { Message } from "discord.js"
 
 import { createEventRuntime } from "@/sessions/event-runtime.ts"
 import { noQuestionOutcome, type ActiveRun, type ChannelSession, type RunProgressEvent } from "@/sessions/session.ts"
+import { unsafeStub } from "../support/stub.ts"
 
 const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref))
 
 const makeSession = async (withActiveRun: boolean) => {
   const progressQueue = await Effect.runPromise(Queue.unbounded<RunProgressEvent>())
-  const activeRun = withActiveRun ? ({
-    discordMessage: {
+  const activeRun = withActiveRun ? unsafeStub<ActiveRun>({
+    discordMessage: unsafeStub<Message>({
       id: "discord-message",
       channelId: "channel-1",
       channel: { id: "channel-1" },
       attachments: new Map(),
-    } as unknown as Message,
+    }),
     workdir: "/home/opencode/workspace",
     attachmentMessagesById: new Map(),
     progressQueue,
@@ -29,9 +30,9 @@ const makeSession = async (withActiveRun: boolean) => {
     },
     questionOutcome: noQuestionOutcome(),
     interruptRequested: false,
-  } as unknown as ActiveRun) : null
+  }) : null
 
-  const session = {
+  const session = unsafeStub<ChannelSession>({
     channelId: "channel-1",
     opencode: {
       sessionId: "session-1",
@@ -44,13 +45,13 @@ const makeSession = async (withActiveRun: boolean) => {
     workdir: "/home/opencode/workspace",
     queue: {} as ChannelSession["queue"],
     activeRun,
-  } as ChannelSession
+  })
 
   return { session, activeRun, progressQueue }
 }
 
 const makeQuestionAskedEvent = (sessionId = "session-1"): Event =>
-  ({
+  unsafeStub<Event>({
     type: "question.asked",
     properties: {
       id: "req-1",
@@ -61,29 +62,29 @@ const makeQuestionAskedEvent = (sessionId = "session-1"): Event =>
         callID: "call-1",
       },
     } satisfies QuestionRequest,
-  }) as unknown as Event
+  })
 
 const makeQuestionRepliedEvent = (sessionId = "session-1"): Event =>
-  ({
+  unsafeStub<Event>({
     type: "question.replied",
     properties: {
       sessionID: sessionId,
       requestID: "req-1",
       answers: [["Yes"]] satisfies ReadonlyArray<QuestionAnswer>,
     },
-  }) as unknown as Event
+  })
 
 const makeQuestionRejectedEvent = (sessionId = "session-1"): Event =>
-  ({
+  unsafeStub<Event>({
     type: "question.rejected",
     properties: {
       sessionID: sessionId,
       requestID: "req-1",
     },
-  }) as unknown as Event
+  })
 
 const makeSessionStatusEvent = (sessionId = "session-1"): Event =>
-  ({
+  unsafeStub<Event>({
     type: "session.status",
     properties: {
       sessionID: sessionId,
@@ -91,15 +92,15 @@ const makeSessionStatusEvent = (sessionId = "session-1"): Event =>
         type: "busy",
       },
     },
-  }) as unknown as Event
+  })
 
 const makeSessionCompactedEvent = (sessionId = "session-1"): Event =>
-  ({
+  unsafeStub<Event>({
     type: "session.compacted",
     properties: {
       sessionID: sessionId,
     },
-  }) as unknown as Event
+  })
 
 describe("createEventRuntime", () => {
   test("routes question asked events to the question runtime", async () => {

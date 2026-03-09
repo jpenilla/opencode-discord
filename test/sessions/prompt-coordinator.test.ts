@@ -8,12 +8,13 @@ import { enqueueRunRequest } from "@/sessions/request-routing.ts"
 import type { RunRequest } from "@/sessions/session.ts"
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts"
 import type { LoggerShape } from "@/util/logging.ts"
+import { unsafeStub } from "../support/stub.ts"
 
 const makeMessage = (id: string) =>
-  ({
+  unsafeStub<Message>({
     id,
     attachments: new Map(),
-  }) as unknown as Message
+  })
 
 const makeRequest = (id: string, prompt = `prompt-${id}`, attachmentMessageIds: ReadonlyArray<string> = [id]): RunRequest => ({
   message: makeMessage(id),

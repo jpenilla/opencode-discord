@@ -6,33 +6,34 @@ import type { PromptResult, SessionHandle } from "@/opencode/service.ts"
 import { executeRunBatch } from "@/sessions/run-executor.ts"
 import type { NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts"
 import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/session.ts"
+import { unsafeStub } from "../support/stub.ts"
 
 const makeMessage = (id: string) =>
-  ({
+  unsafeStub<Message>({
     id,
     channelId: "channel-1",
     channel: { id: "channel-1" },
     attachments: new Map(),
-  }) as unknown as Message
+  })
 
 const makeSessionHandle = (): SessionHandle =>
-  ({
+  unsafeStub<SessionHandle>({
     sessionId: "session-1",
     client: {},
     workdir: "/home/opencode/workspace",
     backend: "bwrap",
     close: () => Effect.void,
-  }) as unknown as SessionHandle
+  })
 
 const makeSession = (): ChannelSession =>
-  ({
+  unsafeStub<ChannelSession>({
     channelId: "channel-1",
     opencode: makeSessionHandle(),
     rootDir: "/tmp/session-root",
     workdir: "/home/opencode/workspace",
     queue: {},
     activeRun: null,
-  }) as unknown as ChannelSession
+  })
 
 const makeInitialRequests = (message: Message): NonEmptyRunRequestBatch =>
   [{

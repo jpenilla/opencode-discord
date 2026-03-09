@@ -5,9 +5,10 @@ import { Deferred, Effect, Fiber, Ref } from "effect"
 import type { SessionHandle } from "@/opencode/service.ts"
 import { createSessionLifecycle, type SessionLifecycleState } from "@/sessions/session-lifecycle.ts"
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts"
+import { unsafeStub } from "../support/stub.ts"
 
 const makeMessage = (channelId = "channel-1") =>
-  ({
+  unsafeStub<Message>({
     channelId,
     guildId: "guild-1",
     guild: { name: "Guild One" },
@@ -17,19 +18,19 @@ const makeMessage = (channelId = "channel-1") =>
       topic: "Work thread",
     },
     inGuild: () => true,
-  }) as unknown as Message
+  })
 
 const makeHandle = (sessionId: string, workdir: string, onClose: (sessionId: string) => void): SessionHandle =>
-  ({
+  unsafeStub<SessionHandle>({
     sessionId,
     client: {},
     workdir,
     backend: "bwrap",
     close: () => Effect.sync(() => onClose(sessionId)),
-  }) as unknown as SessionHandle
+  })
 
-const makeActiveRun = () => ({}) as ActiveRun
-const makeCardMessage = (id: string) => ({ id }) as unknown as Message
+const makeActiveRun = () => unsafeStub<ActiveRun>({})
+const makeCardMessage = (id: string) => unsafeStub<Message>({ id })
 
 const makeState = (): SessionLifecycleState => ({
   sessionsByChannelId: new Map(),

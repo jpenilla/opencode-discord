@@ -3,9 +3,10 @@ import type { Message } from "discord.js"
 
 import { admitRequestBatchToActiveRun } from "@/sessions/run-batch.ts"
 import type { RunRequest } from "@/sessions/session.ts"
+import { unsafeStub } from "../support/stub.ts"
 
 const makeMessage = (id: string, attachmentCount = 0) =>
-  ({
+  unsafeStub<Message>({
     id,
     attachments: new Map(
       Array.from({ length: attachmentCount }, (_, index) => [
@@ -13,7 +14,7 @@ const makeMessage = (id: string, attachmentCount = 0) =>
         { id: `att-${id}-${index}` },
       ]),
     ),
-  }) as unknown as Message
+  })
 
 const makeRequest = (
   prompt: string,

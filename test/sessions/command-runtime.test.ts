@@ -5,6 +5,7 @@ import { Deferred, Effect, Ref } from "effect"
 import { formatErrorResponse } from "@/discord/formatting.ts"
 import { createCommandRuntime } from "@/sessions/command-runtime.ts"
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts"
+import { unsafeStub } from "../support/stub.ts"
 
 const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref))
 
@@ -26,17 +27,17 @@ const makeHarness = async (options?: {
   const compactFinish = await Effect.runPromise(Deferred.make<void, never>())
   const compactUpdated = await Effect.runPromise(Deferred.make<void, never>())
 
-  const compactionCard = {
+  const compactionCard = unsafeStub<Message>({
     id: "compaction-card",
-  } as Message
+  })
 
   const activeRun: ActiveRun = {
-    discordMessage: {
+    discordMessage: unsafeStub<Message>({
       id: "discord-message",
       channelId: "channel-1",
       channel: { id: "channel-1" },
       attachments: new Map(),
-    } as unknown as Message,
+    }),
     workdir: "/home/opencode/workspace",
     attachmentMessagesById: new Map(),
     progressQueue: {} as ActiveRun["progressQueue"],
@@ -66,10 +67,14 @@ const makeHarness = async (options?: {
     activeRun: options?.hasActiveRun ?? false ? activeRun : null,
   }
 
-  const interaction = {
+  const interaction = unsafeStub<Interaction & {
+    replied: boolean
+    deferred: boolean
+    commandName: string
+  }>({
     commandName: "compact",
     channelId: "channel-1",
-    channel: { type: ChannelType.GuildText, id: "channel-1" } as SendableChannels,
+    channel: unsafeStub<SendableChannels>({ type: ChannelType.GuildText, id: "channel-1" }),
     replied: false,
     deferred: false,
     inGuild: () => true,
@@ -84,11 +89,7 @@ const makeHarness = async (options?: {
     },
     editReply: ({ content }: { content?: string }) =>
       Effect.runPromise(Ref.update(edits, (current) => [...current, content ?? ""])),
-  } as unknown as Interaction & {
-    replied: boolean
-    deferred: boolean
-    commandName: string
-  }
+  })
 
   const runtime = createCommandRuntime({
     getSession: (channelId) => Effect.succeed(channelId === session.channelId ? session : null),

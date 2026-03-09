@@ -9,6 +9,7 @@ import {
   summarizeEmbeds,
 } from "@/discord/messages.ts"
 import { buildSessionSystemAppend } from "@/discord/system-context.ts"
+import { unsafeStub } from "../support/stub.ts"
 
 type EmbedStub = {
   title?: string
@@ -28,7 +29,7 @@ const baseMessageFields = () => ({
 
 const makeMessage = (
   overrides: Partial<ReturnType<typeof baseMessageFields>> = {},
-) => ({ ...baseMessageFields(), ...overrides }) as unknown as Message
+) => unsafeStub<Message>({ ...baseMessageFields(), ...overrides })
 
 const makeGuildTextMessage = (
   overrides: Partial<{
@@ -39,7 +40,7 @@ const makeGuildTextMessage = (
     channel: { type: ChannelType; name: string; topic?: string | null }
   }> = {},
 ) =>
-  ({
+  unsafeStub<Message>({
     ...baseMessageFields(),
     inGuild: () => true,
     guildId: "g-1",
@@ -47,7 +48,7 @@ const makeGuildTextMessage = (
     guild: { name: "Test Guild" },
     channel: { type: ChannelType.GuildText, name: "general", topic: null },
     ...overrides,
-  }) as unknown as Message
+  })
 
 describe("summarizeEmbeds", () => {
   test("returns None for messages without embeds", () => {

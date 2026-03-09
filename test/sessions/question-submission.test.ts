@@ -8,6 +8,7 @@ import {
 } from "@/sessions/question-submission.ts"
 import type { QuestionBatchState } from "@/sessions/question-batch-state.ts"
 import { noQuestionOutcome, type QuestionOutcome } from "@/sessions/session.ts"
+import { unsafeStub } from "../support/stub.ts"
 
 type TestInteraction = { id: string }
 type TestSessionHandle = { id: string }
@@ -19,10 +20,10 @@ type TestBatch = QuestionBatchState & {
 }
 
 const makeRequest = (id = "req-1") =>
-  ({
+  unsafeStub<QuestionRequest>({
     id,
     questions: [{ question: "Question?", options: [{ label: "Yes", description: "desc" }] }],
-  }) as unknown as QuestionRequest
+  })
 
 const makeBatch = (): TestBatch => ({
   request: makeRequest(),

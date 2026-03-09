@@ -5,12 +5,13 @@ import { Effect, Ref } from "effect"
 
 import { createQuestionRuntime } from "@/sessions/question-runtime.ts"
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts"
+import { unsafeStub } from "../support/stub.ts"
 
 const makeRequest = (id = "req-1") =>
-  ({
+  unsafeStub<QuestionRequest>({
     id,
     questions: [{ header: "Question", question: "Question?", options: [{ label: "Yes", description: "desc" }] }],
-  }) as unknown as QuestionRequest
+  })
 
 const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref))
 
@@ -28,13 +29,13 @@ const makeHarness = async (options?: {
   const typingResumeCount = await Effect.runPromise(Ref.make(0))
   const typingStopCount = await Effect.runPromise(Ref.make(0))
 
-  const questionMessage = {
+  const questionMessage: Message = unsafeStub<Message>({
     id: "question-message",
-    edit: (payload: MessageEditOptions) =>
-      Effect.runPromise(Ref.update(editedPayloads, (current) => [...current, payload])).then(() => questionMessage as Message),
-  } as unknown as Message
+    edit: (payload: MessageEditOptions): Promise<Message> =>
+      Effect.runPromise(Ref.update(editedPayloads, (current) => [...current, payload])).then(() => questionMessage),
+  })
 
-  const discordMessage = {
+  const discordMessage = unsafeStub<Message>({
     id: "discord-message",
     channelId: "channel-1",
     author: { id: "owner", tag: "owner#0001" },
@@ -45,7 +46,7 @@ const makeHarness = async (options?: {
         }
         return questionMessage
       }),
-  } as unknown as Message
+  })
 
   const activeRun: ActiveRun = {
     discordMessage,
@@ -109,7 +110,7 @@ const makeHarness = async (options?: {
     userId?: string
     messageId?: string
   }) =>
-    ({
+    unsafeStub<Interaction>({
       customId: input.customId,
       user: { id: input.userId ?? "owner" },
       message: { id: input.messageId ?? questionMessage.id },
@@ -125,7 +126,7 @@ const makeHarness = async (options?: {
       followUp: (_payload: unknown) => Promise.resolve(questionMessage),
       showModal: (_modal: unknown) => Promise.resolve(),
       deferUpdate: () => Promise.resolve(),
-    }) as unknown as Interaction
+    })
 
   return {
     runtime,
