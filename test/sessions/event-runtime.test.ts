@@ -107,14 +107,6 @@ const makeSessionCompactedEvent = (sessionId = "session-1"): Event =>
     },
   })
 
-const makeSessionIdleEvent = (sessionId = "session-1"): Event =>
-  unsafeStub<Event>({
-    type: "session.idle",
-    properties: {
-      sessionID: sessionId,
-    },
-  })
-
 const makeAssistantMessageUpdatedEvent = (input: {
   id: string
   parentId: string
@@ -386,7 +378,7 @@ describe("createEventRuntime", () => {
     expect(await Effect.runPromise(Ref.get(promptState))).not.toBeNull()
   })
 
-  test("waits for the session to go idle after the late terminal tool update before completing the pending prompt", async () => {
+  test("waits for the late terminal tool update before completing the pending prompt", async () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true)
     const completion = await Effect.runPromise(beginPendingPrompt(promptState, "user-1"))
 
@@ -419,10 +411,6 @@ describe("createEventRuntime", () => {
 
     await Effect.runPromise(runtime.handleEvent(makeToolEvent("error")))
 
-    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true)
-
-    await Effect.runPromise(runtime.handleEvent(makeSessionIdleEvent()))
-
     expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([
       {
         type: "tool-updated",
@@ -439,7 +427,7 @@ describe("createEventRuntime", () => {
     })
   })
 
-  test("fails the pending prompt when the correlated assistant aborts and the session goes idle", async () => {
+  test("fails the pending prompt when the correlated assistant aborts", async () => {
     const { session, activeRun, promptState } = await makeSession(true)
     const completion = await Effect.runPromise(beginPendingPrompt(promptState, "user-1"))
     const readPromptCalls = await Effect.runPromise(Ref.make(0))
@@ -472,10 +460,6 @@ describe("createEventRuntime", () => {
         },
       },
     })))
-
-    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true)
-
-    await Effect.runPromise(runtime.handleEvent(makeSessionIdleEvent()))
 
     const exit = await Effect.runPromise(Effect.exit(Deferred.await(completion)))
     expect(exit._tag).toBe("Failure")

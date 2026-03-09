@@ -1,4 +1,4 @@
-import type { AssistantMessage, SessionStatus, ToolPart } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, ToolPart } from "@opencode-ai/sdk/v2"
 import { Deferred, Effect, Ref } from "effect"
 
 import type { PromptResult } from "@/opencode/service.ts"
@@ -13,8 +13,6 @@ export type PendingPrompt = {
   deferred: Deferred.Deferred<PromptResult, unknown>
   assistantsByMessageId: Map<string, TrackedAssistant>
   emittedSummaryMessageIds: Set<string>
-  sessionIdle: boolean
-  sessionError: unknown | null
 }
 
 export type PromptTrackingAction =
@@ -76,9 +74,7 @@ const selectPromptReplyCandidate = (
   return candidate
 }
 
-const evaluatePromptActions = (
-  prompt: PendingPrompt,
-): ReadonlyArray<PromptTrackingAction> => {
+const evaluatePromptActions = (prompt: PendingPrompt): ReadonlyArray<PromptTrackingAction> => {
   const actions: PromptTrackingAction[] = []
 
   for (const [messageId, tracked] of prompt.assistantsByMessageId.entries()) {
@@ -91,10 +87,6 @@ const evaluatePromptActions = (
 
     prompt.emittedSummaryMessageIds.add(messageId)
     actions.push({ type: "emit-compaction-summary", messageId })
-  }
-
-  if (!prompt.sessionIdle) {
-    return actions
   }
 
   const candidate = selectPromptReplyCandidate(prompt)
@@ -114,14 +106,6 @@ const evaluatePromptActions = (
       deferred: prompt.deferred,
     })
     return actions
-  }
-
-  if (prompt.sessionError) {
-    actions.push({
-      type: "fail-prompt",
-      deferred: prompt.deferred,
-      error: prompt.sessionError,
-    })
   }
 
   return actions
@@ -153,34 +137,21 @@ const clonePrompt = (prompt: PendingPrompt): PendingPrompt => ({
   emittedSummaryMessageIds: new Set<string>(prompt.emittedSummaryMessageIds),
 })
 
-const describeSessionError = (error: { data?: { message?: string } } | undefined) =>
-  error?.data?.message?.trim() || "OpenCode session failed"
-
-export const handleSessionStatusUpdated = (
-  stateRef: Ref.Ref<PendingPrompt | null>,
-  status: SessionStatus,
-): Effect.Effect<ReadonlyArray<PromptTrackingAction>> =>
-  updatePendingPrompt(stateRef, (current) => ({
-    ...clonePrompt(current),
-    sessionIdle: status.type === "idle",
-  }))
-
-export const handleSessionIdle = (
-  stateRef: Ref.Ref<PendingPrompt | null>,
-): Effect.Effect<ReadonlyArray<PromptTrackingAction>> =>
-  updatePendingPrompt(stateRef, (current) => ({
-    ...clonePrompt(current),
-    sessionIdle: true,
-  }))
-
 export const handleSessionError = (
   stateRef: Ref.Ref<PendingPrompt | null>,
-  error: { data?: { message?: string } } | undefined,
+  error: unknown,
 ): Effect.Effect<ReadonlyArray<PromptTrackingAction>> =>
-  updatePendingPrompt(stateRef, (current) => ({
-    ...clonePrompt(current),
-    sessionError: new Error(describeSessionError(error)),
-  }))
+  Ref.modify(stateRef, (current): readonly [ReadonlyArray<PromptTrackingAction>, PendingPrompt | null] => {
+    if (!current) {
+      return [[], null]
+    }
+
+    return [[{
+      type: "fail-prompt",
+      deferred: current.deferred,
+      error,
+    }], null]
+  })
 
 export const resolvePromptTrackingActions = (
   actions: ReadonlyArray<PromptTrackingAction>,
@@ -232,8 +203,6 @@ export const beginPendingPrompt = (
       deferred,
       assistantsByMessageId: new Map<string, TrackedAssistant>(),
       emittedSummaryMessageIds: new Set<string>(),
-      sessionIdle: false,
-      sessionError: null,
     })
     return deferred
   })

@@ -9,19 +9,14 @@ import {
   getQuestionRejected,
   getQuestionReplied,
   getSessionError,
-  getSessionIdle,
-  getSessionStatusUpdated,
   getToolPartUpdated,
 } from "@/opencode/events.ts"
 import type { OpencodeServiceShape } from "@/opencode/service.ts"
 import {
   handleAssistantMessageUpdated,
-  handleSessionError as handlePendingPromptSessionError,
-  handleSessionIdle as handlePendingPromptSessionIdle,
-  handleSessionStatusUpdated as handlePendingPromptSessionStatusUpdated,
+  handleSessionError as failPendingPromptFromSessionError,
   handleToolPartUpdated,
   resolvePromptTrackingActions,
-  type PromptTrackingAction,
 } from "@/sessions/prompt-state.ts"
 import { collectProgressEvents } from "@/sessions/progress.ts"
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts"
@@ -61,8 +56,6 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
       const { activeRun } = context
       const progressEvents = collectProgressEvents(event)
       const assistantMessage = getAssistantMessageUpdated(event)
-      const sessionStatus = getSessionStatusUpdated(event)
-      const sessionIdle = getSessionIdle(event)
       const sessionError = getSessionError(event)
       const toolPart = getToolPartUpdated(event)
       const questionAsked = getQuestionAsked(event)
@@ -93,11 +86,14 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
       }
 
       if (activeRun) {
-        const promptActions: PromptTrackingAction[] = [
+        const promptActions = [
           ...(assistantMessage ? yield* handleAssistantMessageUpdated(activeRun.promptState, assistantMessage) : []),
-          ...(sessionStatus ? yield* handlePendingPromptSessionStatusUpdated(activeRun.promptState, sessionStatus.status) : []),
-          ...(sessionIdle ? yield* handlePendingPromptSessionIdle(activeRun.promptState) : []),
-          ...(sessionError ? yield* handlePendingPromptSessionError(activeRun.promptState, sessionError.error) : []),
+          ...(sessionError
+            ? yield* failPendingPromptFromSessionError(
+              activeRun.promptState,
+              sessionError.error ?? new Error("OpenCode session failed"),
+            )
+            : []),
           ...(toolPart ? yield* handleToolPartUpdated(activeRun.promptState, toolPart) : []),
         ]
 

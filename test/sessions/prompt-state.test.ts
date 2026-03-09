@@ -6,7 +6,6 @@ import {
   beginPendingPrompt,
   createPromptState,
   handleAssistantMessageUpdated,
-  handleSessionIdle,
   handleToolPartUpdated,
 } from "@/sessions/prompt-state.ts"
 import { unsafeStub } from "../support/stub.ts"
@@ -112,7 +111,7 @@ describe("prompt-state", () => {
     expect(await Effect.runPromise(Ref.get(state))).not.toBeNull()
   })
 
-  test("does not complete the prompt until the session goes idle after the live tool settles", async () => {
+  test("does not complete the prompt until the live tool settles", async () => {
     const state = await Effect.runPromise(createPromptState())
     const completion = await Effect.runPromise(beginPendingPrompt(state, "user-1"))
 
@@ -124,10 +123,7 @@ describe("prompt-state", () => {
     })))).toEqual([])
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true)
 
-    expect(await Effect.runPromise(handleToolPartUpdated(state, makeToolPart("error")))).toEqual([])
-    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true)
-
-    const actions = await Effect.runPromise(handleSessionIdle(state))
+    const actions = await Effect.runPromise(handleToolPartUpdated(state, makeToolPart("error")))
 
     expect(actions).toHaveLength(1)
     const action = actions[0]
