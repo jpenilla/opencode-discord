@@ -14,6 +14,7 @@ import {
 } from "@/discord/assets.ts"
 import { displaySessionPath, insideAliasedRoot, resolveSessionPath, sessionHomeDir } from "@/sandbox/session-paths.ts"
 import { ChannelSessions } from "@/sessions/registry.ts"
+import { getRunMessageById, resolveReactionTargetMessage } from "@/tools/run-message.ts"
 import { Logger } from "@/util/logging.ts"
 
 export type ToolBridgeShape = {
@@ -249,17 +250,26 @@ export const ToolBridgeLive = Layer.scoped(
         }
 
         if (request.method === "POST" && pathname === "/tool/react") {
+          if (!payload.messageId) {
+            sendJson(response, { error: "missing messageId" }, 400)
+            return
+          }
           if (!payload.emoji) {
             sendJson(response, { error: "missing emoji" }, 400)
             return
           }
-          const emoji = normalizeReactionEmoji(activeRun.discordMessage, payload.emoji)
+          const targetMessage = await Effect.runPromise(resolveReactionTargetMessage(activeRun, payload.messageId))
+          if (!targetMessage) {
+            sendJson(response, { error: `messageId is not available in this channel: ${payload.messageId}` }, 404)
+            return
+          }
+          const emoji = normalizeReactionEmoji(targetMessage, payload.emoji)
           if (!emoji) {
             sendJson(response, { error: "invalid or unavailable emoji" }, 400)
             return
           }
-          await activeRun.discordMessage.react(emoji)
-          sendJson(response, { ok: true, message: `Added reaction ${emoji}` })
+          await targetMessage.react(emoji)
+          sendJson(response, { ok: true, message: `Added reaction ${emoji} to Discord message ${targetMessage.id}` })
           return
         }
 
@@ -275,21 +285,16 @@ export const ToolBridgeLive = Layer.scoped(
             return
           }
 
-          const attachmentMessages = [activeRun.attachmentMessagesById.get(payload.messageId)].filter(
-            (message): message is DiscordMessage => !!message,
-          )
-
-          if (attachmentMessages.length === 0) {
+          const targetMessage = getRunMessageById(activeRun, payload.messageId)
+          if (!targetMessage) {
             sendJson(response, { error: `messageId is not available in the current run: ${payload.messageId}` }, 404)
             return
           }
 
-          const attachments = attachmentMessages.flatMap((message) =>
-            [...message.attachments.values()].map((attachment) => ({
-              attachment,
-              messageId: message.id,
-            })),
-          )
+          const attachments = [...targetMessage.attachments.values()].map((attachment) => ({
+            attachment,
+            messageId: targetMessage.id,
+          }))
           if (attachments.length === 0) {
             sendJson(
               response,
