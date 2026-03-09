@@ -411,6 +411,9 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
         workdir: input.workdir,
         createdAt: input.createdAt,
         lastActivityAt: input.lastActivityAt,
+        progressChannel: null,
+        progressMentionContext: null,
+        emittedCompactionSummaryMessageIds: new Set<string>(),
         queue,
         activeRun: null,
       }
@@ -480,6 +483,9 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
         workdir,
         createdAt: persisted.createdAt,
         lastActivityAt,
+        progressChannel: null,
+        progressMentionContext: null,
+        emittedCompactionSummaryMessageIds: new Set<string>(),
         queue,
         activeRun: null,
       }

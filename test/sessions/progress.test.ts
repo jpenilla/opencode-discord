@@ -118,39 +118,6 @@ const runFinalizationScenario = async (reason: "interrupted" | "shutdown") => {
 }
 
 describe("runProgressWorker", () => {
-  test("sends compaction summaries as progress updates", async () => {
-    const harness = await makeHarness()
-
-    const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const queue = yield* Queue.unbounded<RunProgressEvent>()
-          const worker = yield* Effect.fork(
-            runProgressWorker(harness.sourceMessage, "/home/opencode/workspace", queue),
-          )
-
-          const ack = yield* Deferred.make<void>()
-          yield* Queue.offer(queue, {
-            type: "compaction-summary",
-            text: "summary text",
-          })
-          yield* Queue.offer(queue, {
-            type: "run-finalizing",
-            ack,
-          })
-          yield* Deferred.await(ack)
-          yield* Fiber.interrupt(worker)
-
-          return {
-            sent: yield* Ref.get(harness.sentPayloads),
-          }
-        }),
-      ),
-    )
-
-    expect(result.sent.map(messageText)).toContain("*🗜️ summary text*")
-  })
-
   test("ignores session-compacted without an active compaction in this worker", async () => {
     const harness = await makeHarness()
 

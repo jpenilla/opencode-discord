@@ -12,7 +12,6 @@ export type PendingPrompt = {
   userMessageId: string | null
   deferred: Deferred.Deferred<PromptResult, unknown>
   assistantsByMessageId: Map<string, TrackedAssistant>
-  emittedSummaryMessageIds: Set<string>
 }
 
 export type PromptTrackingAction =
@@ -22,25 +21,13 @@ export type PromptTrackingAction =
     deferred: Deferred.Deferred<PromptResult, unknown>
   }
   | {
-    type: "emit-compaction-summary"
-    messageId: string
-  }
-  | {
     type: "fail-prompt"
     deferred: Deferred.Deferred<PromptResult, unknown>
     error: unknown
   }
 
-const isCompactionSummary = (message: AssistantMessage) =>
-  message.summary === true &&
-  message.mode === "compaction" &&
-  message.agent === "compaction"
-
 const isPromptReply = (userMessageId: string, message: AssistantMessage) =>
-  message.parentID === userMessageId && !isCompactionSummary(message)
-
-const isObservedAssistant = (message: AssistantMessage) =>
-  message.time.completed !== undefined || message.finish !== undefined || message.error !== undefined
+  message.parentID === userMessageId
 
 const isResolvablePromptReply = (message: AssistantMessage) =>
   message.error !== undefined ||
@@ -80,18 +67,6 @@ const selectPromptReplyCandidate = (
 
 const evaluatePromptActions = (prompt: PendingPrompt): ReadonlyArray<PromptTrackingAction> => {
   const actions: PromptTrackingAction[] = []
-
-  for (const [messageId, tracked] of prompt.assistantsByMessageId.entries()) {
-    if (!tracked.info || !isCompactionSummary(tracked.info) || !isObservedAssistant(tracked.info)) {
-      continue
-    }
-    if (prompt.emittedSummaryMessageIds.has(messageId)) {
-      continue
-    }
-
-    prompt.emittedSummaryMessageIds.add(messageId)
-    actions.push({ type: "emit-compaction-summary", messageId })
-  }
 
   const candidate = selectPromptReplyCandidate(prompt)
   if (candidate?.tracked.info?.error) {
@@ -138,7 +113,6 @@ const updatePendingPrompt = (
 const clonePrompt = (prompt: PendingPrompt): PendingPrompt => ({
   ...prompt,
   assistantsByMessageId: new Map(prompt.assistantsByMessageId),
-  emittedSummaryMessageIds: new Set<string>(prompt.emittedSummaryMessageIds),
 })
 
 export const handleSessionError = (
@@ -162,11 +136,9 @@ export const resolvePromptTrackingActions = (
 ): {
   completePrompt: Extract<PromptTrackingAction, { type: "complete-prompt" }> | null
   failPrompt: Extract<PromptTrackingAction, { type: "fail-prompt" }> | null
-  compactionSummaryMessageIds: ReadonlyArray<string>
 } => {
   let completePrompt: Extract<PromptTrackingAction, { type: "complete-prompt" }> | null = null
   let failPrompt: Extract<PromptTrackingAction, { type: "fail-prompt" }> | null = null
-  const compactionSummaryMessageIds: string[] = []
 
   for (const action of actions) {
     switch (action.type) {
@@ -176,16 +148,12 @@ export const resolvePromptTrackingActions = (
       case "fail-prompt":
         failPrompt = action
         break
-      case "emit-compaction-summary":
-        compactionSummaryMessageIds.push(action.messageId)
-        break
     }
   }
 
   return {
     completePrompt,
     failPrompt,
-    compactionSummaryMessageIds,
   }
 }
 
@@ -205,7 +173,6 @@ export const beginPendingPrompt = (
       userMessageId: null,
       deferred,
       assistantsByMessageId: new Map<string, TrackedAssistant>(),
-      emittedSummaryMessageIds: new Set<string>(),
     })
     return deferred
   })

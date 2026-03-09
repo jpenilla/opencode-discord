@@ -90,6 +90,9 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
 
       const inGuildTextChannel = interaction.inGuild() && interaction.channel?.type === ChannelType.GuildText
       const session = inGuildTextChannel ? yield* deps.getSession(interaction.channelId) : null
+      if (session && interaction.channel?.type === ChannelType.GuildText) {
+        session.progressChannel = interaction.channel as SendableChannels
+      }
 
       if (interaction.commandName === "compact") {
         const compactEntry = decideCompactEntry({

@@ -37,10 +37,19 @@ type EventRuntimeDeps = {
       | { type: "rejected"; sessionId: string; requestId: string },
   ) => Effect.Effect<void, unknown>
   finalizeIdleCompactionCard: (sessionId: string, title: string, body: string) => Effect.Effect<void, unknown>
+  sendCompactionSummary: (session: ChannelSession, text: string) => Effect.Effect<void, unknown>
   readPromptResult: OpencodeServiceShape["readPromptResult"]
   logger: LoggerShape
   formatError: (error: unknown) => string
 }
+
+const isCompactionSummary = (message: NonNullable<ReturnType<typeof getAssistantMessageUpdated>>) =>
+  message.summary === true &&
+  message.mode === "compaction" &&
+  message.agent === "compaction"
+
+const isObservedAssistant = (message: NonNullable<ReturnType<typeof getAssistantMessageUpdated>>) =>
+  message.time.completed !== undefined || message.finish !== undefined || message.error !== undefined
 
 export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
   handleEvent: (event) =>
@@ -88,6 +97,36 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
         })
       }
 
+      const emitCompactionSummary = (
+        targetSession: ChannelSession,
+        messageId: string,
+      ) =>
+        targetSession.emittedCompactionSummaryMessageIds.has(messageId)
+          ? Effect.void
+          : deps.readPromptResult(targetSession.opencode, messageId).pipe(
+              Effect.flatMap((result) => {
+                const text = result.transcript.trim()
+                if (!text) {
+                  return Effect.void
+                }
+
+                targetSession.emittedCompactionSummaryMessageIds.add(messageId)
+                return deps.sendCompactionSummary(targetSession, text)
+              }),
+              Effect.catchAll((error) =>
+                deps.logger.warn("failed to load compaction summary transcript", {
+                  channelId: targetSession.channelId,
+                  sessionId,
+                  messageId,
+                  error: deps.formatError(error),
+                }),
+              ),
+            )
+
+      if (assistantMessage && isCompactionSummary(assistantMessage) && isObservedAssistant(assistantMessage)) {
+        yield* emitCompactionSummary(context.session, assistantMessage.id)
+      }
+
       if (activeRun) {
         const promptActions = [
           ...(userMessage ? yield* handleUserMessageUpdated(activeRun.promptState, userMessage) : []),
@@ -106,32 +145,6 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
         ).pipe(Effect.asVoid)
 
         const resolvedActions = resolvePromptTrackingActions(promptActions)
-
-        yield* Effect.forEach(
-          resolvedActions.compactionSummaryMessageIds,
-          (messageId) =>
-            deps.readPromptResult(context.session.opencode, messageId).pipe(
-              Effect.flatMap((result) => {
-                const text = result.transcript.trim()
-                if (!text) {
-                  return Effect.void
-                }
-                return Queue.offer(activeRun.progressQueue, {
-                  type: "compaction-summary",
-                  text,
-                }).pipe(Effect.asVoid)
-              }),
-              Effect.catchAll((error) =>
-                deps.logger.warn("failed to load compaction summary transcript", {
-                  channelId: context.session.channelId,
-                  sessionId,
-                  messageId,
-                  error: deps.formatError(error),
-                }),
-              ),
-            ),
-          { concurrency: "unbounded", discard: true },
-        )
 
         if (resolvedActions.completePrompt) {
           yield* deps.readPromptResult(context.session.opencode, resolvedActions.completePrompt.messageId).pipe(

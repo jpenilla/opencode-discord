@@ -1,5 +1,5 @@
 import { Chunk, Context, Effect, FiberSet, Layer, Queue, Ref } from "effect"
-import { type Interaction, type Message } from "discord.js"
+import { type Interaction, type Message, type SendableChannels } from "discord.js"
 
 import { AppConfig } from "@/config.ts"
 import { compactionCardContent } from "@/discord/compaction-card.ts"
@@ -8,9 +8,11 @@ import { editInfoCard, sendInfoCard, upsertInfoCard } from "@/discord/info-card.
 import {
   buildOpencodePrompt,
   promptMessageContext,
+  sendChannelProgressUpdate,
   sendFinalResponse,
   startTypingLoop,
 } from "@/discord/messages.ts"
+import { formatCompactionSummary } from "@/discord/progress.ts"
 import {
   OpencodeEventQueue,
 } from "@/opencode/events.ts"
@@ -165,6 +167,37 @@ export const ChannelSessionsLive = Layer.scoped(
         }),
       )
 
+    const sendCompactionSummary = (session: ChannelSession, text: string) => {
+      const channel = session.progressChannel
+      const formatted = formatCompactionSummary(text)
+      if (!channel) {
+        return logger.warn("dropping compaction summary without a session progress channel", {
+          channelId: session.channelId,
+          sessionId: session.opencode.sessionId,
+        }).pipe(Effect.asVoid)
+      }
+      if (!formatted) {
+        return Effect.void
+      }
+
+      return Effect.promise(() =>
+        sendChannelProgressUpdate({
+          channel,
+          mentionContext: session.progressMentionContext,
+          text: formatted,
+        })
+      ).pipe(
+        Effect.catchAll((error) =>
+          logger.warn("failed to send compaction summary", {
+            channelId: session.channelId,
+            sessionId: session.opencode.sessionId,
+            error: formatError(error),
+          }),
+        ),
+        Effect.asVoid,
+      )
+    }
+
     const questionRuntime = yield* createQuestionRuntime({
       getSessionContext,
       replyToQuestion: opencode.replyToQuestion,
@@ -178,6 +211,7 @@ export const ChannelSessionsLive = Layer.scoped(
       getSessionContext,
       handleQuestionEvent: questionRuntime.handleEvent,
       finalizeIdleCompactionCard,
+      sendCompactionSummary,
       readPromptResult: opencode.readPromptResult,
       logger,
       formatError,
@@ -316,12 +350,14 @@ export const ChannelSessionsLive = Layer.scoped(
       submit: (message, invocation): FallibleEffect<void> =>
         Effect.acquireUseRelease(
           Effect.sync(() => startTypingLoop(message.channel)),
-          () =>
-            Effect.gen(function* () {
-              const session = yield* getUsableSession(message, "health probe failed before queueing run")
-              const attachmentMessages = yield* collectAttachmentMessages(message)
-              const referencedMessage = attachmentMessages.find((candidate) => candidate.id !== message.id) ?? null
-              const prompt = buildOpencodePrompt({
+            () =>
+              Effect.gen(function* () {
+                const session = yield* getUsableSession(message, "health probe failed before queueing run")
+                session.progressChannel = message.channel.isSendable() ? message.channel as SendableChannels : null
+                session.progressMentionContext = message
+                const attachmentMessages = yield* collectAttachmentMessages(message)
+                const referencedMessage = attachmentMessages.find((candidate) => candidate.id !== message.id) ?? null
+                const prompt = buildOpencodePrompt({
                 message: promptMessageContext(message, invocation.prompt),
                 referencedMessage: referencedMessage ? promptMessageContext(referencedMessage) : undefined,
               })

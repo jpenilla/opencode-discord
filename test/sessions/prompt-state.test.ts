@@ -100,7 +100,7 @@ const makeUserMessage = (id: string): UserMessage =>
   })
 
 describe("prompt-state", () => {
-  test("emits a compaction summary once and keeps waiting for the direct reply", async () => {
+  test("ignores compaction summaries for prompt completion and keeps waiting for the direct reply", async () => {
     const state = await Effect.runPromise(createPromptState())
     await Effect.runPromise(beginPendingPrompt(state))
 
@@ -119,10 +119,7 @@ describe("prompt-state", () => {
       completed: true,
     })))
 
-    expect(first).toEqual([{
-      type: "emit-compaction-summary",
-      messageId: "summary-1",
-    }])
+    expect(first).toEqual([])
     expect(second).toEqual([])
     expect(await Effect.runPromise(Ref.get(state))).not.toBeNull()
   })

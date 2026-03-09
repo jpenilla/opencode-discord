@@ -7,7 +7,6 @@ import { editInfoCard, upsertInfoCard } from "@/discord/info-card.ts"
 import { sendProgressUpdate } from "@/discord/messages.ts"
 import { editToolCard, upsertToolCard } from "@/discord/tool-card.ts"
 import {
-  formatCompactionSummary,
   formatPatchUpdated,
   formatSessionStatus,
   formatThinkingCompleted,
@@ -89,8 +88,6 @@ const progressUpdateForEvent = (event: RunProgressEvent, state: ProgressState) =
   switch (event.type) {
     case "run-finalizing":
       return null
-    case "compaction-summary":
-      return formatCompactionSummary(event.text)
     case "reasoning-completed": {
       if (state.completedReasoningPartIds.has(event.partId)) {
         return null

@@ -83,6 +83,9 @@ const makeHarness = async (options?: {
     workdir: "/home/opencode/workspace",
     createdAt: Date.now(),
     lastActivityAt: Date.now(),
+    progressChannel: null,
+    progressMentionContext: null,
+    emittedCompactionSummaryMessageIds: new Set<string>(),
     queue: {} as ChannelSession["queue"],
     activeRun,
   }

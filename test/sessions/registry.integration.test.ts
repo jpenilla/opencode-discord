@@ -541,6 +541,7 @@ const makeHarness = async (options: {
     makeMessage,
     makeCommandInteraction,
     makeQuestionButtonInteraction,
+    storePromptResult: (result: PromptResult) => Effect.runPromise(storePromptResult(result)).then(() => undefined),
     publishEvent: (event: GlobalEvent) => Effect.runPromise(Queue.offer(eventQueue, event)).then(() => undefined),
   }
 }
@@ -669,6 +670,47 @@ describe("ChannelSessionsLive integration", () => {
           yield* sessions.submit(message, { prompt: "hello" })
           expect(yield* Queue.take(harness.replyEvents)).toBe("*🗜️ summary text*")
           expect(yield* Queue.take(harness.replyEvents)).toBe("final reply")
+        }).pipe(Effect.provide(harness.layer)),
+      ),
+    )
+
+    expect(await getRef(harness.replies)).toEqual(["final reply"])
+  })
+
+  test("surfaces a late compaction summary after the direct reply has already finished", async () => {
+    const harness = await makeHarness({
+      promptImpl: ({ completePrompt }) =>
+        completePrompt({
+          messageId: "assistant-1",
+          transcript: "final reply",
+        }),
+    })
+    const message = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    })
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions
+          yield* sessions.submit(message, { prompt: "hello" })
+          expect(yield* Queue.take(harness.replyEvents)).toBe("final reply")
+          yield* Effect.promise(() =>
+            harness.storePromptResult({
+              messageId: "summary-1",
+              transcript: "summary text",
+            })
+          )
+          yield* Effect.promise(() =>
+            harness.publishEvent(makeAssistantMessageUpdatedEvent({
+              id: "summary-1",
+              parentId: "synthetic-1",
+              summary: true,
+              mode: "compaction",
+            }))
+          )
+          expect(yield* Queue.take(harness.replyEvents)).toBe("*🗜️ summary text*")
         }).pipe(Effect.provide(harness.layer)),
       ),
     )

@@ -79,14 +79,14 @@ const wrapDiscordPrompts = (heading: string, prompts: ReadonlyArray<string>) =>
   ].join("\n\n")
 
 const splitOutgoingText = (
-  message: Message,
+  message: Message | null,
   text: string,
   options?: {
     emptyFallback?: string
     trim?: boolean
   },
 ) => {
-  let normalized = normalizeOutgoingMentions(message, text)
+  let normalized = message ? normalizeOutgoingMentions(message, text) : text
   if (options?.trim) {
     normalized = normalized.trim()
   }
@@ -168,6 +168,25 @@ export const sendProgressUpdate = async (input: {
 
   await sendChunks(chunks, async (chunk) => {
     await (input.message.channel as SendableChannels).send({
+      content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
+      allowedMentions: { parse: ["users", "roles", "everyone"] },
+      flags: MessageFlags.SuppressNotifications,
+    })
+  })
+}
+
+export const sendChannelProgressUpdate = async (input: {
+  channel: SendableChannels
+  mentionContext?: Message | null
+  text: string
+}) => {
+  const chunks = splitOutgoingText(input.mentionContext ?? null, input.text, { trim: true })
+  if (chunks.length === 0) {
+    return
+  }
+
+  await sendChunks(chunks, async (chunk) => {
+    await input.channel.send({
       content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
       allowedMentions: { parse: ["users", "roles", "everyone"] },
       flags: MessageFlags.SuppressNotifications,

@@ -48,6 +48,9 @@ const makeSession = async (withActiveRun: boolean) => {
     workdir: "/home/opencode/workspace",
     createdAt: Date.now(),
     lastActivityAt: Date.now(),
+    progressChannel: null,
+    progressMentionContext: null,
+    emittedCompactionSummaryMessageIds: new Set<string>(),
     queue: {} as ChannelSession["queue"],
     activeRun,
   })
@@ -225,6 +228,7 @@ describe("createEventRuntime", () => {
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun: null } : null),
       handleQuestionEvent: (event) => Ref.update(questionEvents, (current) => [...current, event]),
       finalizeIdleCompactionCard: () => Effect.void,
+      sendCompactionSummary: () => Effect.void,
       readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
       logger: {
         info: () => Effect.void,
@@ -252,6 +256,7 @@ describe("createEventRuntime", () => {
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun: null } : null),
       handleQuestionEvent: (event) => Ref.update(questionEvents, (current) => [...current, event]),
       finalizeIdleCompactionCard: () => Effect.void,
+      sendCompactionSummary: () => Effect.void,
       readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
       logger: {
         info: () => Effect.void,
@@ -287,6 +292,7 @@ describe("createEventRuntime", () => {
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
       finalizeIdleCompactionCard: () => Effect.void,
+      sendCompactionSummary: () => Effect.void,
       readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
       logger: {
         info: () => Effect.void,
@@ -314,6 +320,7 @@ describe("createEventRuntime", () => {
       handleQuestionEvent: () => Effect.void,
       finalizeIdleCompactionCard: (sessionId, title, body) =>
         Ref.update(idleUpdates, (current) => [...current, { sessionId, title, body }]),
+      sendCompactionSummary: () => Effect.void,
       readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
       logger: {
         info: () => Effect.void,
@@ -340,6 +347,7 @@ describe("createEventRuntime", () => {
       getSessionContext: () => Effect.succeed(null),
       handleQuestionEvent: () => Ref.update(questionEvents, (count) => count + 1),
       finalizeIdleCompactionCard: () => Ref.update(idleUpdates, (count) => count + 1),
+      sendCompactionSummary: () => Effect.void,
       readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
       logger: {
         info: () => Effect.void,
@@ -356,9 +364,52 @@ describe("createEventRuntime", () => {
     expect(await getRef(idleUpdates)).toBe(0)
   })
 
-  test("emits compaction summaries into active-run progress updates without completing the prompt", async () => {
+  test("emits a late compaction summary once even after the active run is gone", async () => {
+    const { session } = await makeSession(false)
+    const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]))
+    const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]))
+
+    const runtime = createEventRuntime({
+      getSessionContext: (sessionId) =>
+        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun: null } : null),
+      handleQuestionEvent: () => Effect.void,
+      finalizeIdleCompactionCard: () => Effect.void,
+      sendCompactionSummary: (_session, text) =>
+        Ref.update(sentSummaries, (current) => [...current, text]),
+      readPromptResult: (_session, messageId) =>
+        Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
+          Effect.as({
+            messageId,
+            transcript: "summary text",
+          }),
+        ),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
+    })
+
+    const summaryEvent = makeAssistantMessageUpdatedEvent({
+      id: "summary-1",
+      parentId: "synthetic-1",
+      summary: true,
+      mode: "compaction",
+      completed: true,
+    })
+
+    await Effect.runPromise(runtime.handleEvent(summaryEvent))
+    await Effect.runPromise(runtime.handleEvent(summaryEvent))
+
+    expect(await getRef(readPromptCalls)).toEqual(["summary-1"])
+    expect(await getRef(sentSummaries)).toEqual(["summary text"])
+  })
+
+  test("emits observed compaction summaries through the session summary sink without completing the prompt", async () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true)
     const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]))
+    const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]))
 
     await Effect.runPromise(beginPendingPrompt(promptState))
 
@@ -367,6 +418,8 @@ describe("createEventRuntime", () => {
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
       finalizeIdleCompactionCard: () => Effect.void,
+      sendCompactionSummary: (_session, text) =>
+        Ref.update(sentSummaries, (current) => [...current, text]),
       readPromptResult: (_session, messageId) =>
         Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
           Effect.as({
@@ -389,12 +442,17 @@ describe("createEventRuntime", () => {
       mode: "compaction",
       completed: true,
     })))
+    await Effect.runPromise(runtime.handleEvent(makeAssistantMessageUpdatedEvent({
+      id: "summary-1",
+      parentId: "synthetic-1",
+      summary: true,
+      mode: "compaction",
+      completed: true,
+    })))
 
     expect(await getRef(readPromptCalls)).toEqual(["summary-1"])
-    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([{
-      type: "compaction-summary",
-      text: "summary text",
-    }])
+    expect(await getRef(sentSummaries)).toEqual(["summary text"])
+    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([])
     expect(await Effect.runPromise(Ref.get(promptState))).not.toBeNull()
   })
 
@@ -407,6 +465,7 @@ describe("createEventRuntime", () => {
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
       finalizeIdleCompactionCard: () => Effect.void,
+      sendCompactionSummary: () => Effect.void,
       readPromptResult: (_session, messageId) =>
         Effect.succeed({
           messageId,
@@ -458,6 +517,7 @@ describe("createEventRuntime", () => {
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
       finalizeIdleCompactionCard: () => Effect.void,
+      sendCompactionSummary: () => Effect.void,
       readPromptResult: () =>
         Ref.update(readPromptCalls, (count) => count + 1).pipe(
           Effect.flatMap(() => Effect.fail(new Error("unexpected prompt result load"))),
@@ -497,6 +557,7 @@ describe("createEventRuntime", () => {
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
       finalizeIdleCompactionCard: () => Effect.void,
+      sendCompactionSummary: () => Effect.void,
       readPromptResult: (_session, messageId) =>
         Effect.succeed({
           messageId,
