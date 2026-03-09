@@ -80,6 +80,8 @@ const makeHarness = async (options: {
   createSessionImpl?: (input: { workdir: string; title: string; callIndex: number }) => Effect.Effect<SessionHandle>
   compactSessionImpl?: () => Effect.Effect<void>
   interruptSessionImpl?: () => Effect.Effect<void>
+  rejectQuestionImpl?: () => Effect.Effect<void>
+  failComponentReplies?: boolean
 }) => {
   const replies = await Effect.runPromise(Ref.make<string[]>([]))
   const replyPayloads = await Effect.runPromise(Ref.make<unknown[]>([]))
@@ -149,6 +151,9 @@ const makeHarness = async (options: {
       channel: messageChannel,
       reply: (payload: MessageCreateOptions) =>
         Effect.runPromise(Ref.update(replyPayloads, (current) => [...current, payload])).then(async () => {
+          if (options.failComponentReplies && payload.components?.length) {
+            throw new Error("question post failed")
+          }
           if (payload.content) {
             await Effect.runPromise(Ref.update(replies, (current) => [...current, String(payload.content)]))
             await Effect.runPromise(Queue.offer(replyEvents, String(payload.content)))
@@ -265,7 +270,7 @@ const makeHarness = async (options: {
         Effect.zipRight(options.compactSessionImpl?.() ?? Effect.void),
       ),
     replyToQuestion: () => Effect.void,
-    rejectQuestion: () => Effect.void,
+    rejectQuestion: () => options.rejectQuestionImpl?.() ?? Effect.void,
     isHealthy: () => options.isHealthyImpl?.() ?? Effect.succeed(true),
   }
 
@@ -634,5 +639,53 @@ describe("ChannelSessionsLive integration", () => {
         allowedMentions: { parse: [] },
       },
     ])
+  })
+
+  test("surfaces a question UI failure reply when posting the question card fails", async () => {
+    const promptStarted = await Effect.runPromise(Deferred.make<void>())
+    const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>())
+    const harness = await makeHarness({
+      promptImpl: () =>
+        Deferred.succeed(promptStarted, undefined).pipe(
+          Effect.zipRight(Deferred.await(allowPromptToFinish)),
+          Effect.as({
+            messageId: "assistant-1",
+            transcript: "",
+          }),
+        ),
+      failComponentReplies: true,
+    })
+    const message = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    })
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions
+          yield* sessions.submit(message, { prompt: "hello" })
+          yield* Deferred.await(promptStarted)
+          yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()))
+          yield* sessions.getActiveRunBySessionId("session-1").pipe(
+            Effect.flatMap((activeRun) =>
+              activeRun && activeRun.questionOutcome._tag === "ui-failure"
+                ? Effect.void
+                : Effect.fail(new Error("question UI failure not recorded yet")),
+            ),
+            Effect.eventually,
+            Effect.timeoutFail({
+              duration: "1 second",
+              onTimeout: () => new Error("Timed out waiting for the live question UI failure state"),
+            }),
+          )
+          yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore)
+          expect(yield* Queue.take(harness.replyEvents)).toContain("Failed to show questions")
+        }).pipe(Effect.provide(harness.layer)),
+      ),
+    )
+
+    expect(await getRef(harness.replies)).toHaveLength(1)
+    expect((await getRef(harness.replyPayloads)).some((payload) => cardText(payload).includes("❓ Questions need answers"))).toBe(true)
   })
 })
