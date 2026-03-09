@@ -546,7 +546,10 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
         Effect.forEach(
           state.sessionsByChannelId.values(),
           (session) =>
-            session.activeRun || !runtime.idleTimeoutMs || now - session.lastActivityAt < runtime.idleTimeoutMs
+            session.activeRun ||
+            state.idleCompactionCardsBySessionId.has(session.opencode.sessionId) ||
+            !runtime.idleTimeoutMs ||
+            now - session.lastActivityAt < runtime.idleTimeoutMs
               ? Effect.void
               : Effect.gen(function* () {
                   yield* deleteSession(session)

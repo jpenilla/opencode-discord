@@ -23,6 +23,7 @@ const QUESTION_STATUS_COLORS = {
   submitting: 0xf0b429,
   answered: 0x2bb673,
   rejected: 0xd64545,
+  interrupted: 0xc05621,
   expired: 0x6b7280,
 } as const
 
@@ -32,13 +33,14 @@ export type QuestionDraft = {
 }
 
 export type QuestionBatchStatus = "active" | "submitting" | "answered" | "rejected"
+export type QuestionBatchCardStatus = QuestionBatchStatus | "interrupted" | "expired"
 
 export type PendingQuestionBatchView = {
   request: QuestionRequest
   page: number
   optionPages: ReadonlyArray<number>
   drafts: ReadonlyArray<QuestionDraft>
-  status: QuestionBatchStatus | "expired"
+  status: QuestionBatchCardStatus
   resolvedAnswers?: ReadonlyArray<QuestionAnswer>
 }
 
@@ -75,6 +77,8 @@ const statusTitle = (status: PendingQuestionBatchView["status"]) => {
       return "✅ Questions answered"
     case "rejected":
       return "⛔ Questions rejected"
+    case "interrupted":
+      return "‼️ Questions interrupted"
     case "expired":
       return "⏱️ Questions expired"
   }
@@ -271,7 +275,7 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
     ),
   )
 
-  if (input.status === "answered" || input.status === "rejected" || input.status === "expired") {
+  if (input.status === "answered" || input.status === "rejected" || input.status === "interrupted" || input.status === "expired") {
     const resolvedSections = renderResolvedQuestionSections(input).filter(Boolean)
     for (const [index, section] of resolvedSections.entries()) {
       if (index > 0) {

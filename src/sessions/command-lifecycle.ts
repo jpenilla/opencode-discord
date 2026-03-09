@@ -36,17 +36,21 @@ export const decideInterruptEntry = (input: {
   inGuildTextChannel: boolean
   hasSession: boolean
   hasActiveRun: boolean
-}): CommandRejection | { type: "defer-and-interrupt" } => {
+  hasIdleCompaction: boolean
+}): CommandRejection | { type: "defer-and-interrupt"; target: "run" | "compaction" } => {
   if (!input.inGuildTextChannel) {
     return { type: "reject", message: "This command only works in standard guild text channels." }
   }
   if (!input.hasSession) {
     return { type: "reject", message: "No OpenCode session exists in this channel yet." }
   }
-  if (!input.hasActiveRun) {
-    return { type: "reject", message: "No active OpenCode run is running in this channel." }
+  if (input.hasActiveRun) {
+    return { type: "defer-and-interrupt", target: "run" }
   }
-  return { type: "defer-and-interrupt" }
+  if (input.hasIdleCompaction) {
+    return { type: "defer-and-interrupt", target: "compaction" }
+  }
+  return { type: "reject", message: "No active OpenCode run or compaction is running in this channel." }
 }
 
 export const beginInterruptRequest = (run: Pick<ActiveRun, "interruptRequested">) => {

@@ -101,8 +101,8 @@ const makeRuntime = async (options?: {
         Effect.sync(() => {
           session.activeRun = activeRun
         }).pipe(Effect.zipRight(record(`setActiveRun:${activeRun ? "active" : "null"}`))),
-      expireQuestionBatches: (sessionId: string) =>
-        record(`expireQuestionBatches:${sessionId}`),
+      terminateQuestionBatches: (sessionId: string, reason: "expired" | "interrupted") =>
+        record(`terminateQuestionBatches:${sessionId}:${reason}`),
       ensureSessionHealthAfterFailure: (_session: ChannelSession, _responseMessage: Message) =>
         record("ensureSessionHealthAfterFailure"),
       sendFinalResponse: (_message: Message, text: string) =>
@@ -140,7 +140,7 @@ describe("executeRunBatch", () => {
       "info:completed run",
       "typing:stop",
       "setActiveRun:null",
-      "expireQuestionBatches:session-1",
+      "terminateQuestionBatches:session-1:expired",
     ])
     expect(session.activeRun).toBeNull()
   })
@@ -182,7 +182,7 @@ describe("executeRunBatch", () => {
       "sendRunFailure:boom",
       "typing:stop",
       "setActiveRun:null",
-      "expireQuestionBatches:session-1",
+      "terminateQuestionBatches:session-1:expired",
       "ensureSessionHealthAfterFailure",
     ])
   })
@@ -206,9 +206,10 @@ describe("executeRunBatch", () => {
       "runPrompts",
       "info:interrupted run",
       "typing:stop",
+      "progress:run-finalizing",
       "typing:stop",
       "setActiveRun:null",
-      "expireQuestionBatches:session-1",
+      "terminateQuestionBatches:session-1:interrupted",
     ])
   })
 
@@ -233,7 +234,7 @@ describe("executeRunBatch", () => {
       "info:completed run",
       "typing:stop",
       "setActiveRun:null",
-      "expireQuestionBatches:session-1",
+      "terminateQuestionBatches:session-1:expired",
     ])
   })
 })

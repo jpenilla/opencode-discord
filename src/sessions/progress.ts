@@ -1,10 +1,11 @@
 import { Chunk, Deferred, Effect, Queue } from "effect"
 import type { Message, SendableChannels } from "discord.js"
-import type { Event } from "@opencode-ai/sdk/v2"
+import type { Event, ToolPart } from "@opencode-ai/sdk/v2"
 
-import { upsertInfoCard } from "@/discord/info-card.ts"
+import { compactionCardContent } from "@/discord/compaction-card.ts"
+import { editInfoCard, upsertInfoCard } from "@/discord/info-card.ts"
 import { sendProgressUpdate } from "@/discord/messages.ts"
-import { upsertToolCard } from "@/discord/tool-card.ts"
+import { editToolCard, upsertToolCard } from "@/discord/tool-card.ts"
 import {
   formatPatchUpdated,
   formatSessionStatus,
@@ -18,7 +19,7 @@ import {
   getSessionStatusUpdated,
   getToolPartUpdated,
 } from "@/opencode/events.ts"
-import type { RunProgressEvent } from "@/sessions/session.ts"
+import type { RunFinalizationReason, RunProgressEvent } from "@/sessions/session.ts"
 
 const SKIPPED_TOOL_CARD_NAMES = new Set([
   "send-file",
@@ -35,6 +36,7 @@ type ProgressState = {
   patchPartIds: Set<string>
   toolStates: Map<string, string>
   toolCards: Map<string, Message>
+  activeToolParts: Map<string, ToolPart>
   todoCards: Message[]
   compactionCard: Message | null
   compactionPartIds: Set<string>
@@ -46,6 +48,7 @@ const createProgressState = (): ProgressState => ({
   patchPartIds: new Set<string>(),
   toolStates: new Map<string, string>(),
   toolCards: new Map<string, Message>(),
+  activeToolParts: new Map<string, ToolPart>(),
   todoCards: [],
   compactionCard: null,
   compactionPartIds: new Set<string>(),
@@ -126,6 +129,18 @@ const deletePreviousTodoCards = (state: ProgressState, currentCard: Message) =>
     state.todoCards = [currentCard]
   })
 
+const trackLiveToolState = (
+  state: ProgressState,
+  part: ToolPart,
+) => {
+  if (part.state.status === "pending" || part.state.status === "running") {
+    state.activeToolParts.set(part.callID, part)
+    return
+  }
+
+  state.activeToolParts.delete(part.callID)
+}
+
 const handleToolCard = (
   state: ProgressState,
   message: Message,
@@ -149,6 +164,7 @@ const handleToolCard = (
       }),
     )
     state.toolCards.set(event.part.callID, card)
+    trackLiveToolState(state, event.part)
 
     if (todoTool) {
       yield* deletePreviousTodoCards(state, card)
@@ -171,25 +187,68 @@ const handleCompactionCard = (
         return
       }
       state.compactionPartIds.add(event.part.id)
+      const compactingCard = compactionCardContent("compacting")
       state.compactionCard = yield* Effect.promise(() =>
         upsertInfoCard({
           channel,
           existingCard: state.compactionCard,
-          title: "🗜️ Compacting session",
-          body: "OpenCode is summarizing earlier context for this session.",
+          title: compactingCard.title,
+          body: compactingCard.body,
         }),
       )
       return
     }
 
-    state.compactionCard = yield* Effect.promise(() =>
+    const compactedCard = compactionCardContent("compacted")
+    yield* Effect.promise(() =>
       upsertInfoCard({
         channel,
         existingCard: state.compactionCard,
-        title: "🗜️ Session compacted",
-        body: "OpenCode summarized earlier context for this session.",
+        title: compactedCard.title,
+        body: compactedCard.body,
       }),
     )
+    state.compactionCard = null
+  })
+
+const finalizeLiveCards = (
+  state: ProgressState,
+  workdir: string,
+  reason: RunFinalizationReason,
+) =>
+  Effect.gen(function* () {
+    const terminalState = reason === "interrupted" ? "interrupted" : "shutdown"
+
+    yield* Effect.forEach(
+      state.activeToolParts.entries(),
+      ([callId, part]) => {
+        const card = state.toolCards.get(callId)
+        if (!card) {
+          return Effect.void
+        }
+
+        return Effect.promise(() =>
+          editToolCard({
+            card,
+            part,
+            workdir,
+            terminalState,
+          }),
+        ).pipe(Effect.ignore)
+      },
+      { concurrency: "unbounded", discard: true },
+    )
+
+    state.activeToolParts.clear()
+
+    if (!state.compactionCard) {
+      return
+    }
+
+    const compactionState = reason === "interrupted" ? "interrupted" : "stopped"
+    const { title, body } = compactionCardContent(compactionState)
+    yield* Effect.promise(() => editInfoCard(state.compactionCard!, title, body)).pipe(Effect.ignore)
+    state.compactionCard = null
   })
 
 export const collectProgressEvents = (event: Event): ReadonlyArray<RunProgressEvent> => {
@@ -263,6 +322,9 @@ export const runProgressWorker = (
       for (const event of batch) {
         if (event.type === "run-finalizing") {
           progressUpdateForEvent(event, state)
+          if (event.reason) {
+            yield* finalizeLiveCards(state, workdir, event.reason)
+          }
           yield* Deferred.succeed(event.ack, undefined).pipe(Effect.ignore)
           continue
         }

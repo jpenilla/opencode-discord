@@ -8,7 +8,7 @@ import {
   setQuestionCustomAnswer,
   setQuestionOptionSelection,
 } from "@/discord/question-card.ts"
-import { expireQuestionBatch, setQuestionBatchStatus, type QuestionBatchState } from "@/sessions/question-batch-state.ts"
+import { setQuestionBatchStatus, terminateQuestionBatch, type QuestionBatchState } from "@/sessions/question-batch-state.ts"
 
 const request: QuestionRequest = {
   id: "req-1",
@@ -104,9 +104,15 @@ describe("question batch state transitions", () => {
   })
 
   test("marks active batches as expired", () => {
-    const expired = expireQuestionBatch(makeBatch())
+    const expired = terminateQuestionBatch(makeBatch(), "expired")
 
     expect(expired.status).toBe("expired")
+  })
+
+  test("marks active batches as interrupted", () => {
+    const interrupted = terminateQuestionBatch(makeBatch(), "interrupted")
+
+    expect(interrupted.status).toBe("interrupted")
   })
 
   test("clearQuestionDraft returns an empty draft", () => {

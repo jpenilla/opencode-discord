@@ -79,6 +79,7 @@ describe("decideInterruptEntry", () => {
         inGuildTextChannel: false,
         hasSession: true,
         hasActiveRun: true,
+        hasIdleCompaction: false,
       }),
     ).toEqual({
       type: "reject",
@@ -92,6 +93,7 @@ describe("decideInterruptEntry", () => {
         inGuildTextChannel: true,
         hasSession: false,
         hasActiveRun: false,
+        hasIdleCompaction: false,
       }),
     ).toEqual({
       type: "reject",
@@ -99,16 +101,17 @@ describe("decideInterruptEntry", () => {
     })
   })
 
-  test("rejects when no active run exists", () => {
+  test("rejects when no active run or compaction exists", () => {
     expect(
       decideInterruptEntry({
         inGuildTextChannel: true,
         hasSession: true,
         hasActiveRun: false,
+        hasIdleCompaction: false,
       }),
     ).toEqual({
       type: "reject",
-      message: "No active OpenCode run is running in this channel.",
+      message: "No active OpenCode run or compaction is running in this channel.",
     })
   })
 
@@ -118,8 +121,20 @@ describe("decideInterruptEntry", () => {
         inGuildTextChannel: true,
         hasSession: true,
         hasActiveRun: true,
+        hasIdleCompaction: false,
       }),
-    ).toEqual({ type: "defer-and-interrupt" })
+    ).toEqual({ type: "defer-and-interrupt", target: "run" })
+  })
+
+  test("allows active compactions through to interruption", () => {
+    expect(
+      decideInterruptEntry({
+        inGuildTextChannel: true,
+        hasSession: true,
+        hasActiveRun: false,
+        hasIdleCompaction: true,
+      }),
+    ).toEqual({ type: "defer-and-interrupt", target: "compaction" })
   })
 })
 

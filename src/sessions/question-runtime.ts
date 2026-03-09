@@ -16,13 +16,18 @@ import {
   readQuestionModalValue,
   setQuestionCustomAnswer,
   setQuestionOptionSelection,
-  type QuestionBatchStatus,
+  type QuestionBatchCardStatus,
   type QuestionDraft,
 } from "@/discord/question-card.ts"
-import { expireQuestionBatch, setQuestionBatchStatus } from "@/sessions/question-batch-state.ts"
+import { setQuestionBatchStatus, terminateQuestionBatch } from "@/sessions/question-batch-state.ts"
 import { rejectQuestionBatch, submitQuestionBatch } from "@/sessions/question-submission.ts"
 import type { SessionContext } from "@/sessions/session-lifecycle.ts"
-import { questionUiFailureOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts"
+import {
+  questionUiFailureOutcome,
+  type ActiveRun,
+  type ChannelSession,
+  type RunFinalizationReason,
+} from "@/sessions/session.ts"
 import type { LoggerShape } from "@/util/logging.ts"
 
 type PendingQuestionBatch = {
@@ -33,7 +38,7 @@ type PendingQuestionBatch = {
   page: number
   optionPages: number[]
   drafts: QuestionDraft[]
-  status: QuestionBatchStatus | "expired"
+  status: QuestionBatchCardStatus
   resolvedAnswers?: Array<QuestionAnswer>
 }
 
@@ -58,7 +63,10 @@ export type QuestionRuntimeEvent =
 export type QuestionRuntime = {
   handleEvent: (event: QuestionRuntimeEvent) => Effect.Effect<void, unknown>
   handleInteraction: (interaction: Interaction) => Effect.Effect<boolean, unknown>
-  expireForSession: (sessionId: string) => Effect.Effect<void, unknown>
+  terminateForSession: (
+    sessionId: string,
+    reason: Extract<RunFinalizationReason, "interrupted"> | "expired",
+  ) => Effect.Effect<void, unknown>
 }
 
 type QuestionRuntimeDeps = {
@@ -560,7 +568,10 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
         }
       })
 
-    const expireForSession = (sessionId: string) =>
+    const terminateForSession = (
+      sessionId: string,
+      reason: Extract<RunFinalizationReason, "interrupted"> | "expired",
+    ) =>
       Effect.gen(function* () {
         const expired = yield* Ref.modify(
           batchesRef,
@@ -579,7 +590,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
               batches.delete(batch.request.id)
             }
 
-            return [stale.map((batch) => expireQuestionBatch(batch)), batches]
+            return [stale.map((batch) => terminateQuestionBatch(batch, reason)), batches]
           },
         )
 
@@ -588,11 +599,12 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
           (batch) =>
             editQuestionMessage(batch).pipe(
               Effect.catchAll((error) =>
-                deps.logger.warn("failed to expire question batch message", {
+                deps.logger.warn("failed to terminate question batch message", {
                   channelId: batch.session.channelId,
                   sessionId: batch.session.opencode.sessionId,
                   requestId: batch.request.id,
                   error: deps.formatError(error),
+                  reason,
                 }),
               ),
             ),
@@ -619,6 +631,6 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
         }
       },
       handleInteraction,
-      expireForSession,
+      terminateForSession,
     } satisfies QuestionRuntime
   })

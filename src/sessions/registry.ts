@@ -2,6 +2,7 @@ import { Chunk, Context, Effect, FiberSet, Layer, Queue, Ref } from "effect"
 import { type Interaction, type Message } from "discord.js"
 
 import { AppConfig } from "@/config.ts"
+import { compactionCardContent } from "@/discord/compaction-card.ts"
 import { formatErrorResponse } from "@/discord/formatting.ts"
 import { editInfoCard, sendInfoCard, upsertInfoCard } from "@/discord/info-card.ts"
 import {
@@ -184,7 +185,7 @@ export const ChannelSessionsLive = Layer.scoped(
       runProgressWorker,
       startTyping: (message) => startTypingLoop(message.channel),
       setActiveRun,
-      expireQuestionBatches: questionRuntime.expireForSession,
+      terminateQuestionBatches: questionRuntime.terminateForSession,
       ensureSessionHealthAfterFailure: (session, responseMessage) =>
         ensureSessionHealth(session, responseMessage, "run failed with unhealthy opencode session", false),
       sendFinalResponse: (message, text) =>
@@ -232,8 +233,49 @@ export const ChannelSessionsLive = Layer.scoped(
         Effect.flatMap((session) => ensureSessionHealth(session, message, reason)),
       )
 
+    const shutdownLiveCards = Ref.get(stateRef).pipe(
+      Effect.flatMap((state) =>
+        Effect.all([
+          Effect.forEach(
+            state.sessionsByChannelId.values(),
+            (session) => {
+              const activeRun = session.activeRun
+              const sessionId = session.opencode.sessionId
+              return activeRun
+                ? Effect.gen(function* () {
+                    yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
+                    yield* activeRun.finalizeProgress("shutdown").pipe(Effect.ignore)
+                    yield* questionRuntime.terminateForSession(sessionId, "expired").pipe(Effect.ignore)
+                  })
+                : Effect.void
+            },
+            { concurrency: "unbounded", discard: true },
+          ),
+          Effect.forEach(
+            state.idleCompactionCardsBySessionId.entries(),
+            ([sessionId, card]) =>
+              Effect.promise(() => {
+                const stoppedCard = compactionCardContent("stopped")
+                return editInfoCard(card, stoppedCard.title, stoppedCard.body)
+              }).pipe(
+                Effect.catchAll((error) =>
+                  logger.warn("failed to stop idle compaction card during shutdown", {
+                    sessionId,
+                    error: formatError(error),
+                  }),
+                ),
+                Effect.zipRight(setIdleCompactionCard(sessionId, null)),
+                Effect.asVoid,
+              ),
+            { concurrency: "unbounded", discard: true },
+          ),
+        ], { concurrency: "unbounded", discard: true }),
+      ),
+    )
+
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
+        yield* shutdownLiveCards.pipe(Effect.ignore)
         yield* shutdownSessions().pipe(Effect.ignore)
         yield* FiberSet.clear(fiberSet)
       }),

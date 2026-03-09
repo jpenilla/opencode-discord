@@ -316,4 +316,17 @@ describe("createSessionLifecycle", () => {
     expect(await Effect.runPromise(Ref.get(closed))).toEqual(["session-1", "session-2"])
     expect(await Effect.runPromise(Ref.get(removedRoots))).toEqual([])
   })
+
+  test("does not close idle sessions while an idle compaction card is active", async () => {
+    const { lifecycle, closed } = await makeHarness()
+
+    const session = await Effect.runPromise(lifecycle.createOrGetSession(makeMessage("channel-1")))
+    session.lastActivityAt = 0
+    await Effect.runPromise(lifecycle.setIdleCompactionCard(session.opencode.sessionId, makeCardMessage("card-1")))
+
+    await Effect.runPromise(lifecycle.closeExpiredSessions(30 * 60 * 1_000 + 1))
+
+    expect(await Effect.runPromise(Ref.get(closed))).toEqual([])
+    expect(await Effect.runPromise(lifecycle.getSession(session.channelId))).toBe(session)
+  })
 })

@@ -549,7 +549,58 @@ describe("ChannelSessionsLive integration", () => {
     ])
     expect(await getRef(harness.replies)).toEqual([])
     expect((await getRef(harness.sentPayloads)).map(cardText)).toContain(
-      "**🛑 Run interrupted**\nOpenCode stopped the active run in this channel.",
+      "**‼️ Run interrupted**\nOpenCode stopped the active run in this channel.",
+    )
+  })
+
+  test("runs /interrupt through the live layer and stops an active compaction", async () => {
+    const compactStarted = await Effect.runPromise(Deferred.make<void>())
+    const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>())
+    const harness = await makeHarness({
+      promptImpl: () =>
+        Effect.succeed({
+          messageId: "assistant-1",
+          transcript: "hello",
+        }),
+      compactSessionImpl: () =>
+        Deferred.succeed(compactStarted, undefined).pipe(
+          Effect.zipRight(Deferred.await(allowCompactToFinish)),
+        ),
+      interruptSessionImpl: () =>
+        Deferred.succeed(allowCompactToFinish, undefined).pipe(Effect.asVoid),
+    })
+    const message = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    })
+    const compactCommand = harness.makeCommandInteraction("compact")
+    const interruptCommand = harness.makeCommandInteraction("interrupt")
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions
+          yield* sessions.submit(message, { prompt: "hello" })
+          yield* Queue.take(harness.replyEvents)
+          yield* waitForNoActiveRun(sessions, "session-1")
+          yield* sessions.handleInteraction(compactCommand.interaction)
+          yield* Deferred.await(compactStarted)
+          yield* sessions.handleInteraction(interruptCommand.interaction)
+          yield* Effect.promise(() => Bun.sleep(0))
+        }).pipe(Effect.provide(harness.layer)),
+      ),
+    )
+
+    expect(await getRef(harness.interruptCalls)).toBe(1)
+    expect(await getRef(interruptCommand.interactionDefers)).toBe(1)
+    expect(await getRef(interruptCommand.interactionEdits)).toEqual([
+      {
+        content: "Interrupted the active OpenCode compaction.",
+        allowedMentions: { parse: [] },
+      },
+    ])
+    expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
+      "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
     )
   })
 

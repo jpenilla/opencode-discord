@@ -4,7 +4,14 @@ import { Deferred, Effect, Fiber, Queue, Ref } from "effect"
 import { decideRunCompletion } from "@/sessions/command-lifecycle.ts"
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts"
 import type { NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts"
-import { noQuestionOutcome, type ActiveRun, type ChannelSession, type RunProgressEvent, type RunRequest } from "@/sessions/session.ts"
+import {
+  noQuestionOutcome,
+  type ActiveRun,
+  type ChannelSession,
+  type RunFinalizationReason,
+  type RunProgressEvent,
+  type RunRequest,
+} from "@/sessions/session.ts"
 import type { TypingLoop } from "@/discord/messages.ts"
 import type { LoggerShape } from "@/util/logging.ts"
 
@@ -24,7 +31,10 @@ type RunExecutorRuntime = {
   ) => Effect.Effect<unknown, unknown>
   startTyping: (message: Message) => TypingLoop
   setActiveRun: (session: ChannelSession, activeRun: ActiveRun | null) => Effect.Effect<void, unknown>
-  expireQuestionBatches: (sessionId: string) => Effect.Effect<void, unknown>
+  terminateQuestionBatches: (
+    sessionId: string,
+    reason: Extract<RunFinalizationReason, "interrupted"> | "expired",
+  ) => Effect.Effect<void, unknown>
   ensureSessionHealthAfterFailure: (session: ChannelSession, responseMessage: Message) => Effect.Effect<void, unknown>
   sendFinalResponse: (message: Message, text: string) => Effect.Effect<void, unknown>
   sendRunFailure: (message: Message, error: unknown) => Effect.Effect<void, unknown>
@@ -38,12 +48,13 @@ const finishProgressWorker = (
   session: ChannelSession,
   progressQueue: Queue.Queue<RunProgressEvent>,
   progressFiber: Fiber.Fiber<unknown, unknown>,
+  reason?: RunFinalizationReason,
 ): Effect.Effect<void, unknown> =>
   Effect.gen(function* () {
     const progressFiberExit = yield* Fiber.poll(progressFiber)
     if (progressFiberExit._tag === "None") {
       const finalizingAck = yield* Deferred.make<void>()
-      yield* Queue.offer(progressQueue, { type: "run-finalizing", ack: finalizingAck })
+      yield* Queue.offer(progressQueue, { type: "run-finalizing", ack: finalizingAck, reason })
       const finalizingResult = yield* Deferred.await(finalizingAck).pipe(Effect.timeoutOption("2 seconds"))
       if (finalizingResult._tag === "None") {
         yield* runtime.logger.warn("progress worker finalization timed out", {
@@ -70,6 +81,8 @@ export const executeRunBatch =
       const acceptFollowUps = yield* Ref.make(true)
       const responseMessage = initialRequests[0]!.message
       const progressFiber = yield* runtime.runProgressWorker(responseMessage, session.workdir, progressQueue).pipe(Effect.fork)
+      const finalizeProgress = (reason?: RunFinalizationReason) =>
+        finishProgressWorker(runtime, session, progressQueue, progressFiber, reason)
       const activeRun: ActiveRun = {
         discordMessage: responseMessage,
         workdir: session.workdir,
@@ -78,6 +91,7 @@ export const executeRunBatch =
         followUpQueue,
         acceptFollowUps,
         typing: runtime.startTyping(responseMessage),
+        finalizeProgress,
         questionOutcome: noQuestionOutcome(),
         interruptRequested: false,
       }
@@ -101,7 +115,7 @@ export const executeRunBatch =
         })
 
         yield* stopTyping
-        yield* finishProgressWorker(runtime, session, progressQueue, progressFiber)
+        yield* finalizeProgress()
         switch (completion.type) {
           case "send-final-response":
             yield* runtime.sendFinalResponse(responseMessage, result.transcript)
@@ -128,6 +142,7 @@ export const executeRunBatch =
             error: runtime.formatError(error),
           })
           yield* stopTyping
+          yield* finalizeProgress("interrupted")
         } else {
           yield* runtime.logger.error("run failed", {
             channelId: session.channelId,
@@ -142,7 +157,10 @@ export const executeRunBatch =
 
       yield* stopTyping
       yield* runtime.setActiveRun(session, null)
-      yield* runtime.expireQuestionBatches(session.opencode.sessionId)
+      yield* runtime.terminateQuestionBatches(
+        session.opencode.sessionId,
+        activeRun.interruptRequested ? "interrupted" : "expired",
+      )
       yield* Fiber.interrupt(progressFiber)
 
       if (failed) {

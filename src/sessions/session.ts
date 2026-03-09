@@ -1,5 +1,6 @@
 import type { Message } from "discord.js"
 import type { CompactionPart, EventSessionCompacted, PatchPart, SessionStatus, ToolPart } from "@opencode-ai/sdk/v2"
+import type { Effect } from "effect"
 import type { Deferred } from "effect/Deferred"
 import type { Queue } from "effect/Queue"
 import type { Ref } from "effect/Ref"
@@ -31,6 +32,8 @@ export const questionUiFailureOutcome = (message: string, notified = false): Que
   notified,
 })
 
+export type RunFinalizationReason = "interrupted" | "shutdown"
+
 export type ActiveRun = {
   discordMessage: Message
   workdir: string
@@ -39,12 +42,13 @@ export type ActiveRun = {
   followUpQueue: Queue<RunRequest>
   acceptFollowUps: Ref<boolean>
   typing: TypingLoop
+  finalizeProgress: (reason?: RunFinalizationReason) => Effect.Effect<void, unknown>
   questionOutcome: QuestionOutcome
   interruptRequested: boolean
 }
 
 export type RunProgressEvent =
-  | { type: "run-finalizing"; ack: Deferred<void> }
+  | { type: "run-finalizing"; ack: Deferred<void>; reason?: RunFinalizationReason }
   | { type: "patch-updated"; part: PatchPart }
   | { type: "reasoning-completed"; partId: string; text: string }
   | { type: "session-compacting"; part: CompactionPart }

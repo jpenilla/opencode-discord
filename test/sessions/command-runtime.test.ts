@@ -48,6 +48,7 @@ const makeHarness = async (options?: {
       resume: () => {},
       stop: () => Effect.runPromise(Ref.update(typingStopCount, (count) => count + 1)),
     },
+    finalizeProgress: () => Effect.void,
     questionOutcome: noQuestionOutcome(),
     interruptRequested: false,
   }
@@ -223,12 +224,34 @@ describe("createCommandRuntime", () => {
     expect(await getRef(harness.typingStopCount)).toBe(1)
     expect(await getRef(harness.sentInfoCards)).toEqual([
       {
-        title: "🛑 Run interrupted",
+        title: "‼️ Run interrupted",
         body: "OpenCode stopped the active run in this channel.",
       },
     ])
     expect(await getRef(harness.edits)).toEqual([
       "Interrupted the active OpenCode run.",
+    ])
+  })
+
+  test("interrupts an active compaction card without posting a run card", async () => {
+    const harness = await makeHarness()
+    harness.interaction.commandName = "interrupt"
+    await Effect.runPromise(Ref.set(harness.idleCardRef, unsafeStub<Message>({ id: "compaction-card" })))
+
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction))
+
+    expect(handled).toBe(true)
+    expect(await getRef(harness.typingStopCount)).toBe(0)
+    expect(await getRef(harness.sentInfoCards)).toEqual([])
+    expect(await getRef(harness.compactionUpdates)).toEqual([
+      {
+        title: "‼️ Compaction interrupted",
+        body: "OpenCode stopped compacting this session because the run was interrupted.",
+      },
+    ])
+    expect(await getRef(harness.idleCardRef)).toBeNull()
+    expect(await getRef(harness.edits)).toEqual([
+      "Interrupted the active OpenCode compaction.",
     ])
   })
 })

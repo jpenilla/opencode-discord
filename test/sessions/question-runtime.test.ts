@@ -62,6 +62,7 @@ const makeHarness = async (options?: {
       },
       stop: () => Effect.runPromise(Ref.update(typingStopCount, (count) => count + 1)),
     },
+    finalizeProgress: () => Effect.void,
     questionOutcome: noQuestionOutcome(),
     interruptRequested: false,
   }
@@ -245,7 +246,7 @@ describe("createQuestionRuntime", () => {
       }),
     )
 
-    await Effect.runPromise(harness.runtime.expireForSession(harness.session.opencode.sessionId))
+    await Effect.runPromise(harness.runtime.terminateForSession(harness.session.opencode.sessionId, "expired"))
 
     const handled = await Effect.runPromise(
       harness.runtime.handleInteraction(
@@ -258,5 +259,23 @@ describe("createQuestionRuntime", () => {
     expect(handled).toBe(true)
     expect((await getRef(harness.editedPayloads)).length).toBe(1)
     expect((await getRef(harness.interactionReplies))[0]?.content).toBe("This question prompt has expired.")
+  })
+
+  test("interrupts question batches for a session", async () => {
+    const harness = await makeHarness()
+
+    await Effect.runPromise(
+      harness.runtime.handleEvent({
+        type: "asked",
+        sessionId: harness.session.opencode.sessionId,
+        request: harness.request,
+      }),
+    )
+
+    await Effect.runPromise(harness.runtime.terminateForSession(harness.session.opencode.sessionId, "interrupted"))
+
+    const edits = await getRef(harness.editedPayloads)
+    expect(edits).toHaveLength(1)
+    expect(JSON.stringify(edits[0])).toContain("‼️ Questions interrupted")
   })
 })

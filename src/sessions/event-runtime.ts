@@ -1,6 +1,7 @@
 import type { Event, QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
 import { Effect, Queue } from "effect"
 
+import { compactionCardContent } from "@/discord/compaction-card.ts"
 import {
   getEventSessionId,
   getQuestionAsked,
@@ -75,10 +76,11 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
       }
 
       if (progressEvents.some((progressEvent) => progressEvent.type === "session-compacted")) {
+        const compactedCard = compactionCardContent("compacted")
         yield* deps.updateIdleCompactionCard(
           sessionId,
-          "🗜️ Session compacted",
-          "OpenCode summarized earlier context for this session.",
+          compactedCard.title,
+          compactedCard.body,
         )
       }
     }),
