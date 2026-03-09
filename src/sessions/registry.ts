@@ -1,5 +1,5 @@
 import { Chunk, Context, Effect, FiberSet, Layer, Queue, Ref } from "effect"
-import { ChannelType, MessageFlags, type Interaction, type Message, type SendableChannels } from "discord.js"
+import { type Interaction, type Message } from "discord.js"
 
 import { AppConfig } from "@/config.ts"
 import { formatErrorResponse } from "@/discord/formatting.ts"
@@ -19,19 +19,13 @@ import {
 } from "@/opencode/events.ts"
 import type { Invocation } from "@/discord/triggers.ts"
 import { OpencodeService } from "@/opencode/service.ts"
-import {
-  beginInterruptRequest,
-  decideCompactAfterHealthCheck,
-  decideCompactEntry,
-  decideInterruptEntry,
-} from "@/sessions/command-lifecycle.ts"
+import { createCommandRuntime } from "@/sessions/command-runtime.ts"
 import { collectAttachmentMessages } from "@/sessions/message-context.ts"
 import { coordinateActiveRunPrompts } from "@/sessions/prompt-coordinator.ts"
 import { collectProgressEvents, runProgressWorker } from "@/sessions/progress.ts"
 import { createQuestionRuntime } from "@/sessions/question-runtime.ts"
 import { enqueueRunRequest } from "@/sessions/request-routing.ts"
 import { executeRunBatch } from "@/sessions/run-executor.ts"
-import { admitRequestBatchToActiveRun, type NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts"
 import { createSessionLifecycle, type SessionLifecycleState } from "@/sessions/session-lifecycle.ts"
 import {
   type ActiveRun,
@@ -111,7 +105,8 @@ export const ChannelSessionsLive = Layer.scoped(
       shutdownSessions,
     } = sessionLifecycle
 
-    const getSession = getChannelSession
+    const getSession = (channelId: string) =>
+      getChannelSession(channelId).pipe(Effect.map((session) => session ?? null))
 
     const updateIdleCompactionCard = (sessionId: string, title: string, body: string) =>
       getIdleCompactionCard(sessionId).pipe(
@@ -249,177 +244,25 @@ export const ChannelSessionsLive = Layer.scoped(
         ),
       )
 
+    const commandRuntime = createCommandRuntime({
+      getSession,
+      getIdleCompactionCard,
+      setIdleCompactionCard,
+      updateIdleCompactionCard,
+      isSessionHealthy: opencode.isHealthy,
+      compactSession: opencode.compactSession,
+      interruptSession: opencode.interruptSession,
+      upsertInfoCard,
+      editInfoCard,
+      sendInfoCard,
+      logger,
+      formatError,
+    })
+
     const getUsableSession = (message: Message, reason: string): FallibleEffect<ChannelSession> =>
       createOrGetSession(message).pipe(
         Effect.flatMap((session) => ensureSessionHealth(session, message, reason)),
       )
-
-    const replyToCommandInteraction = (interaction: Interaction, message: string) => {
-      if (!interaction.isChatInputCommand()) {
-        return Effect.void
-      }
-      if (interaction.replied || interaction.deferred) {
-        return Effect.void
-      }
-      return Effect.promise(() =>
-        interaction.reply({
-          content: message,
-          flags: MessageFlags.Ephemeral,
-          allowedMentions: { parse: [] },
-        }),
-      ).pipe(Effect.ignore)
-    }
-
-    const deferCommandInteraction = (interaction: Interaction) => {
-      if (!interaction.isChatInputCommand()) {
-        return Effect.void
-      }
-      if (interaction.replied || interaction.deferred) {
-        return Effect.void
-      }
-      return Effect.promise(() => interaction.deferReply({ flags: MessageFlags.Ephemeral })).pipe(Effect.ignore)
-    }
-
-    const editCommandInteraction = (interaction: Interaction, message: string) => {
-      if (!interaction.isChatInputCommand()) {
-        return Effect.void
-      }
-      if (!interaction.replied && !interaction.deferred) {
-        return replyToCommandInteraction(interaction, message)
-      }
-      return Effect.promise(() =>
-        interaction.editReply({
-          content: message,
-          allowedMentions: { parse: [] },
-        }),
-      ).pipe(Effect.ignore)
-    }
-
-    const handleCommandInteraction = (interaction: Interaction): FallibleEffect<boolean> =>
-      Effect.gen(function* () {
-        if (!interaction.isChatInputCommand()) {
-          return false
-        }
-
-        if (interaction.commandName !== "compact" && interaction.commandName !== "interrupt") {
-          return false
-        }
-
-        const inGuildTextChannel = interaction.inGuild() && interaction.channel?.type === ChannelType.GuildText
-        const session = inGuildTextChannel ? yield* getSession(interaction.channelId) : null
-
-        if (interaction.commandName === "compact") {
-          const compactEntry = decideCompactEntry({
-            inGuildTextChannel,
-            hasSession: !!session,
-            hasActiveRun: !!session?.activeRun,
-          })
-          if (compactEntry.type === "reject") {
-            yield* replyToCommandInteraction(interaction, compactEntry.message)
-            return true
-          }
-
-          yield* deferCommandInteraction(interaction)
-
-          const compactHealthDecision = decideCompactAfterHealthCheck(yield* opencode.isHealthy(session!.opencode))
-          if (compactHealthDecision.type === "reject-after-defer") {
-            yield* editCommandInteraction(interaction, compactHealthDecision.message)
-            return true
-          }
-
-          const channel = interaction.channel as SendableChannels
-          const existingCard = yield* getIdleCompactionCard(session!.opencode.sessionId)
-          const compactionCard = yield* Effect.promise(() =>
-            upsertInfoCard({
-              channel,
-              existingCard,
-              title: "🗜️ Compacting session",
-              body: "OpenCode is summarizing earlier context for this session.",
-            }),
-          ).pipe(
-            Effect.tap((card) => setIdleCompactionCard(session!.opencode.sessionId, card)),
-            Effect.catchAll((error) =>
-              logger.warn("failed to post idle compaction card", {
-                channelId: session!.channelId,
-                sessionId: session!.opencode.sessionId,
-                error: formatError(error),
-              }).pipe(Effect.zipRight(setIdleCompactionCard(session!.opencode.sessionId, null)), Effect.as(null)),
-            ),
-          )
-
-          yield* opencode.compactSession(session!.opencode).pipe(
-            Effect.tap(() =>
-              updateIdleCompactionCard(
-                session!.opencode.sessionId,
-                "🗜️ Session compacted",
-                "OpenCode summarized earlier context for this session.",
-              ).pipe(Effect.zipRight(setIdleCompactionCard(session!.opencode.sessionId, null))),
-            ),
-            Effect.tapError((error) =>
-              logger.error("failed to compact session", {
-                channelId: session!.channelId,
-                sessionId: session!.opencode.sessionId,
-                error: formatError(error),
-              }),
-            ),
-            Effect.catchAll((error) =>
-              compactionCard
-                ? Effect.promise(() =>
-                    editInfoCard(compactionCard, "❌ Session compaction failed", `OpenCode could not compact this session.\n\n${formatError(error)}`),
-                  ).pipe(Effect.ignore, Effect.zipRight(setIdleCompactionCard(session!.opencode.sessionId, null)))
-                : Effect.void,
-            ),
-            Effect.forkDaemon,
-          )
-
-          yield* editCommandInteraction(interaction, "Started session compaction. I'll post updates in this channel.")
-          return true
-        }
-
-        const interruptEntry = decideInterruptEntry({
-          inGuildTextChannel,
-          hasSession: !!session,
-          hasActiveRun: !!session?.activeRun,
-        })
-        if (interruptEntry.type === "reject") {
-          yield* replyToCommandInteraction(interaction, interruptEntry.message)
-          return true
-        }
-
-        yield* deferCommandInteraction(interaction)
-
-        const activeRun = session!.activeRun!
-        const rollbackInterruptRequest = beginInterruptRequest(activeRun)
-        const interruptResult = yield* opencode.interruptSession(session!.opencode).pipe(Effect.either)
-        if (interruptResult._tag === "Left") {
-          rollbackInterruptRequest()
-          yield* editCommandInteraction(
-            interaction,
-            formatErrorResponse("## ❌ Failed to interrupt run", formatError(interruptResult.left)),
-          )
-          return true
-        }
-
-        yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
-        yield* Effect.promise(async () => {
-          await sendInfoCard(
-            interaction.channel as SendableChannels,
-            "🛑 Run interrupted",
-            "OpenCode stopped the active run in this channel.",
-          )
-        }).pipe(
-          Effect.catchAll((error) =>
-            logger.warn("failed to post interrupt info card", {
-              channelId: session!.channelId,
-              sessionId: session!.opencode.sessionId,
-              error: formatError(error),
-            }),
-          ),
-          Effect.ignore,
-        )
-        yield* editCommandInteraction(interaction, "Interrupted the active OpenCode run.")
-        return true
-      })
 
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
@@ -462,7 +305,7 @@ export const ChannelSessionsLive = Layer.scoped(
         }),
       getActiveRunBySessionId,
       handleInteraction: (interaction) =>
-        handleCommandInteraction(interaction).pipe(
+        commandRuntime.handleInteraction(interaction).pipe(
           Effect.flatMap((handled) => handled ? Effect.succeed(true) : questionRuntime.handleInteraction(interaction)),
         ),
     } satisfies ChannelSessionsShape
