@@ -18,7 +18,7 @@ export type SessionLifecycleState = {
   sessionsBySessionId: Map<string, ChannelSession>
   activeRunsBySessionId: Map<string, ActiveRun>
   gatesByChannelId: Map<string, SessionGate>
-  idleCompactionCardsBySessionId: Map<string, Message>
+  idleCompactionsBySessionId: Map<string, IdleCompaction>
 }
 
 export type SessionContext = {
@@ -34,6 +34,11 @@ type SessionGateDecision = {
 type SessionPaths = {
   rootDir: string
   workdir: string
+}
+
+type IdleCompaction = {
+  card: Message
+  interruptRequested: boolean
 }
 
 type SessionLifecycleRuntime<State extends SessionLifecycleState> = {
@@ -94,25 +99,32 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
     )
 
   const getIdleCompactionCard = (sessionId: string) =>
-    Ref.get(runtime.stateRef).pipe(Effect.map((state) => state.idleCompactionCardsBySessionId.get(sessionId) ?? null))
+    Ref.get(runtime.stateRef).pipe(
+      Effect.map((state) => state.idleCompactionsBySessionId.get(sessionId)?.card ?? null),
+    )
 
-  const takeIdleCompactionCard = (sessionId: string) =>
-    Ref.modify(runtime.stateRef, (current): readonly [Message | null, State] => {
-      const existing = current.idleCompactionCardsBySessionId.get(sessionId) ?? null
+  const takeIdleCompaction = (sessionId: string) =>
+    Ref.modify(runtime.stateRef, (current): readonly [IdleCompaction | null, State] => {
+      const existing = current.idleCompactionsBySessionId.get(sessionId) ?? null
       if (!existing) {
         return [null, current]
       }
 
-      const idleCompactionCardsBySessionId = new Map(current.idleCompactionCardsBySessionId)
-      idleCompactionCardsBySessionId.delete(sessionId)
+      const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId)
+      idleCompactionsBySessionId.delete(sessionId)
       return [
         existing,
         {
           ...current,
-          idleCompactionCardsBySessionId,
+          idleCompactionsBySessionId,
         },
       ]
     })
+
+  const getIdleCompactionInterruptRequested = (sessionId: string) =>
+    Ref.get(runtime.stateRef).pipe(
+      Effect.map((state) => state.idleCompactionsBySessionId.get(sessionId)?.interruptRequested ?? false),
+    )
 
   const toPersistedSession = (session: ChannelSession): PersistedChannelSession => ({
     channelId: session.channelId,
@@ -144,14 +156,14 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
       sessionsBySessionId.delete(session.opencode.sessionId)
       const activeRunsBySessionId = new Map(current.activeRunsBySessionId)
       activeRunsBySessionId.delete(session.opencode.sessionId)
-      const idleCompactionCardsBySessionId = new Map(current.idleCompactionCardsBySessionId)
-      idleCompactionCardsBySessionId.delete(session.opencode.sessionId)
+      const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId)
+      idleCompactionsBySessionId.delete(session.opencode.sessionId)
       return {
         ...current,
         sessionsByChannelId,
         sessionsBySessionId,
         activeRunsBySessionId,
-        idleCompactionCardsBySessionId,
+        idleCompactionsBySessionId,
       }
     })
 
@@ -193,11 +205,11 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
       const activeRunsBySessionId = new Map(current.activeRunsBySessionId)
       activeRunsBySessionId.delete(previousSessionId)
 
-      const idleCompactionCardsBySessionId = new Map(current.idleCompactionCardsBySessionId)
-      const idleCompactionCard = idleCompactionCardsBySessionId.get(previousSessionId)
-      idleCompactionCardsBySessionId.delete(previousSessionId)
-      if (idleCompactionCard) {
-        idleCompactionCardsBySessionId.set(replacement.sessionId, idleCompactionCard)
+      const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId)
+      const idleCompaction = idleCompactionsBySessionId.get(previousSessionId)
+      idleCompactionsBySessionId.delete(previousSessionId)
+      if (idleCompaction) {
+        idleCompactionsBySessionId.set(replacement.sessionId, idleCompaction)
       }
 
       return {
@@ -205,21 +217,42 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
         sessionsByChannelId,
         sessionsBySessionId,
         activeRunsBySessionId,
-        idleCompactionCardsBySessionId,
+        idleCompactionsBySessionId,
       }
     })
 
   const setIdleCompactionCard = (sessionId: string, message: Message | null) =>
     Ref.update(runtime.stateRef, (current) => {
-      const idleCompactionCardsBySessionId = new Map(current.idleCompactionCardsBySessionId)
+      const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId)
       if (message) {
-        idleCompactionCardsBySessionId.set(sessionId, message)
+        idleCompactionsBySessionId.set(sessionId, {
+          card: message,
+          interruptRequested: false,
+        })
       } else {
-        idleCompactionCardsBySessionId.delete(sessionId)
+        idleCompactionsBySessionId.delete(sessionId)
       }
       return {
         ...current,
-        idleCompactionCardsBySessionId,
+        idleCompactionsBySessionId,
+      }
+    })
+
+  const setIdleCompactionInterruptRequested = (sessionId: string, interruptRequested: boolean) =>
+    Ref.update(runtime.stateRef, (current) => {
+      const existing = current.idleCompactionsBySessionId.get(sessionId)
+      if (!existing || existing.interruptRequested === interruptRequested) {
+        return current
+      }
+
+      const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId)
+      idleCompactionsBySessionId.set(sessionId, {
+        ...existing,
+        interruptRequested,
+      })
+      return {
+        ...current,
+        idleCompactionsBySessionId,
       }
     })
 
@@ -565,7 +598,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
           state.sessionsByChannelId.values(),
           (session) =>
             session.activeRun ||
-            state.idleCompactionCardsBySessionId.has(session.opencode.sessionId) ||
+            state.idleCompactionsBySessionId.has(session.opencode.sessionId) ||
             !runtime.idleTimeoutMs ||
             now - session.lastActivityAt < runtime.idleTimeoutMs
               ? Effect.void
@@ -605,9 +638,11 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
     getActiveRunBySessionId,
     getSessionContext,
     getIdleCompactionCard,
-    takeIdleCompactionCard,
+    takeIdleCompaction,
+    getIdleCompactionInterruptRequested,
     setActiveRun,
     setIdleCompactionCard,
+    setIdleCompactionInterruptRequested,
     createOrGetSession,
     getOrRestoreSession,
     ensureSessionHealth,

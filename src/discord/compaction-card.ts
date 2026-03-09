@@ -1,4 +1,4 @@
-export type CompactionCardState = "compacting" | "compacted" | "interrupted" | "stopped"
+export type CompactionCardState = "compacting" | "interrupting" | "compacted" | "interrupted" | "stopped"
 
 export const compactionCardContent = (state: CompactionCardState): { title: string; body: string } => {
   switch (state) {
@@ -6,6 +6,11 @@ export const compactionCardContent = (state: CompactionCardState): { title: stri
       return {
         title: "🗜️ Compacting session",
         body: "OpenCode is summarizing earlier context for this session.",
+      }
+    case "interrupting":
+      return {
+        title: "‼️ Interrupting compaction",
+        body: "OpenCode is stopping session compaction.",
       }
     case "compacted":
       return {

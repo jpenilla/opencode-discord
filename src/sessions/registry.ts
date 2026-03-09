@@ -57,7 +57,7 @@ const createSessionRuntimeState = (): SessionRuntimeState => ({
   sessionsBySessionId: new Map(),
   activeRunsBySessionId: new Map(),
   gatesByChannelId: new Map(),
-  idleCompactionCardsBySessionId: new Map(),
+  idleCompactionsBySessionId: new Map(),
 })
 
 export const ChannelSessionsLive = Layer.scoped(
@@ -107,9 +107,11 @@ export const ChannelSessionsLive = Layer.scoped(
       getActiveRunBySessionId,
       getSessionContext,
       getIdleCompactionCard,
-      takeIdleCompactionCard,
+      takeIdleCompaction,
+      getIdleCompactionInterruptRequested,
       setActiveRun,
       setIdleCompactionCard,
+      setIdleCompactionInterruptRequested,
       createOrGetSession,
       getOrRestoreSession,
       ensureSessionHealth,
@@ -118,7 +120,26 @@ export const ChannelSessionsLive = Layer.scoped(
     } = sessionLifecycle
 
     const finalizeIdleCompactionCard = (sessionId: string, title: string, body: string) =>
-      takeIdleCompactionCard(sessionId).pipe(
+      takeIdleCompaction(sessionId).pipe(
+        Effect.flatMap((compaction) => {
+          if (!compaction) {
+            return Effect.void
+          }
+
+          return Effect.promise(() => editInfoCard(compaction.card, title, body)).pipe(
+            Effect.catchAll((error) =>
+              logger.warn("failed to finalize idle compaction card", {
+                sessionId,
+                error: formatError(error),
+              }),
+            ),
+            Effect.asVoid,
+          )
+        }),
+      )
+
+    const updateIdleCompactionCard = (sessionId: string, title: string, body: string) =>
+      getIdleCompactionCard(sessionId).pipe(
         Effect.flatMap((card) => {
           if (!card) {
             return Effect.void
@@ -126,7 +147,7 @@ export const ChannelSessionsLive = Layer.scoped(
 
           return Effect.promise(() => editInfoCard(card, title, body)).pipe(
             Effect.catchAll((error) =>
-              logger.warn("failed to finalize idle compaction card", {
+              logger.warn("failed to update idle compaction card", {
                 sessionId,
                 error: formatError(error),
               }),
@@ -218,6 +239,9 @@ export const ChannelSessionsLive = Layer.scoped(
       getSession: getOrRestoreSession,
       getIdleCompactionCard,
       setIdleCompactionCard,
+      setIdleCompactionInterruptRequested,
+      getIdleCompactionInterruptRequested,
+      updateIdleCompactionCard,
       finalizeIdleCompactionCard,
       isSessionHealthy: opencode.isHealthy,
       compactSession: opencode.compactSession,
@@ -253,11 +277,11 @@ export const ChannelSessionsLive = Layer.scoped(
             { concurrency: "unbounded", discard: true },
           ),
           Effect.forEach(
-            state.idleCompactionCardsBySessionId.entries(),
-            ([sessionId, card]) =>
+            state.idleCompactionsBySessionId.entries(),
+            ([sessionId, entry]) =>
               Effect.promise(() => {
                 const stoppedCard = compactionCardContent("stopped")
-                return editInfoCard(card, stoppedCard.title, stoppedCard.body)
+                return editInfoCard(entry.card, stoppedCard.title, stoppedCard.body)
               }).pipe(
                 Effect.catchAll((error) =>
                   logger.warn("failed to stop idle compaction card during shutdown", {

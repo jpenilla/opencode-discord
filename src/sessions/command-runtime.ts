@@ -15,6 +15,9 @@ type CommandRuntimeDeps = {
   getSession: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>
   getIdleCompactionCard: (sessionId: string) => Effect.Effect<Message | null, unknown>
   setIdleCompactionCard: (sessionId: string, card: Message | null) => Effect.Effect<void, unknown>
+  setIdleCompactionInterruptRequested: (sessionId: string, interruptRequested: boolean) => Effect.Effect<void, unknown>
+  getIdleCompactionInterruptRequested: (sessionId: string) => Effect.Effect<boolean, unknown>
+  updateIdleCompactionCard: (sessionId: string, title: string, body: string) => Effect.Effect<void, unknown>
   finalizeIdleCompactionCard: (sessionId: string, title: string, body: string) => Effect.Effect<void, unknown>
   isSessionHealthy: (session: ChannelSession["opencode"]) => Effect.Effect<boolean, unknown>
   compactSession: (session: ChannelSession["opencode"]) => Effect.Effect<void, unknown>
@@ -144,10 +147,23 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
           ),
           Effect.catchAll((error) =>
             compactionCard
-              ? deps.finalizeIdleCompactionCard(
-                  session!.opencode.sessionId,
-                  "❌ Session compaction failed",
-                  `OpenCode could not compact this session.\n\n${deps.formatError(error)}`,
+              ? deps.getIdleCompactionInterruptRequested(session!.opencode.sessionId).pipe(
+                  Effect.flatMap((interruptRequested) =>
+                    interruptRequested
+                      ? (() => {
+                          const interruptedCard = compactionCardContent("interrupted")
+                          return deps.finalizeIdleCompactionCard(
+                            session!.opencode.sessionId,
+                            interruptedCard.title,
+                            interruptedCard.body,
+                          )
+                        })()
+                      : deps.finalizeIdleCompactionCard(
+                          session!.opencode.sessionId,
+                          "❌ Session compaction failed",
+                          `OpenCode could not compact this session.\n\n${deps.formatError(error)}`,
+                        ),
+                  ),
                 )
               : Effect.void,
           ),
@@ -176,8 +192,10 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
       yield* deferCommandInteraction(interaction)
 
       if (interruptEntry.target === "compaction") {
+        yield* deps.setIdleCompactionInterruptRequested(session!.opencode.sessionId, true)
         const interruptResult = yield* deps.interruptSession(session!.opencode).pipe(Effect.either)
         if (interruptResult._tag === "Left") {
+          yield* deps.setIdleCompactionInterruptRequested(session!.opencode.sessionId, false)
           yield* editCommandInteraction(
             interaction,
             formatErrorResponse("## ❌ Failed to interrupt compaction", deps.formatError(interruptResult.left)),
@@ -185,13 +203,13 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
           return true
         }
 
-        const interruptedCard = compactionCardContent("interrupted")
-        yield* deps.finalizeIdleCompactionCard(
+        const interruptingCard = compactionCardContent("interrupting")
+        yield* deps.updateIdleCompactionCard(
           session!.opencode.sessionId,
-          interruptedCard.title,
-          interruptedCard.body,
+          interruptingCard.title,
+          interruptingCard.body,
         )
-        yield* editCommandInteraction(interaction, "Interrupted the active OpenCode compaction.")
+        yield* editCommandInteraction(interaction, "Requested interruption of the active OpenCode compaction.")
         return true
       }
 

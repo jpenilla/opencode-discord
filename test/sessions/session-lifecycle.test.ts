@@ -38,7 +38,7 @@ const makeState = (): SessionLifecycleState => ({
   sessionsBySessionId: new Map(),
   activeRunsBySessionId: new Map(),
   gatesByChannelId: new Map(),
-  idleCompactionCardsBySessionId: new Map(),
+  idleCompactionsBySessionId: new Map(),
 })
 
 const logger = {

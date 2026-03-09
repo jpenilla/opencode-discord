@@ -104,7 +104,7 @@ const makeHarness = async (options: {
   promptImpl: (input: { prompt: string; callIndex: number }) => Effect.Effect<PromptResult>
   isHealthyImpl?: () => Effect.Effect<boolean>
   createSessionImpl?: (input: { workdir: string; title: string; callIndex: number }) => Effect.Effect<SessionHandle>
-  compactSessionImpl?: () => Effect.Effect<void>
+  compactSessionImpl?: () => Effect.Effect<void, unknown>
   interruptSessionImpl?: () => Effect.Effect<void>
   rejectQuestionImpl?: () => Effect.Effect<void>
   failComponentReplies?: boolean
@@ -563,7 +563,7 @@ describe("ChannelSessionsLive integration", () => {
     )
   })
 
-  test("runs /interrupt through the live layer and stops an active compaction", async () => {
+  test("runs /interrupt through the live layer, marks compaction interrupting, and allows later completion", async () => {
     const compactStarted = await Effect.runPromise(Deferred.make<void>())
     const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>())
     const harness = await makeHarness({
@@ -605,16 +605,62 @@ describe("ChannelSessionsLive integration", () => {
     expect(await getRef(interruptCommand.interactionDefers)).toBe(1)
     expect(await getRef(interruptCommand.interactionEdits)).toEqual([
       {
-        content: "Interrupted the active OpenCode compaction.",
+        content: "Requested interruption of the active OpenCode compaction.",
         allowedMentions: { parse: [] },
       },
     ])
+    expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
+      "**‼️ Interrupting compaction**\nOpenCode is stopping session compaction.",
+    )
+    expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
+      "**🗜️ Session compacted**\nOpenCode summarized earlier context for this session.",
+    )
+  })
+
+  test("marks idle compaction interrupted when the compaction exits with an abort after interrupt", async () => {
+    const compactStarted = await Effect.runPromise(Deferred.make<void>())
+    const allowCompactToFinish = await Effect.runPromise(Deferred.make<void, Error>())
+    const harness = await makeHarness({
+      promptImpl: () =>
+        Effect.succeed({
+          messageId: "assistant-1",
+          transcript: "hello",
+        }),
+      compactSessionImpl: () =>
+        Deferred.succeed(compactStarted, undefined).pipe(
+          Effect.zipRight(Deferred.await(allowCompactToFinish)),
+        ),
+      interruptSessionImpl: () =>
+        Deferred.fail(allowCompactToFinish, new Error("aborted")).pipe(Effect.asVoid),
+    })
+    const message = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    })
+    const compactCommand = harness.makeCommandInteraction("compact")
+    const interruptCommand = harness.makeCommandInteraction("interrupt")
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions
+          yield* sessions.submit(message, { prompt: "hello" })
+          yield* Queue.take(harness.replyEvents)
+          yield* waitForNoActiveRun(sessions, "session-1")
+          yield* sessions.handleInteraction(compactCommand.interaction)
+          yield* Deferred.await(compactStarted)
+          yield* sessions.handleInteraction(interruptCommand.interaction)
+          yield* Effect.promise(() => Bun.sleep(0))
+        }).pipe(Effect.provide(harness.layer)),
+      ),
+    )
+
     expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
       "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
     )
   })
 
-  test("ignores a late compaction completion after idle compaction was interrupted", async () => {
+  test("does not create an extra compaction completion card when a late completion arrives after an interrupt request", async () => {
     const compactStarted = await Effect.runPromise(Deferred.make<void>())
     const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>())
     const secondPromptStarted = await Effect.runPromise(Deferred.make<void>())
@@ -672,15 +718,14 @@ describe("ChannelSessionsLive integration", () => {
       ),
     )
 
-    expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
-      "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
-    )
-    expect((await getRef(harness.sentPayloads)).map(cardText)).not.toContain(
-      "**🗜️ Session compacted**\nOpenCode summarized earlier context for this session.",
-    )
-    expect((await getRef(harness.editedPayloads)).map(cardText)).not.toContain(
-      "**🗜️ Session compacted**\nOpenCode summarized earlier context for this session.",
-    )
+    const compactedText = "**🗜️ Session compacted**\nOpenCode summarized earlier context for this session."
+    const allCardTexts = [
+      ...(await getRef(harness.sentPayloads)).map(cardText),
+      ...(await getRef(harness.editedPayloads)).map(cardText),
+    ]
+
+    expect(allCardTexts).toContain("**‼️ Interrupting compaction**\nOpenCode is stopping session compaction.")
+    expect(allCardTexts.filter((text) => text === compactedText)).toHaveLength(1)
   })
 
   test("recreates an unhealthy session after a failed run and succeeds on the next submit", async () => {

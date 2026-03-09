@@ -23,6 +23,7 @@ const makeHarness = async (options?: {
   const loggedWarnings = await Effect.runPromise(Ref.make<string[]>([]))
   const typingStopCount = await Effect.runPromise(Ref.make(0))
   const idleCardRef = await Effect.runPromise(Ref.make<Message | null>(null))
+  const idleInterruptRequested = await Effect.runPromise(Ref.make(false))
   const compactStarted = await Effect.runPromise(Deferred.make<void, never>())
   const compactFinish = await Effect.runPromise(Deferred.make<void, never>())
   const compactUpdated = await Effect.runPromise(Deferred.make<void, never>())
@@ -98,6 +99,16 @@ const makeHarness = async (options?: {
     getSession: (channelId) => Effect.succeed(channelId === session.channelId ? session : null),
     getIdleCompactionCard: (_sessionId) => Ref.get(idleCardRef),
     setIdleCompactionCard: (_sessionId, card) => Ref.set(idleCardRef, card),
+    setIdleCompactionInterruptRequested: (_sessionId, interruptRequested) => Ref.set(idleInterruptRequested, interruptRequested),
+    getIdleCompactionInterruptRequested: (_sessionId) => Ref.get(idleInterruptRequested),
+    updateIdleCompactionCard: (_sessionId, title, body) =>
+      Ref.get(idleCardRef).pipe(
+        Effect.flatMap((card) =>
+          card
+            ? Ref.update(compactionUpdates, (current) => [...current, { title, body }]).pipe(Effect.asVoid)
+            : Effect.void,
+        ),
+      ),
     finalizeIdleCompactionCard: (_sessionId, title, body) =>
       Ref.set(idleCardRef, null).pipe(
         Effect.zipRight(Ref.update(compactionUpdates, (current) => [...current, { title, body }])),
@@ -246,13 +257,13 @@ describe("createCommandRuntime", () => {
     expect(await getRef(harness.sentInfoCards)).toEqual([])
     expect(await getRef(harness.compactionUpdates)).toEqual([
       {
-        title: "‼️ Compaction interrupted",
-        body: "OpenCode stopped compacting this session because the run was interrupted.",
+        title: "‼️ Interrupting compaction",
+        body: "OpenCode is stopping session compaction.",
       },
     ])
-    expect(await getRef(harness.idleCardRef)).toBeNull()
+    expect((await getRef(harness.idleCardRef))?.id).toBe("compaction-card")
     expect(await getRef(harness.edits)).toEqual([
-      "Interrupted the active OpenCode compaction.",
+      "Requested interruption of the active OpenCode compaction.",
     ])
   })
 })
