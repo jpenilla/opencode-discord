@@ -52,6 +52,7 @@ import {
   decideRunCompletion,
 } from "@/sessions/command-lifecycle.ts"
 import { collectAttachmentMessages } from "@/sessions/message-context.ts"
+import { coordinateActiveRunPrompts } from "@/sessions/prompt-coordinator.ts"
 import { collectProgressEvents, runProgressWorker } from "@/sessions/progress.ts"
 import { expireQuestionBatch, setQuestionBatchStatus } from "@/sessions/question-batch-state.ts"
 import { enqueueRunRequest } from "@/sessions/request-routing.ts"
@@ -673,37 +674,20 @@ export const ChannelSessionsLive = Layer.scoped(
           questionOutcome: noQuestionOutcome(),
           interruptRequested: false,
         }
-        const initialPrompt = admitRequestBatchToActiveRun(activeRun.attachmentMessagesById, initialRequests, "initial")
         yield* setActiveRun(session, activeRun)
 
         const stopTyping = Effect.promise(() => activeRun.typing.stop())
         let failed = false
 
         try {
-          let result = yield* opencode.prompt(session.opencode, initialPrompt)
-
-          while (true) {
-            yield* Ref.set(acceptFollowUps, false)
-            const followUps = yield* Queue.takeAll(followUpQueue).pipe(Effect.map(Chunk.toReadonlyArray))
-            if (followUps.length === 0) {
-              break
-            }
-
-            yield* logger.info("absorbing queued follow-up messages into active run", {
-              channelId: session.channelId,
-              sessionId: session.opencode.sessionId,
-              count: followUps.length,
-            })
-
-            const followUpBatch = followUps as NonEmptyRunRequestBatch
-            const followUpPrompt = admitRequestBatchToActiveRun(
-              activeRun.attachmentMessagesById,
-              followUpBatch,
-              "follow-up",
-            )
-            yield* Ref.set(acceptFollowUps, true)
-            result = yield* opencode.prompt(session.opencode, followUpPrompt)
-          }
+          const result = yield* coordinateActiveRunPrompts({
+            channelId: session.channelId,
+            session: session.opencode,
+            activeRun,
+            initialRequests,
+            prompt: opencode.prompt,
+            logger,
+          })
 
           const questionOutcome = activeRun.questionOutcome
           const completion = decideRunCompletion({
