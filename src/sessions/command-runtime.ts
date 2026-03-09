@@ -13,7 +13,9 @@ export type CommandRuntime = {
 
 type CommandRuntimeDeps = {
   getSession: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>
+  hasIdleCompaction: (sessionId: string) => Effect.Effect<boolean, unknown>
   getIdleCompactionCard: (sessionId: string) => Effect.Effect<Message | null, unknown>
+  beginIdleCompaction: (sessionId: string) => Effect.Effect<void, unknown>
   setIdleCompactionCard: (sessionId: string, card: Message | null) => Effect.Effect<void, unknown>
   setIdleCompactionInterruptRequested: (sessionId: string, interruptRequested: boolean) => Effect.Effect<void, unknown>
   getIdleCompactionInterruptRequested: (sessionId: string) => Effect.Effect<boolean, unknown>
@@ -109,6 +111,7 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
         }
 
         const channel = interaction.channel as SendableChannels
+        yield* deps.beginIdleCompaction(session!.opencode.sessionId)
         const existingCard = yield* deps.getIdleCompactionCard(session!.opencode.sessionId)
         const compactingCard = compactionCardContent("compacting")
         const compactedCard = compactionCardContent("compacted")
@@ -126,7 +129,7 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
               channelId: session!.channelId,
               sessionId: session!.opencode.sessionId,
               error: deps.formatError(error),
-            }).pipe(Effect.zipRight(deps.setIdleCompactionCard(session!.opencode.sessionId, null)), Effect.as(null)),
+            }).pipe(Effect.as(null)),
           ),
         )
 
@@ -174,15 +177,13 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
         return true
       }
 
-      const idleCompactionCard = session && !session.activeRun
-        ? yield* deps.getIdleCompactionCard(session.opencode.sessionId)
-        : null
-
       const interruptEntry = decideInterruptEntry({
         inGuildTextChannel,
         hasSession: !!session,
         hasActiveRun: !!session?.activeRun,
-        hasIdleCompaction: !!idleCompactionCard,
+        hasIdleCompaction: session && !session.activeRun
+          ? yield* deps.hasIdleCompaction(session.opencode.sessionId)
+          : false,
       })
       if (interruptEntry.type === "reject") {
         yield* replyToCommandInteraction(interaction, interruptEntry.message)

@@ -277,6 +277,7 @@ describe("createSessionLifecycle", () => {
     const previousSessionId = session.opencode.sessionId
     const card = makeCardMessage("card-1")
 
+    await Effect.runPromise(lifecycle.beginIdleCompaction(previousSessionId))
     await Effect.runPromise(lifecycle.setIdleCompactionCard(previousSessionId, card))
     await Effect.runPromise(lifecycle.setActiveRun(session, makeActiveRun()))
 
@@ -322,6 +323,7 @@ describe("createSessionLifecycle", () => {
 
     const session = await Effect.runPromise(lifecycle.createOrGetSession(makeMessage("channel-1")))
     session.lastActivityAt = 0
+    await Effect.runPromise(lifecycle.beginIdleCompaction(session.opencode.sessionId))
     await Effect.runPromise(lifecycle.setIdleCompactionCard(session.opencode.sessionId, makeCardMessage("card-1")))
 
     await Effect.runPromise(lifecycle.closeExpiredSessions(30 * 60 * 1_000 + 1))

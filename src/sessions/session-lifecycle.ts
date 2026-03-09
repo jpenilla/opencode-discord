@@ -37,8 +37,9 @@ type SessionPaths = {
 }
 
 type IdleCompaction = {
-  card: Message
+  card: Message | null
   interruptRequested: boolean
+  completed: Deferred.Deferred<void>
 }
 
 type SessionLifecycleRuntime<State extends SessionLifecycleState> = {
@@ -98,28 +99,23 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
       }),
     )
 
+  const getIdleCompaction = (sessionId: string) =>
+    Ref.get(runtime.stateRef).pipe(
+      Effect.map((state) => state.idleCompactionsBySessionId.get(sessionId) ?? null),
+    )
+
+  const hasIdleCompaction = (sessionId: string) =>
+    getIdleCompaction(sessionId).pipe(Effect.map(Boolean))
+
   const getIdleCompactionCard = (sessionId: string) =>
     Ref.get(runtime.stateRef).pipe(
       Effect.map((state) => state.idleCompactionsBySessionId.get(sessionId)?.card ?? null),
     )
 
-  const takeIdleCompaction = (sessionId: string) =>
-    Ref.modify(runtime.stateRef, (current): readonly [IdleCompaction | null, State] => {
-      const existing = current.idleCompactionsBySessionId.get(sessionId) ?? null
-      if (!existing) {
-        return [null, current]
-      }
-
-      const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId)
-      idleCompactionsBySessionId.delete(sessionId)
-      return [
-        existing,
-        {
-          ...current,
-          idleCompactionsBySessionId,
-        },
-      ]
-    })
+  const awaitIdleCompaction = (sessionId: string) =>
+    getIdleCompaction(sessionId).pipe(
+      Effect.flatMap((idleCompaction) => idleCompaction ? Deferred.await(idleCompaction.completed) : Effect.void),
+    )
 
   const getIdleCompactionInterruptRequested = (sessionId: string) =>
     Ref.get(runtime.stateRef).pipe(
@@ -221,21 +217,70 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
       }
     })
 
+  const beginIdleCompaction = (sessionId: string) =>
+    Effect.gen(function* () {
+      const existing = yield* getIdleCompaction(sessionId)
+      if (existing) {
+        return
+      }
+
+      const completed = yield* Deferred.make<void>()
+      yield* Ref.update(runtime.stateRef, (current) => {
+        const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId)
+        idleCompactionsBySessionId.set(sessionId, {
+          card: null,
+          interruptRequested: false,
+          completed,
+        })
+        return {
+          ...current,
+          idleCompactionsBySessionId,
+        }
+      })
+    })
+
   const setIdleCompactionCard = (sessionId: string, message: Message | null) =>
     Ref.update(runtime.stateRef, (current) => {
-      const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId)
-      if (message) {
-        idleCompactionsBySessionId.set(sessionId, {
-          card: message,
-          interruptRequested: false,
-        })
-      } else {
-        idleCompactionsBySessionId.delete(sessionId)
+      const existing = current.idleCompactionsBySessionId.get(sessionId)
+      if (!existing || existing.card === message) {
+        return current
       }
+
+      const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId)
+      idleCompactionsBySessionId.set(sessionId, {
+        ...existing,
+        card: message,
+      })
       return {
         ...current,
         idleCompactionsBySessionId,
       }
+    })
+
+  const completeIdleCompaction = (sessionId: string) =>
+    Effect.gen(function* () {
+      const idleCompaction = yield* Ref.modify(runtime.stateRef, (current): readonly [IdleCompaction | null, State] => {
+        const existing = current.idleCompactionsBySessionId.get(sessionId) ?? null
+        if (!existing) {
+          return [null, current]
+        }
+
+        const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId)
+        idleCompactionsBySessionId.delete(sessionId)
+        return [
+          existing,
+          {
+            ...current,
+            idleCompactionsBySessionId,
+          },
+        ]
+      })
+
+      if (idleCompaction) {
+        yield* Deferred.succeed(idleCompaction.completed, undefined).pipe(Effect.ignore)
+      }
+
+      return idleCompaction
     })
 
   const setIdleCompactionInterruptRequested = (sessionId: string, interruptRequested: boolean) =>
@@ -637,12 +682,15 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
     getSession,
     getActiveRunBySessionId,
     getSessionContext,
+    hasIdleCompaction,
     getIdleCompactionCard,
-    takeIdleCompaction,
+    awaitIdleCompaction,
     getIdleCompactionInterruptRequested,
     setActiveRun,
+    beginIdleCompaction,
     setIdleCompactionCard,
     setIdleCompactionInterruptRequested,
+    completeIdleCompaction,
     createOrGetSession,
     getOrRestoreSession,
     ensureSessionHealth,

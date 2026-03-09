@@ -22,3 +22,11 @@ export const formatThinkingCompleted = (text: string) => {
   }
   return `*🧠 ${trimmed}*`
 }
+
+export const formatCompactionSummary = (text: string) => {
+  const trimmed = text.trim()
+  if (!trimmed) {
+    return null
+  }
+  return `*🗜️ ${trimmed}*`
+}

@@ -1,9 +1,12 @@
 import type {
+  AssistantMessage,
   CompactionPart,
   Event,
   EventQuestionReplied,
   EventQuestionRejected,
   EventSessionCompacted,
+  EventSessionError,
+  EventSessionIdle,
   PatchPart,
   QuestionRequest,
   ReasoningPart,
@@ -67,6 +70,13 @@ export const getToolPartUpdated = (event: Event): ToolPart | null => {
   return event.properties.part.type === "tool" ? event.properties.part : null
 }
 
+export const getAssistantMessageUpdated = (event: Event): AssistantMessage | null => {
+  if (event.type !== "message.updated") {
+    return null
+  }
+  return event.properties.info.role === "assistant" ? event.properties.info : null
+}
+
 export const getPermissionUpdated = (event: Event): PermissionRequest | null => {
   if (event.type !== "permission.asked") {
     return null
@@ -83,6 +93,20 @@ export const getPermissionReplied = (event: Event): EventPermissionReplied["prop
 
 export const getSessionStatusUpdated = (event: Event): EventSessionStatus["properties"] | null => {
   if (event.type !== "session.status") {
+    return null
+  }
+  return event.properties
+}
+
+export const getSessionIdle = (event: Event): EventSessionIdle["properties"] | null => {
+  if (event.type !== "session.idle") {
+    return null
+  }
+  return event.properties
+}
+
+export const getSessionError = (event: Event): EventSessionError["properties"] | null => {
+  if (event.type !== "session.error") {
     return null
   }
   return event.properties

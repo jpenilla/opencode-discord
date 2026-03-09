@@ -36,7 +36,8 @@ type SessionModel = {
 export type OpencodeServiceShape = {
   createSession: (workdir: string, title: string, systemPromptAppend?: string) => Effect.Effect<SessionHandle, unknown>
   attachSession: (workdir: string, sessionId: string, systemPromptAppend?: string) => Effect.Effect<SessionHandle, unknown>
-  prompt: (session: SessionHandle, prompt: string) => Effect.Effect<PromptResult, unknown>
+  submitPrompt: (session: SessionHandle, prompt: string, messageId: string) => Effect.Effect<void, unknown>
+  readPromptResult: (session: SessionHandle, messageId: string) => Effect.Effect<PromptResult, unknown>
   interruptSession: (session: SessionHandle) => Effect.Effect<void, unknown>
   compactSession: (session: SessionHandle) => Effect.Effect<void, unknown>
   replyToQuestion: (session: SessionHandle, requestID: string, answers: Array<QuestionAnswer>) => Effect.Effect<void, unknown>
@@ -217,6 +218,30 @@ const resolveSessionModel = (session: SessionHandle) =>
     throw new Error("Failed to compact opencode session: no model metadata is available for this session")
   })
 
+const loadSessionMessage = (session: SessionHandle, messageId: string) =>
+  Effect.promise(() =>
+    session.client.session.message({
+      sessionID: session.sessionId,
+      messageID: messageId,
+    }),
+  ).pipe(
+    Effect.map((result) => {
+      if (result.error || !result.data) {
+        throw new Error(`Failed to load opencode message ${messageId}: ${formatValue(result.error)}`)
+      }
+
+      return result.data
+    }),
+  )
+
+const loadPromptResult = (session: SessionHandle, messageId: string) =>
+  loadSessionMessage(session, messageId).pipe(
+    Effect.map((message) => ({
+      messageId,
+      transcript: renderTranscript(message.parts),
+    }) satisfies PromptResult),
+  )
+
 export const OpencodeServiceLive = Layer.scoped(
   OpencodeService,
   Effect.gen(function* () {
@@ -377,24 +402,21 @@ export const OpencodeServiceLive = Layer.scoped(
             throw error
           }
         }),
-      prompt: (session, prompt) =>
+      submitPrompt: (session, prompt, messageId) =>
         Effect.gen(function* () {
           const result = yield* Effect.promise(() =>
-            session.client.session.prompt({
+            session.client.session.promptAsync({
               sessionID: session.sessionId,
+              messageID: messageId,
               parts: [{ type: "text", text: prompt }],
             }),
           )
 
-          if (result.error || !result.data) {
+          if (result.error) {
             throw new Error(`Failed to prompt opencode: ${formatValue(result.error)}`)
           }
-
-          return {
-            messageId: result.data.info.id,
-            transcript: renderTranscript(result.data.parts),
-          } satisfies PromptResult
         }),
+      readPromptResult: (session, messageId) => loadPromptResult(session, messageId),
       interruptSession: (session) =>
         Effect.gen(function* () {
           const result = yield* Effect.promise(() =>

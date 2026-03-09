@@ -11,6 +11,9 @@ const cardText = (payload: MessageCreateOptions | MessageEditOptions) =>
   String((payload as { components?: Array<{ components?: Array<{ data?: { content?: string } }> }> })
     .components?.[0]?.components?.[0]?.data?.content ?? "")
 
+const messageText = (payload: MessageCreateOptions | MessageEditOptions) =>
+  String((payload as { content?: string }).content ?? "")
+
 const makeHarness = async () => {
   const sentPayloads = await Effect.runPromise(Ref.make<Array<MessageCreateOptions | MessageEditOptions>>([]))
   const editedPayloads = await Effect.runPromise(Ref.make<Array<MessageCreateOptions | MessageEditOptions>>([]))
@@ -25,6 +28,14 @@ const makeHarness = async () => {
 
   const sourceMessage = unsafeStub<Message>({
     id: "source-message",
+    author: {
+      id: "user-1",
+      username: "user",
+      globalName: null,
+    },
+    inGuild: () => false,
+    member: null,
+    guild: null,
     channel: unsafeStub({
       isSendable: () => true,
       send: (payload: MessageCreateOptions) =>
@@ -107,6 +118,39 @@ const runFinalizationScenario = async (reason: "interrupted" | "shutdown") => {
 }
 
 describe("runProgressWorker", () => {
+  test("sends compaction summaries as progress updates", async () => {
+    const harness = await makeHarness()
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const queue = yield* Queue.unbounded<RunProgressEvent>()
+          const worker = yield* Effect.fork(
+            runProgressWorker(harness.sourceMessage, "/home/opencode/workspace", queue),
+          )
+
+          const ack = yield* Deferred.make<void>()
+          yield* Queue.offer(queue, {
+            type: "compaction-summary",
+            text: "summary text",
+          })
+          yield* Queue.offer(queue, {
+            type: "run-finalizing",
+            ack,
+          })
+          yield* Deferred.await(ack)
+          yield* Fiber.interrupt(worker)
+
+          return {
+            sent: yield* Ref.get(harness.sentPayloads),
+          }
+        }),
+      ),
+    )
+
+    expect(result.sent.map(messageText)).toContain("*🗜️ summary text*")
+  })
+
   test("ignores session-compacted without an active compaction in this worker", async () => {
     const harness = await makeHarness()
 

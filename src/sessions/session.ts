@@ -7,6 +7,7 @@ import type { Ref } from "effect/Ref"
 
 import type { TypingLoop } from "@/discord/messages.ts"
 import type { SessionHandle } from "@/opencode/service.ts"
+import type { PendingPrompt } from "@/sessions/prompt-state.ts"
 
 export type SessionCreateSpec = {
   workdir: string
@@ -39,6 +40,7 @@ export type ActiveRun = {
   workdir: string
   attachmentMessagesById: Map<string, Message>
   progressQueue: Queue<RunProgressEvent>
+  promptState: Ref<PendingPrompt | null>
   followUpQueue: Queue<RunRequest>
   acceptFollowUps: Ref<boolean>
   typing: TypingLoop
@@ -49,6 +51,7 @@ export type ActiveRun = {
 
 export type RunProgressEvent =
   | { type: "run-finalizing"; ack: Deferred<void>; reason?: RunFinalizationReason }
+  | { type: "compaction-summary"; text: string }
   | { type: "patch-updated"; part: PatchPart }
   | { type: "reasoning-completed"; partId: string; text: string }
   | { type: "session-compacting"; part: CompactionPart }

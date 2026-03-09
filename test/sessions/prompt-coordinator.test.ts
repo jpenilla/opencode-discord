@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Queue, Ref } from "effect"
+import { Deferred, Effect, Queue, Ref } from "effect"
 import type { Message } from "discord.js"
 
 import { buildQueuedFollowUpPrompt } from "@/discord/messages.ts"
 import { coordinateActiveRunPrompts } from "@/sessions/prompt-coordinator.ts"
+import { createPromptState } from "@/sessions/prompt-state.ts"
 import { enqueueRunRequest } from "@/sessions/request-routing.ts"
 import type { RunRequest } from "@/sessions/session.ts"
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts"
@@ -37,8 +38,23 @@ const makeSessionHandle = (): SessionHandle =>
     close: () => Effect.void,
   }) satisfies SessionHandle
 
+const resolveCurrentPrompt = (activeRun: Awaited<ReturnType<typeof makeActiveRunState>>, result: PromptResult) =>
+  Ref.get(activeRun.promptState).pipe(
+    Effect.flatMap((prompt) => {
+      if (!prompt) {
+        throw new Error("expected a pending prompt")
+      }
+
+      return Deferred.succeed(prompt.deferred, result).pipe(
+        Effect.ignore,
+        Effect.zipRight(Ref.set(activeRun.promptState, null)),
+      )
+    }),
+  )
+
 const makeActiveRunState = async () => ({
   attachmentMessagesById: new Map<string, Message>(),
+  promptState: await Effect.runPromise(createPromptState()),
   followUpQueue: await Effect.runPromise(Queue.unbounded<RunRequest>()),
   acceptFollowUps: await Effect.runPromise(Ref.make(true)),
 })
@@ -46,14 +62,14 @@ const makeActiveRunState = async () => ({
 describe("coordinateActiveRunPrompts", () => {
   test("prompts the initial batch, absorbs queued follow-ups, and returns the last result", async () => {
     const activeRun = await makeActiveRunState()
-    const promptCalls: string[] = []
-    const prompt = (_session: SessionHandle, value: string) =>
-      Effect.sync(() => {
-        promptCalls.push(value)
-        return {
-          messageId: `msg-${promptCalls.length}`,
-          transcript: `reply-${promptCalls.length}`,
-        } satisfies PromptResult
+    const submitCalls: string[] = []
+    const submitPrompt = (_session: SessionHandle, value: string) =>
+      Effect.gen(function* () {
+        const callIndex = submitCalls.push(value)
+        yield* resolveCurrentPrompt(activeRun, {
+          messageId: `msg-${callIndex}`,
+          transcript: `reply-${callIndex}`,
+        })
       })
 
     await Effect.runPromise(Queue.offerAll(activeRun.followUpQueue, [
@@ -67,12 +83,13 @@ describe("coordinateActiveRunPrompts", () => {
         session: makeSessionHandle(),
         activeRun,
         initialRequests: [makeRequest("m-1", "initial", ["m-1"])],
-        prompt,
+        awaitIdleCompaction: () => Effect.void,
+        submitPrompt,
         logger: makeLogger(),
       }),
     )
 
-    expect(promptCalls).toEqual([
+    expect(submitCalls).toEqual([
       "initial",
       buildQueuedFollowUpPrompt(["follow-1", "follow-2"]),
     ])
@@ -86,14 +103,17 @@ describe("coordinateActiveRunPrompts", () => {
   test("reopens follow-up intake before the follow-up prompt and leaves it closed on exit", async () => {
     const activeRun = await makeActiveRunState()
     const gateSnapshots: boolean[] = []
-    const prompt = (_session: SessionHandle, _value: string) =>
+    const submitPrompt = (_session: SessionHandle, _value: string) =>
       Ref.get(activeRun.acceptFollowUps).pipe(
+        Effect.tap((gate) =>
+          resolveCurrentPrompt(activeRun, {
+            messageId: `msg-${gateSnapshots.length + 1}`,
+            transcript: `reply-${gateSnapshots.length + 1}`,
+          }).pipe(Effect.ignore),
+        ),
         Effect.map((gate) => {
           gateSnapshots.push(gate)
-          return {
-            messageId: `msg-${gateSnapshots.length}`,
-            transcript: `reply-${gateSnapshots.length}`,
-          } satisfies PromptResult
+          return undefined
         }),
       )
 
@@ -105,7 +125,8 @@ describe("coordinateActiveRunPrompts", () => {
         session: makeSessionHandle(),
         activeRun,
         initialRequests: [makeRequest("m-1", "initial")],
-        prompt,
+        awaitIdleCompaction: () => Effect.void,
+        submitPrompt,
         logger: makeLogger(),
       }),
     )
@@ -121,20 +142,20 @@ describe("coordinateActiveRunPrompts", () => {
       queue: sessionQueue,
       activeRun,
     } satisfies Parameters<typeof enqueueRunRequest>[0]
-    const promptCalls: string[] = []
+    const submitCalls: string[] = []
     const queuedFollowUp = makeRequest("m-2", "later", ["m-2", "m-3"])
 
-    const prompt = (_session: SessionHandle, value: string) =>
+    const submitPrompt = (_session: SessionHandle, value: string) =>
       Effect.gen(function* () {
-        promptCalls.push(value)
-        if (promptCalls.length === 1) {
+        const callIndex = submitCalls.push(value)
+        if (callIndex === 1) {
           const destination = yield* enqueueRunRequest(session, queuedFollowUp)
           expect(destination).toBe("follow-up")
         }
-        return {
-          messageId: `msg-${promptCalls.length}`,
-          transcript: `reply-${promptCalls.length}`,
-        } satisfies PromptResult
+        yield* resolveCurrentPrompt(activeRun, {
+          messageId: `msg-${callIndex}`,
+          transcript: `reply-${callIndex}`,
+        })
       })
 
     const result = await Effect.runPromise(
@@ -143,12 +164,13 @@ describe("coordinateActiveRunPrompts", () => {
         session: makeSessionHandle(),
         activeRun,
         initialRequests: [makeRequest("m-1", "initial", ["m-1"])],
-        prompt,
+        awaitIdleCompaction: () => Effect.void,
+        submitPrompt,
         logger: makeLogger(),
       }),
     )
 
-    expect(promptCalls).toEqual([
+    expect(submitCalls).toEqual([
       "initial",
       buildQueuedFollowUpPrompt(["later"]),
     ])

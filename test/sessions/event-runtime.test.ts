@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import type { Event, QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
-import { Chunk, Effect, Queue, Ref } from "effect"
+import type { Event, QuestionAnswer, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
+import { Chunk, Deferred, Effect, Option, Queue, Ref } from "effect"
 import type { Message } from "discord.js"
 
 import { createEventRuntime } from "@/sessions/event-runtime.ts"
+import { beginPendingPrompt, createPromptState } from "@/sessions/prompt-state.ts"
 import { noQuestionOutcome, type ActiveRun, type ChannelSession, type RunProgressEvent } from "@/sessions/session.ts"
 import { unsafeStub } from "../support/stub.ts"
 
@@ -11,6 +12,7 @@ const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref))
 
 const makeSession = async (withActiveRun: boolean) => {
   const progressQueue = await Effect.runPromise(Queue.unbounded<RunProgressEvent>())
+  const promptState = await Effect.runPromise(createPromptState())
   const activeRun = withActiveRun ? unsafeStub<ActiveRun>({
     discordMessage: unsafeStub<Message>({
       id: "discord-message",
@@ -21,6 +23,7 @@ const makeSession = async (withActiveRun: boolean) => {
     workdir: "/home/opencode/workspace",
     attachmentMessagesById: new Map(),
     progressQueue,
+    promptState,
     followUpQueue: {} as ActiveRun["followUpQueue"],
     acceptFollowUps: {} as ActiveRun["acceptFollowUps"],
     typing: {
@@ -49,7 +52,7 @@ const makeSession = async (withActiveRun: boolean) => {
     activeRun,
   })
 
-  return { session, activeRun, progressQueue }
+  return { session, activeRun, progressQueue, promptState }
 }
 
 const makeQuestionAskedEvent = (sessionId = "session-1"): Event =>
@@ -104,6 +107,102 @@ const makeSessionCompactedEvent = (sessionId = "session-1"): Event =>
     },
   })
 
+const makeSessionIdleEvent = (sessionId = "session-1"): Event =>
+  unsafeStub<Event>({
+    type: "session.idle",
+    properties: {
+      sessionID: sessionId,
+    },
+  })
+
+const makeAssistantMessageUpdatedEvent = (input: {
+  id: string
+  parentId: string
+  summary?: boolean
+  mode?: string
+  completed?: boolean
+  error?: { name: "MessageAbortedError"; data: { message: string } }
+}): Event =>
+  unsafeStub<Event>({
+    type: "message.updated",
+    properties: {
+      info: {
+        id: input.id,
+        sessionID: "session-1",
+        role: "assistant",
+        parentID: input.parentId,
+        mode: input.mode ?? "chat",
+        summary: input.summary,
+        error: input.error,
+        providerID: "provider-1",
+        modelID: "model-1",
+        agent: input.summary ? "compaction" : "main",
+        path: {
+          cwd: "/home/opencode/workspace",
+          root: "/home/opencode/workspace",
+        },
+        cost: 0,
+        tokens: {
+          input: 0,
+          output: 0,
+          reasoning: 0,
+          cache: {
+            read: 0,
+            write: 0,
+          },
+        },
+        time: input.completed
+          ? {
+              created: 1,
+              completed: 2,
+            }
+          : {
+              created: 1,
+            },
+      },
+    },
+  })
+
+const makeToolPart = (status: "running" | "error"): ToolPart =>
+  unsafeStub<ToolPart>({
+    id: `part-${status}`,
+    sessionID: "session-1",
+    messageID: "assistant-1",
+    type: "tool",
+    callID: "call-1",
+    tool: "bash",
+    state: status === "running"
+      ? {
+          status: "running",
+          input: {
+            command: "pwd",
+          },
+          title: "Print cwd",
+          time: {
+            start: 1,
+          },
+        }
+      : {
+          status: "error",
+          input: {
+            command: "pwd",
+          },
+          error: "aborted",
+          time: {
+            start: 1,
+            end: 2,
+          },
+        },
+  })
+
+const makeToolEvent = (status: "running" | "error"): Event =>
+  unsafeStub<Event>({
+    type: "message.part.updated",
+    properties: {
+      part: makeToolPart(status),
+    },
+  })
+
 describe("createEventRuntime", () => {
   test("routes question asked events to the question runtime", async () => {
     const { session } = await makeSession(false)
@@ -114,6 +213,13 @@ describe("createEventRuntime", () => {
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun: null } : null),
       handleQuestionEvent: (event) => Ref.update(questionEvents, (current) => [...current, event]),
       finalizeIdleCompactionCard: () => Effect.void,
+      readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
     })
 
     await Effect.runPromise(runtime.handleEvent(makeQuestionAskedEvent()))
@@ -134,6 +240,13 @@ describe("createEventRuntime", () => {
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun: null } : null),
       handleQuestionEvent: (event) => Ref.update(questionEvents, (current) => [...current, event]),
       finalizeIdleCompactionCard: () => Effect.void,
+      readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
     })
 
     await Effect.runPromise(runtime.handleEvent(makeQuestionRepliedEvent()))
@@ -162,6 +275,13 @@ describe("createEventRuntime", () => {
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
       finalizeIdleCompactionCard: () => Effect.void,
+      readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
     })
 
     await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent()))
@@ -182,6 +302,13 @@ describe("createEventRuntime", () => {
       handleQuestionEvent: () => Effect.void,
       finalizeIdleCompactionCard: (sessionId, title, body) =>
         Ref.update(idleUpdates, (current) => [...current, { sessionId, title, body }]),
+      readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
     })
 
     await Effect.runPromise(runtime.handleEvent(makeSessionCompactedEvent()))
@@ -201,6 +328,13 @@ describe("createEventRuntime", () => {
       getSessionContext: () => Effect.succeed(null),
       handleQuestionEvent: () => Ref.update(questionEvents, (count) => count + 1),
       finalizeIdleCompactionCard: () => Ref.update(idleUpdates, (count) => count + 1),
+      readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
     })
 
     await Effect.runPromise(runtime.handleEvent(makeQuestionAskedEvent("missing-session")))
@@ -208,5 +342,143 @@ describe("createEventRuntime", () => {
 
     expect(await getRef(questionEvents)).toBe(0)
     expect(await getRef(idleUpdates)).toBe(0)
+  })
+
+  test("emits compaction summaries into active-run progress updates without completing the prompt", async () => {
+    const { session, activeRun, progressQueue, promptState } = await makeSession(true)
+    const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]))
+
+    await Effect.runPromise(beginPendingPrompt(promptState, "user-1"))
+
+    const runtime = createEventRuntime({
+      getSessionContext: (sessionId) =>
+        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
+      handleQuestionEvent: () => Effect.void,
+      finalizeIdleCompactionCard: () => Effect.void,
+      readPromptResult: (_session, messageId) =>
+        Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
+          Effect.as({
+            messageId,
+            transcript: "summary text",
+          }),
+        ),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
+    })
+
+    await Effect.runPromise(runtime.handleEvent(makeAssistantMessageUpdatedEvent({
+      id: "summary-1",
+      parentId: "synthetic-1",
+      summary: true,
+      mode: "compaction",
+      completed: true,
+    })))
+
+    expect(await getRef(readPromptCalls)).toEqual(["summary-1"])
+    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([{
+      type: "compaction-summary",
+      text: "summary text",
+    }])
+    expect(await Effect.runPromise(Ref.get(promptState))).not.toBeNull()
+  })
+
+  test("waits for the session to go idle after the late terminal tool update before completing the pending prompt", async () => {
+    const { session, activeRun, progressQueue, promptState } = await makeSession(true)
+    const completion = await Effect.runPromise(beginPendingPrompt(promptState, "user-1"))
+
+    const runtime = createEventRuntime({
+      getSessionContext: (sessionId) =>
+        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
+      handleQuestionEvent: () => Effect.void,
+      finalizeIdleCompactionCard: () => Effect.void,
+      readPromptResult: (_session, messageId) =>
+        Effect.succeed({
+          messageId,
+          transcript: "final reply",
+        }),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
+    })
+
+    await Effect.runPromise(runtime.handleEvent(makeToolEvent("running")))
+    await Effect.runPromise(runtime.handleEvent(makeAssistantMessageUpdatedEvent({
+      id: "assistant-1",
+      parentId: "user-1",
+      completed: true,
+    })))
+
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true)
+
+    await Effect.runPromise(runtime.handleEvent(makeToolEvent("error")))
+
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true)
+
+    await Effect.runPromise(runtime.handleEvent(makeSessionIdleEvent()))
+
+    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([
+      {
+        type: "tool-updated",
+        part: makeToolPart("running"),
+      },
+      {
+        type: "tool-updated",
+        part: makeToolPart("error"),
+      },
+    ])
+    expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
+      messageId: "assistant-1",
+      transcript: "final reply",
+    })
+  })
+
+  test("fails the pending prompt when the correlated assistant aborts and the session goes idle", async () => {
+    const { session, activeRun, promptState } = await makeSession(true)
+    const completion = await Effect.runPromise(beginPendingPrompt(promptState, "user-1"))
+    const readPromptCalls = await Effect.runPromise(Ref.make(0))
+
+    const runtime = createEventRuntime({
+      getSessionContext: (sessionId) =>
+        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
+      handleQuestionEvent: () => Effect.void,
+      finalizeIdleCompactionCard: () => Effect.void,
+      readPromptResult: () =>
+        Ref.update(readPromptCalls, (count) => count + 1).pipe(
+          Effect.flatMap(() => Effect.fail(new Error("unexpected prompt result load"))),
+        ),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
+    })
+
+    await Effect.runPromise(runtime.handleEvent(makeAssistantMessageUpdatedEvent({
+      id: "assistant-1",
+      parentId: "user-1",
+      completed: true,
+      error: {
+        name: "MessageAbortedError",
+        data: {
+          message: "aborted",
+        },
+      },
+    })))
+
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true)
+
+    await Effect.runPromise(runtime.handleEvent(makeSessionIdleEvent()))
+
+    const exit = await Effect.runPromise(Effect.exit(Deferred.await(completion)))
+    expect(exit._tag).toBe("Failure")
+    expect(await getRef(readPromptCalls)).toBe(0)
   })
 })

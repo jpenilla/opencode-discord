@@ -4,6 +4,7 @@ import { Deferred, Effect, Ref } from "effect"
 
 import { formatErrorResponse } from "@/discord/formatting.ts"
 import { createCommandRuntime } from "@/sessions/command-runtime.ts"
+import { createPromptState } from "@/sessions/prompt-state.ts"
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts"
 import { unsafeStub } from "../support/stub.ts"
 
@@ -23,10 +24,12 @@ const makeHarness = async (options?: {
   const loggedWarnings = await Effect.runPromise(Ref.make<string[]>([]))
   const typingStopCount = await Effect.runPromise(Ref.make(0))
   const idleCardRef = await Effect.runPromise(Ref.make<Message | null>(null))
+  const idleCompactionActive = await Effect.runPromise(Ref.make(false))
   const idleInterruptRequested = await Effect.runPromise(Ref.make(false))
   const compactStarted = await Effect.runPromise(Deferred.make<void, never>())
   const compactFinish = await Effect.runPromise(Deferred.make<void, never>())
   const compactUpdated = await Effect.runPromise(Deferred.make<void, never>())
+  const promptState = await Effect.runPromise(createPromptState())
 
   const compactionCard = unsafeStub<Message>({
     id: "compaction-card",
@@ -42,6 +45,7 @@ const makeHarness = async (options?: {
     workdir: "/home/opencode/workspace",
     attachmentMessagesById: new Map(),
     progressQueue: {} as ActiveRun["progressQueue"],
+    promptState,
     followUpQueue: {} as ActiveRun["followUpQueue"],
     acceptFollowUps: {} as ActiveRun["acceptFollowUps"],
     typing: {
@@ -97,8 +101,16 @@ const makeHarness = async (options?: {
 
   const runtime = createCommandRuntime({
     getSession: (channelId) => Effect.succeed(channelId === session.channelId ? session : null),
+    hasIdleCompaction: () =>
+      Effect.all([Ref.get(idleCompactionActive), Ref.get(idleCardRef)]).pipe(
+        Effect.map(([active, card]) => active || card !== null),
+      ),
     getIdleCompactionCard: (_sessionId) => Ref.get(idleCardRef),
-    setIdleCompactionCard: (_sessionId, card) => Ref.set(idleCardRef, card),
+    beginIdleCompaction: () => Ref.set(idleCompactionActive, true),
+    setIdleCompactionCard: (_sessionId, card) =>
+      Ref.set(idleCardRef, card).pipe(
+        Effect.zipRight(Ref.set(idleCompactionActive, card !== null)),
+      ),
     setIdleCompactionInterruptRequested: (_sessionId, interruptRequested) => Ref.set(idleInterruptRequested, interruptRequested),
     getIdleCompactionInterruptRequested: (_sessionId) => Ref.get(idleInterruptRequested),
     updateIdleCompactionCard: (_sessionId, title, body) =>
@@ -111,6 +123,7 @@ const makeHarness = async (options?: {
       ),
     finalizeIdleCompactionCard: (_sessionId, title, body) =>
       Ref.set(idleCardRef, null).pipe(
+        Effect.zipRight(Ref.set(idleCompactionActive, false)),
         Effect.zipRight(Ref.update(compactionUpdates, (current) => [...current, { title, body }])),
         Effect.zipRight(Deferred.succeed(compactUpdated, undefined).pipe(Effect.ignore)),
       ),

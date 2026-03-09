@@ -3,6 +3,7 @@ import { Deferred, Effect, Fiber, Queue, Ref } from "effect"
 
 import { decideRunCompletion } from "@/sessions/command-lifecycle.ts"
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts"
+import type { PendingPrompt } from "@/sessions/prompt-state.ts"
 import type { NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts"
 import {
   noQuestionOutcome,
@@ -77,6 +78,7 @@ export const executeRunBatch =
   (session: ChannelSession, initialRequests: NonEmptyRunRequestBatch): Effect.Effect<void, unknown> =>
     Effect.gen(function* () {
       const progressQueue = yield* Queue.unbounded<RunProgressEvent>()
+      const promptState = yield* Ref.make<PendingPrompt | null>(null)
       const followUpQueue = yield* Queue.unbounded<RunRequest>()
       const acceptFollowUps = yield* Ref.make(true)
       const responseMessage = initialRequests[0]!.message
@@ -88,6 +90,7 @@ export const executeRunBatch =
         workdir: session.workdir,
         attachmentMessagesById: new Map<string, Message>(),
         progressQueue,
+        promptState,
         followUpQueue,
         acceptFollowUps,
         typing: runtime.startTyping(responseMessage),

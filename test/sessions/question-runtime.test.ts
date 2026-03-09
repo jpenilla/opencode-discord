@@ -4,6 +4,7 @@ import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
 import { Effect, Ref } from "effect"
 
 import { createQuestionRuntime } from "@/sessions/question-runtime.ts"
+import { createPromptState } from "@/sessions/prompt-state.ts"
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts"
 import { unsafeStub } from "../support/stub.ts"
 
@@ -28,6 +29,7 @@ const makeHarness = async (options?: {
   const typingPauseCount = await Effect.runPromise(Ref.make(0))
   const typingResumeCount = await Effect.runPromise(Ref.make(0))
   const typingStopCount = await Effect.runPromise(Ref.make(0))
+  const promptState = await Effect.runPromise(createPromptState())
 
   const questionMessage: Message = unsafeStub<Message>({
     id: "question-message",
@@ -53,6 +55,7 @@ const makeHarness = async (options?: {
     workdir: "/home/opencode/workspace",
     attachmentMessagesById: new Map(),
     progressQueue: {} as ActiveRun["progressQueue"],
+    promptState,
     followUpQueue: {} as ActiveRun["followUpQueue"],
     acceptFollowUps: {} as ActiveRun["acceptFollowUps"],
     typing: {

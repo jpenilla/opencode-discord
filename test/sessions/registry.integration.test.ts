@@ -100,8 +100,114 @@ const makeSessionCompactedEvent = (): GlobalEvent =>
     },
   })
 
+const makeAssistantMessageUpdatedEvent = (input: {
+  id: string
+  sessionId?: string
+  parentId: string
+  summary?: boolean
+  mode?: string
+}): GlobalEvent =>
+  unsafeStub<GlobalEvent>({
+    payload: {
+      type: "message.updated",
+      properties: {
+        info: {
+          id: input.id,
+          sessionID: input.sessionId ?? "session-1",
+          role: "assistant",
+          parentID: input.parentId,
+          mode: input.mode ?? "chat",
+          summary: input.summary,
+          providerID: "provider-1",
+          modelID: "model-1",
+          agent: input.summary ? "compaction" : "main",
+          path: {
+            cwd: "/home/opencode/workspace",
+            root: "/home/opencode/workspace",
+          },
+          cost: 0,
+          tokens: {
+            input: 0,
+            output: 0,
+            reasoning: 0,
+            cache: {
+              read: 0,
+              write: 0,
+            },
+          },
+          time: {
+            created: 1,
+            completed: 2,
+          },
+        },
+      },
+    },
+  })
+
+const makeToolUpdatedEvent = (input: {
+  sessionId?: string
+  messageId: string
+  status: "running" | "error"
+  callId?: string
+}): GlobalEvent =>
+  unsafeStub<GlobalEvent>({
+    payload: {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: `part-${input.status}`,
+          sessionID: input.sessionId ?? "session-1",
+          messageID: input.messageId,
+          type: "tool",
+          callID: input.callId ?? "call-1",
+          tool: "bash",
+          state: input.status === "running"
+            ? {
+                status: "running",
+                input: {
+                  command: "pwd",
+                },
+                title: "Print cwd",
+                time: {
+                  start: 1,
+                },
+              }
+            : {
+                status: "error",
+                input: {
+                  command: "pwd",
+                },
+                error: "aborted",
+                time: {
+                  start: 1,
+                  end: 2,
+                },
+              },
+        },
+      },
+    },
+  })
+
+const makeSessionIdleEvent = (sessionId = "session-1"): GlobalEvent =>
+  unsafeStub<GlobalEvent>({
+    payload: {
+      type: "session.idle",
+      properties: {
+        sessionID: sessionId,
+      },
+    },
+  })
+
 const makeHarness = async (options: {
-  promptImpl: (input: { prompt: string; callIndex: number }) => Effect.Effect<PromptResult>
+  promptImpl: (input: {
+    prompt: string
+    callIndex: number
+    messageId: string
+    sessionId: string
+    publishEvent: (event: GlobalEvent) => Effect.Effect<void, never>
+    storePromptResult: (result: PromptResult) => Effect.Effect<void>
+    completePrompt: (result: PromptResult) => Effect.Effect<void>
+  }) => Effect.Effect<void, unknown>
   isHealthyImpl?: () => Effect.Effect<boolean>
   createSessionImpl?: (input: { workdir: string; title: string; callIndex: number }) => Effect.Effect<SessionHandle>
   compactSessionImpl?: () => Effect.Effect<void, unknown>
@@ -121,6 +227,7 @@ const makeHarness = async (options: {
   const createSessionCount = await Effect.runPromise(Ref.make(0))
   const replyEvents = await Effect.runPromise(Queue.unbounded<string>())
   const eventQueue = await Effect.runPromise(Queue.unbounded<GlobalEvent>())
+  const promptResults = await Effect.runPromise(Ref.make<Map<string, PromptResult>>(new Map()))
   const persistedSessions = await Effect.runPromise(Ref.make<Map<string, PersistedChannelSession>>(new Map()))
 
   const makePostedMessage = (id: string): Message =>
@@ -146,6 +253,25 @@ const makeHarness = async (options: {
     sendTyping: () => Effect.runPromise(Ref.update(typing, (count) => count + 1)),
     send: sendOnChannel,
   })
+
+  const publishEvent = (event: GlobalEvent) => Queue.offer(eventQueue, event).pipe(Effect.asVoid)
+
+  const storePromptResult = (result: PromptResult) =>
+    Ref.update(promptResults, (current) => {
+      const next = new Map(current)
+      next.set(result.messageId, result)
+      return next
+    })
+
+  const completePrompt = (sessionId: string, userMessageId: string, result: PromptResult) =>
+    storePromptResult(result).pipe(
+      Effect.zipRight(publishEvent(makeAssistantMessageUpdatedEvent({
+        id: result.messageId,
+        sessionId,
+        parentId: userMessageId,
+      }))),
+      Effect.zipRight(publishEvent(makeSessionIdleEvent(sessionId))),
+    )
 
   const commandChannel = unsafeStub<SendableChannels>({
     id: "channel-1",
@@ -287,14 +413,29 @@ const makeHarness = async (options: {
         backend: "bwrap",
         close: () => Effect.void,
       } as SessionHandle),
-    prompt: (_session, prompt) =>
+    submitPrompt: (_session, prompt, messageId) =>
       Ref.updateAndGet(promptCalls, (current) => [...current, prompt]).pipe(
         Effect.flatMap((calls) =>
           options.promptImpl({
             prompt,
             callIndex: calls.length,
+            messageId,
+            sessionId: _session.sessionId,
+            publishEvent,
+            storePromptResult,
+            completePrompt: (result) => completePrompt(_session.sessionId, messageId, result),
           }),
         ),
+      ),
+    readPromptResult: (_session, messageId) =>
+      Ref.get(promptResults).pipe(
+        Effect.map((results) => {
+          const result = results.get(messageId)
+          if (!result) {
+            throw new Error(`missing prompt result ${messageId}`)
+          }
+          return result
+        }),
       ),
     interruptSession: () =>
       Ref.update(interruptCalls, (count) => count + 1).pipe(
@@ -375,8 +516,8 @@ const makeHarness = async (options: {
 describe("ChannelSessionsLive integration", () => {
   test("submits a message, prompts opencode, and replies with the final response", async () => {
     const harness = await makeHarness({
-      promptImpl: () =>
-        Effect.succeed({
+      promptImpl: ({ completePrompt }) =>
+        completePrompt({
           messageId: "assistant-1",
           transcript: "done",
         }),
@@ -409,16 +550,16 @@ describe("ChannelSessionsLive integration", () => {
     const firstPromptStarted = await Effect.runPromise(Deferred.make<void>())
     const allowFirstPromptToFinish = await Effect.runPromise(Deferred.make<void>())
     const harness = await makeHarness({
-      promptImpl: ({ prompt, callIndex }) =>
+      promptImpl: ({ prompt, callIndex, completePrompt }) =>
         callIndex === 1
           ? Deferred.succeed(firstPromptStarted, undefined).pipe(
               Effect.zipRight(Deferred.await(allowFirstPromptToFinish)),
-              Effect.as({
+              Effect.zipRight(completePrompt({
                 messageId: "assistant-1",
                 transcript: "intermediate",
-              }),
+              })),
             )
-          : Effect.succeed({
+          : completePrompt({
               messageId: "assistant-2",
               transcript: `final:${prompt}`,
             }),
@@ -464,12 +605,99 @@ describe("ChannelSessionsLive integration", () => {
     ])
   })
 
+  test("surfaces compaction summaries as progress updates and still replies with the direct assistant result", async () => {
+    const harness = await makeHarness({
+      promptImpl: ({ publishEvent, storePromptResult, completePrompt, sessionId }) =>
+        storePromptResult({
+          messageId: "summary-1",
+          transcript: "summary text",
+        }).pipe(
+          Effect.zipRight(publishEvent(makeAssistantMessageUpdatedEvent({
+            id: "summary-1",
+            sessionId,
+            parentId: "synthetic-1",
+            summary: true,
+            mode: "compaction",
+          }))),
+          Effect.zipRight(completePrompt({
+            messageId: "assistant-1",
+            transcript: "final reply",
+          })),
+        ),
+    })
+    const message = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    })
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions
+          yield* sessions.submit(message, { prompt: "hello" })
+          expect(yield* Queue.take(harness.replyEvents)).toBe("*🗜️ summary text*")
+          expect(yield* Queue.take(harness.replyEvents)).toBe("final reply")
+        }).pipe(Effect.provide(harness.layer)),
+      ),
+    )
+
+    expect(await getRef(harness.replies)).toEqual(["final reply"])
+  })
+
+  test("waits for the late aborted-tool update before finalizing the run UI", async () => {
+    const harness = await makeHarness({
+      promptImpl: ({ publishEvent, storePromptResult, messageId, sessionId }) =>
+        storePromptResult({
+          messageId: "assistant-1",
+          transcript: "done",
+        }).pipe(
+          Effect.zipRight(publishEvent(makeToolUpdatedEvent({
+            sessionId,
+            messageId: "assistant-1",
+            status: "running",
+          }))),
+          Effect.zipRight(publishEvent(makeAssistantMessageUpdatedEvent({
+            id: "assistant-1",
+            sessionId,
+            parentId: messageId,
+          }))),
+          Effect.zipRight(publishEvent(makeToolUpdatedEvent({
+            sessionId,
+            messageId: "assistant-1",
+            status: "error",
+          }))),
+          Effect.zipRight(publishEvent(makeSessionIdleEvent(sessionId))),
+        ),
+    })
+    const message = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    })
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions
+          yield* sessions.submit(message, { prompt: "hello" })
+          expect(yield* Queue.take(harness.replyEvents)).toBe("done")
+        }).pipe(Effect.provide(harness.layer)),
+      ),
+    )
+
+    expect((await getRef(harness.sentPayloads)).map(cardText)).toContain(
+      "**💻 🛠️ `bash` Running**\n- Command: `pwd`\n- Purpose: Print cwd",
+    )
+    expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
+      "**💻 ❌ `bash` Failed in 0.00s**\n- Command: `pwd`\n- Error: `aborted`",
+    )
+  })
+
   test("runs /compact through the live layer and posts a channel info card", async () => {
     const compactStarted = await Effect.runPromise(Deferred.make<void>())
     const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>())
     const harness = await makeHarness({
-      promptImpl: () =>
-        Effect.succeed({
+      promptImpl: ({ completePrompt }) =>
+        completePrompt({
           messageId: "assistant-1",
           transcript: "done",
         }),
@@ -567,8 +795,8 @@ describe("ChannelSessionsLive integration", () => {
     const compactStarted = await Effect.runPromise(Deferred.make<void>())
     const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>())
     const harness = await makeHarness({
-      promptImpl: () =>
-        Effect.succeed({
+      promptImpl: ({ completePrompt }) =>
+        completePrompt({
           messageId: "assistant-1",
           transcript: "hello",
         }),
@@ -621,8 +849,8 @@ describe("ChannelSessionsLive integration", () => {
     const compactStarted = await Effect.runPromise(Deferred.make<void>())
     const allowCompactToFinish = await Effect.runPromise(Deferred.make<void, Error>())
     const harness = await makeHarness({
-      promptImpl: () =>
-        Effect.succeed({
+      promptImpl: ({ completePrompt }) =>
+        completePrompt({
           messageId: "assistant-1",
           transcript: "hello",
         }),
@@ -666,18 +894,18 @@ describe("ChannelSessionsLive integration", () => {
     const secondPromptStarted = await Effect.runPromise(Deferred.make<void>())
     const allowSecondPromptToFinish = await Effect.runPromise(Deferred.make<void>())
     const harness = await makeHarness({
-      promptImpl: ({ callIndex }) =>
+      promptImpl: ({ callIndex, completePrompt }) =>
         callIndex === 1
-          ? Effect.succeed({
+          ? completePrompt({
               messageId: "assistant-1",
               transcript: "hello",
             })
           : Deferred.succeed(secondPromptStarted, undefined).pipe(
               Effect.zipRight(Deferred.await(allowSecondPromptToFinish)),
-              Effect.as({
+              Effect.zipRight(completePrompt({
                 messageId: "assistant-2",
                 transcript: "later",
-              }),
+              })),
             ),
       compactSessionImpl: () =>
         Deferred.succeed(compactStarted, undefined).pipe(
@@ -732,13 +960,13 @@ describe("ChannelSessionsLive integration", () => {
     const healthy = await Effect.runPromise(Ref.make(true))
     const createSessionCount = await Effect.runPromise(Ref.make(0))
     const harness = await makeHarness({
-      promptImpl: ({ callIndex }) =>
+      promptImpl: ({ callIndex, completePrompt }) =>
         callIndex === 1
           ? unsafeEffect(Effect.gen(function* () {
               yield* Ref.set(healthy, false)
               return yield* Effect.fail(new Error("boom"))
             }))
-          : Effect.succeed({
+          : completePrompt({
               messageId: "assistant-2",
               transcript: "recovered",
             }),
@@ -793,13 +1021,13 @@ describe("ChannelSessionsLive integration", () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>())
     const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>())
     const harness = await makeHarness({
-      promptImpl: () =>
+      promptImpl: ({ completePrompt }) =>
         Deferred.succeed(promptStarted, undefined).pipe(
           Effect.zipRight(Deferred.await(allowPromptToFinish)),
-          Effect.as({
+          Effect.zipRight(completePrompt({
             messageId: "assistant-1",
             transcript: "question complete",
-          }),
+          })),
         ),
     })
     const message = harness.makeMessage({
@@ -830,13 +1058,13 @@ describe("ChannelSessionsLive integration", () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>())
     const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>())
     const harness = await makeHarness({
-      promptImpl: () =>
+      promptImpl: ({ completePrompt }) =>
         Deferred.succeed(promptStarted, undefined).pipe(
           Effect.zipRight(Deferred.await(allowPromptToFinish)),
-          Effect.as({
+          Effect.zipRight(completePrompt({
             messageId: "assistant-1",
             transcript: "done",
-          }),
+          })),
         ),
     })
     const message = harness.makeMessage({
@@ -875,13 +1103,13 @@ describe("ChannelSessionsLive integration", () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>())
     const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>())
     const harness = await makeHarness({
-      promptImpl: () =>
+      promptImpl: ({ completePrompt }) =>
         Deferred.succeed(promptStarted, undefined).pipe(
           Effect.zipRight(Deferred.await(allowPromptToFinish)),
-          Effect.as({
+          Effect.zipRight(completePrompt({
             messageId: "assistant-1",
             transcript: "",
-          }),
+          })),
         ),
       failComponentReplies: true,
     })
