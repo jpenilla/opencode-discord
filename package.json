@@ -8,7 +8,8 @@
   "scripts": {
     "dev": "bun --env-file=.env src/index.ts",
     "start": "bun --env-file=.env src/index.ts",
-    "typecheck": "tsgo -p tsconfig.json"
+    "typecheck:root": "tsgo -p tsconfig.json",
+    "typecheck": "bun run typecheck:root && bun run --cwd opencode typecheck"
   },
   "dependencies": {
     "@discordjs/builders": "^1.13.1",

@@ -2,6 +2,9 @@
   "name": "opencode-discord-tools",
   "private": true,
   "type": "module",
+  "scripts": {
+    "typecheck": "tsgo -p tsconfig.json"
+  },
   "dependencies": {
     "@opencode-ai/plugin": "^1.2.21"
   }
