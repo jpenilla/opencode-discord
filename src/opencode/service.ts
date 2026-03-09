@@ -34,7 +34,7 @@ type SessionModel = {
 }
 
 export type OpencodeServiceShape = {
-  createSession: (workdir: string, title: string) => Effect.Effect<SessionHandle>
+  createSession: (workdir: string, title: string, systemPromptAppend?: string) => Effect.Effect<SessionHandle>
   prompt: (session: SessionHandle, prompt: string) => Effect.Effect<PromptResult>
   interruptSession: (session: SessionHandle) => Effect.Effect<void>
   compactSession: (session: SessionHandle) => Effect.Effect<void>
@@ -240,12 +240,13 @@ export const OpencodeServiceLive = Layer.scoped(
       : Effect.succeed({
           configDir: OPENCODE_CONFIG_DIR,
         }))
-    const launchServer = (workdir: string) =>
+    const launchServer = (workdir: string, systemPromptAppend?: string) =>
       Effect.promise(() =>
         launchSandboxedServer({
           config,
           configDir: sandboxConfig.configDir,
           workdir,
+          systemPromptAppend,
         }),
       ).pipe(
         Effect.tapError((error) =>
@@ -272,9 +273,9 @@ export const OpencodeServiceLive = Layer.scoped(
     }
 
     return {
-      createSession: (workdir, title) =>
+      createSession: (workdir, title, systemPromptAppend) =>
         Effect.gen(function* () {
-          const server = yield* launchServer(workdir)
+          const server = yield* launchServer(workdir, systemPromptAppend)
           const clientDirectory = server.backend === "bwrap" ? SANDBOX_WORKSPACE_DIR : workdir
 
           const client = createOpencodeClient({

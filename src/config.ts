@@ -3,6 +3,7 @@ import { Context, Effect, Layer } from "effect"
 export type AppConfigShape = {
   discordToken: string
   triggerPhrase: string
+  sessionInstructions: string
   toolBridgeSocketPath: string
   toolBridgeToken: string
   sandboxBackend: "auto" | "unsafe-dev" | "bwrap"
@@ -46,6 +47,7 @@ export const AppConfigLive = Layer.effect(
     return {
       discordToken,
       triggerPhrase: Bun.env.TRIGGER_PHRASE ?? "hey opencode",
+      sessionInstructions: Bun.env.SESSION_INSTRUCTIONS ?? "",
       toolBridgeSocketPath,
       toolBridgeToken: crypto.randomUUID(),
       sandboxBackend: parseSandboxBackend(Bun.env.SANDBOX_BACKEND),

@@ -17,6 +17,7 @@ import {
   sendFinalResponse,
   startTypingLoop,
 } from "@/discord/messages.ts"
+import { buildSessionSystemAppend } from "@/discord/system-context.ts"
 import {
   buildQuestionAnswers,
   buildQuestionModal,
@@ -786,14 +787,19 @@ export const ChannelSessionsLive = Layer.scoped(
       Effect.gen(function* () {
         const { rootDir, workdir } = yield* createSessionPaths()
         let opencodeSession: ChannelSession["opencode"] | null = null
+        const systemPromptAppend = buildSessionSystemAppend({
+          message,
+          additionalInstructions: config.sessionInstructions,
+        })
 
         try {
-          opencodeSession = yield* opencode.createSession(workdir, sessionTitle(message.channelId))
+          opencodeSession = yield* opencode.createSession(workdir, sessionTitle(message.channelId), systemPromptAppend)
           const queue = yield* Queue.unbounded<RunRequest>()
 
           const session: ChannelSession = {
             channelId: message.channelId,
             opencode: opencodeSession,
+            systemPromptAppend,
             rootDir,
             workdir,
             queue,
@@ -857,7 +863,11 @@ export const ChannelSessionsLive = Layer.scoped(
           }
 
           const previous = current.opencode
-          const replacement = yield* opencode.createSession(current.workdir, sessionTitle(message.channelId))
+          const replacement = yield* opencode.createSession(
+            current.workdir,
+            sessionTitle(message.channelId),
+            current.systemPromptAppend,
+          )
           yield* replaceSessionHandle(current, replacement)
           yield* previous.close().pipe(Effect.ignore)
           yield* logger.warn("recovered channel session", {

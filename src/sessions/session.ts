@@ -42,6 +42,7 @@ export type RunProgressEvent =
 export type ChannelSession = {
   channelId: string
   opencode: SessionHandle
+  systemPromptAppend?: string
   rootDir: string
   workdir: string
   queue: Queue<RunRequest>

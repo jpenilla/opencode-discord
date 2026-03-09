@@ -40,6 +40,7 @@ type LaunchSandboxedServerInput = {
   >
   configDir: string
   workdir: string
+  systemPromptAppend?: string
 }
 
 const DEFAULT_BWRAP_READ_ONLY_PATHS = [
@@ -428,6 +429,7 @@ const baseServerEnvironment = (
   XDG_CACHE_HOME: xdg.cache,
   OPENCODE_DISCORD_BRIDGE_SOCKET: bridgeSocketPath,
   OPENCODE_DISCORD_BRIDGE_TOKEN: input.config.toolBridgeToken,
+  ...(input.systemPromptAppend?.trim() ? { OPENCODE_DISCORD_SYSTEM_APPEND: input.systemPromptAppend } : {}),
   OPENCODE_CONFIG_DIR: input.configDir,
   TMPDIR: "/tmp",
 })

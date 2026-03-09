@@ -150,6 +150,8 @@ Main variables:
   Discord bot token. Required.
 - `TRIGGER_PHRASE`
   Leading text trigger. Default: `hey opencode`
+- `SESSION_INSTRUCTIONS`
+  Optional extra instructions appended to OpenCode's system prompt for each Discord channel session
 - `SANDBOX_BACKEND`
   One of `auto`, `bwrap`, or `unsafe-dev`
 - `OPENCODE_BIN`
@@ -166,6 +168,7 @@ Main variables:
 Notes:
 
 - `DISCORD_TOKEN` is the only required env var.
+- `SESSION_INSTRUCTIONS` is applied per OpenCode session, not injected into every visible Discord message.
 - `SANDBOX_READ_ONLY_PATHS` replaces the default `bwrap` read-only bind list; it does not append to it.
 - `SANDBOX_ENV_PASSTHROUGH` is for additional env vars only. OpenCode auth should usually come from host state.
 
