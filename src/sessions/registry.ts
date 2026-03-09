@@ -57,6 +57,7 @@ import { collectProgressEvents, runProgressWorker } from "@/sessions/progress.ts
 import { expireQuestionBatch, setQuestionBatchStatus } from "@/sessions/question-batch-state.ts"
 import { rejectQuestionBatch, submitQuestionBatch } from "@/sessions/question-submission.ts"
 import { enqueueRunRequest } from "@/sessions/request-routing.ts"
+import { executeRunBatch } from "@/sessions/run-executor.ts"
 import { admitRequestBatchToActiveRun, type NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts"
 import {
   buildSessionCreateSpec,
@@ -608,33 +609,6 @@ export const ChannelSessionsLive = Layer.scoped(
       Effect.forkScoped,
     )
 
-    const finishProgressWorker = (
-      session: ChannelSession,
-      progressQueue: Queue.Queue<RunProgressEvent>,
-      progressFiber: Fiber.RuntimeFiber<never, unknown>,
-    ): FallibleEffect<void> =>
-      Effect.gen(function* () {
-        const finalizingAck = yield* Deferred.make<void>()
-        const progressFiberExit = yield* progressFiber.poll
-        if (progressFiberExit._tag === "None") {
-          yield* Queue.offer(progressQueue, { type: "run-finalizing", ack: finalizingAck })
-          const finalizingResult = yield* Deferred.await(finalizingAck).pipe(Effect.timeoutOption("2 seconds"))
-          if (finalizingResult._tag === "None") {
-            yield* logger.warn("progress worker finalization timed out", {
-              channelId: session.channelId,
-              sessionId: session.opencode.sessionId,
-            })
-          }
-          return
-        }
-
-        yield* logger.warn("progress worker exited before finalization", {
-          channelId: session.channelId,
-          sessionId: session.opencode.sessionId,
-          exit: String(progressFiberExit.value),
-        })
-      })
-
     const sendErrorReply = (message: Message, title: string, error: unknown) =>
       Effect.promise(() =>
         message.reply({
@@ -649,104 +623,36 @@ export const ChannelSessionsLive = Layer.scoped(
     const sendQuestionUiFailure = (message: Message, error: unknown) =>
       sendErrorReply(message, "## ❌ Failed to show questions", error)
 
-    const processRequestBatch = (
-      session: ChannelSession,
-      initialRequests: NonEmptyRunRequestBatch,
-    ): FallibleEffect<void> =>
-      Effect.gen(function* () {
-        const progressQueue = yield* Queue.unbounded<RunProgressEvent>()
-        const followUpQueue = yield* Queue.unbounded<RunRequest>()
-        const acceptFollowUps = yield* Ref.make(true)
-        const responseMessage = initialRequests[0]!.message
-        const progressFiber = yield* runProgressWorker(responseMessage, session.workdir, progressQueue).pipe(Effect.fork)
-        const activeRun: ActiveRun = {
-          discordMessage: responseMessage,
-          workdir: session.workdir,
-          attachmentMessagesById: new Map<string, Message>(),
-          progressQueue,
-          followUpQueue,
-          acceptFollowUps,
-          typing: startTypingLoop(responseMessage.channel),
-          questionOutcome: noQuestionOutcome(),
-          interruptRequested: false,
-        }
-        yield* setActiveRun(session, activeRun)
-
-        const stopTyping = Effect.promise(() => activeRun.typing.stop())
-        let failed = false
-
-        try {
-          const result = yield* coordinateActiveRunPrompts({
-            channelId: session.channelId,
-            session: session.opencode,
-            activeRun,
-            initialRequests,
-            prompt: opencode.prompt,
-            logger,
-          })
-
-          const questionOutcome = activeRun.questionOutcome
-          const completion = decideRunCompletion({
-            transcript: result.transcript,
-            questionOutcome,
-            interruptRequested: activeRun.interruptRequested,
-          })
-
-          yield* stopTyping
-          yield* finishProgressWorker(session, progressQueue, progressFiber)
-          switch (completion.type) {
-            case "send-final-response":
-              yield* Effect.promise(() => sendFinalResponse({ message: responseMessage, text: result.transcript }))
-              break
-            case "send-question-ui-failure":
-              yield* sendQuestionUiFailure(responseMessage, completion.message)
-              break
-            case "suppress-response":
-              break
-          }
-          yield* logger.info("completed run", {
-            channelId: session.channelId,
-            sessionId: session.opencode.sessionId,
-            opencodeMessageId: result.messageId,
-          })
-        } catch (error) {
-          if (activeRun.interruptRequested) {
-            yield* logger.info("interrupted run", {
-              channelId: session.channelId,
-              sessionId: session.opencode.sessionId,
-              error: formatError(error),
-            })
-            yield* stopTyping
-          } else {
-            yield* logger.error("run failed", {
-              channelId: session.channelId,
-              sessionId: session.opencode.sessionId,
-              error: formatError(error),
-            })
-            yield* stopTyping
-            yield* sendRunFailure(responseMessage, error)
-            failed = true
-          }
-        } finally {
-          yield* stopTyping
-          yield* setActiveRun(session, null)
-          yield* expireQuestionBatchesForSession(session.opencode.sessionId)
-          yield* Fiber.interrupt(progressFiber)
-        }
-
-        if (failed) {
-          yield* ensureSessionHealth(session, responseMessage, "run failed with unhealthy opencode session", false).pipe(
-            Effect.ignore,
-          )
-        }
-      })
+    const runExecutor = executeRunBatch({
+      runPrompts: ({ channelId, session, activeRun, initialRequests }) =>
+        coordinateActiveRunPrompts({
+          channelId,
+          session,
+          activeRun,
+          initialRequests,
+          prompt: opencode.prompt,
+          logger,
+        }),
+      runProgressWorker,
+      startTyping: (message) => startTypingLoop(message.channel),
+      setActiveRun,
+      expireQuestionBatches: expireQuestionBatchesForSession,
+      ensureSessionHealthAfterFailure: (session, responseMessage) =>
+        ensureSessionHealth(session, responseMessage, "run failed with unhealthy opencode session", false),
+      sendFinalResponse: (message, text) =>
+        Effect.promise(() => sendFinalResponse({ message, text })),
+      sendRunFailure,
+      sendQuestionUiFailure,
+      logger,
+      formatError,
+    })
 
     const worker = (session: ChannelSession): Effect.Effect<never> =>
       Effect.forever(
         Queue.take(session.queue).pipe(
           Effect.flatMap((first) =>
             Queue.takeUpTo(session.queue, 64).pipe(
-              Effect.flatMap((rest) => processRequestBatch(session, [first, ...Chunk.toReadonlyArray(rest)])),
+              Effect.flatMap((rest) => runExecutor(session, [first, ...Chunk.toReadonlyArray(rest)])),
             ),
           ),
           Effect.catchAll((error) =>
