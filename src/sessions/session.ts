@@ -58,6 +58,8 @@ export type ChannelSession = {
   systemPromptAppend?: string
   rootDir: string
   workdir: string
+  createdAt: number
+  lastActivityAt: number
   queue: Queue<RunRequest>
   activeRun: ActiveRun | null
 }

@@ -34,13 +34,14 @@ type SessionModel = {
 }
 
 export type OpencodeServiceShape = {
-  createSession: (workdir: string, title: string, systemPromptAppend?: string) => Effect.Effect<SessionHandle>
-  prompt: (session: SessionHandle, prompt: string) => Effect.Effect<PromptResult>
-  interruptSession: (session: SessionHandle) => Effect.Effect<void>
-  compactSession: (session: SessionHandle) => Effect.Effect<void>
-  replyToQuestion: (session: SessionHandle, requestID: string, answers: Array<QuestionAnswer>) => Effect.Effect<void>
-  rejectQuestion: (session: SessionHandle, requestID: string) => Effect.Effect<void>
-  isHealthy: (session: SessionHandle) => Effect.Effect<boolean>
+  createSession: (workdir: string, title: string, systemPromptAppend?: string) => Effect.Effect<SessionHandle, unknown>
+  attachSession: (workdir: string, sessionId: string, systemPromptAppend?: string) => Effect.Effect<SessionHandle, unknown>
+  prompt: (session: SessionHandle, prompt: string) => Effect.Effect<PromptResult, unknown>
+  interruptSession: (session: SessionHandle) => Effect.Effect<void, unknown>
+  compactSession: (session: SessionHandle) => Effect.Effect<void, unknown>
+  replyToQuestion: (session: SessionHandle, requestID: string, answers: Array<QuestionAnswer>) => Effect.Effect<void, unknown>
+  rejectQuestion: (session: SessionHandle, requestID: string) => Effect.Effect<void, unknown>
+  isHealthy: (session: SessionHandle) => Effect.Effect<boolean, unknown>
 }
 
 export class OpencodeService extends Context.Tag("OpencodeService")<OpencodeService, OpencodeServiceShape>() {}
@@ -167,6 +168,16 @@ const makeSessionCloser = (input: {
     })
   })
 
+type SessionBootstrap = {
+  server: {
+    url: string
+    backend: ResolvedSandboxBackend
+    close: () => void
+  }
+  client: OpencodeClient
+  close: () => Effect.Effect<void>
+}
+
 const resolveSessionModel = (session: SessionHandle) =>
   Effect.gen(function* () {
     const result = yield* Effect.promise(() =>
@@ -259,6 +270,36 @@ export const OpencodeServiceLive = Layer.scoped(
         ),
       )
 
+    const bootstrapSession = (workdir: string, systemPromptAppend?: string): Effect.Effect<SessionBootstrap, unknown> =>
+      Effect.gen(function* () {
+        const server = yield* launchServer(workdir, systemPromptAppend)
+        const clientDirectory = server.backend === "bwrap" ? SANDBOX_WORKSPACE_DIR : workdir
+        const client = createOpencodeClient({
+          baseUrl: server.url,
+          directory: clientDirectory,
+        })
+        const abortController = new AbortController()
+        const eventFiber = yield* forkEventStream({
+          client,
+          eventQueue,
+          logger,
+          signal: abortController.signal,
+          backend: server.backend,
+          workdir,
+        })
+        const close = makeSessionCloser({
+          abortController,
+          eventFiber,
+          closeServer: server.close,
+        })
+
+        return {
+          server,
+          client,
+          close,
+        } satisfies SessionBootstrap
+      })
+
     yield* logger.info("configured opencode sandbox backend", {
       backend: resolvedBackend,
       configDir: sandboxConfig.configDir,
@@ -275,50 +316,64 @@ export const OpencodeServiceLive = Layer.scoped(
     return {
       createSession: (workdir, title, systemPromptAppend) =>
         Effect.gen(function* () {
-          const server = yield* launchServer(workdir, systemPromptAppend)
-          const clientDirectory = server.backend === "bwrap" ? SANDBOX_WORKSPACE_DIR : workdir
-
-          const client = createOpencodeClient({
-            baseUrl: server.url,
-            directory: clientDirectory,
-          })
-          const abortController = new AbortController()
-          const eventFiber = yield* forkEventStream({
-            client,
-            eventQueue,
-            logger,
-            signal: abortController.signal,
-            backend: server.backend,
-            workdir,
-          })
-          const close = makeSessionCloser({
-            abortController,
-            eventFiber,
-            closeServer: server.close,
-          })
+          const bootstrap = yield* bootstrapSession(workdir, systemPromptAppend)
 
           try {
-            const result = yield* Effect.promise(() => client.session.create({ title }))
+            const result = yield* Effect.promise(() => bootstrap.client.session.create({ title }))
             if (result.error || !result.data) {
               throw new Error(`Failed to create opencode session: ${formatValue(result.error)}`)
             }
 
             yield* logger.info("created opencode session", {
               sessionId: result.data.id,
-              backend: server.backend,
-              serverUrl: server.url,
+              backend: bootstrap.server.backend,
+              serverUrl: bootstrap.server.url,
               workdir,
             })
 
             return {
               sessionId: result.data.id,
-              client,
+              client: bootstrap.client,
               workdir,
-              backend: server.backend,
-              close,
+              backend: bootstrap.server.backend,
+              close: bootstrap.close,
             } satisfies SessionHandle
           } catch (error) {
-            yield* close().pipe(Effect.ignore)
+            yield* bootstrap.close().pipe(Effect.ignore)
+            throw error
+          }
+        }),
+      attachSession: (workdir, sessionId, systemPromptAppend) =>
+        Effect.gen(function* () {
+          const bootstrap = yield* bootstrapSession(workdir, systemPromptAppend)
+
+          try {
+            const result = yield* Effect.promise(() =>
+              bootstrap.client.session.get({
+                sessionID: sessionId,
+              }),
+            )
+
+            if (result.error || !result.data) {
+              throw new Error(`Failed to attach opencode session: ${formatValue(result.error)}`)
+            }
+
+            yield* logger.info("attached opencode session", {
+              sessionId,
+              backend: bootstrap.server.backend,
+              serverUrl: bootstrap.server.url,
+              workdir,
+            })
+
+            return {
+              sessionId,
+              client: bootstrap.client,
+              workdir,
+              backend: bootstrap.server.backend,
+              close: bootstrap.close,
+            } satisfies SessionHandle
+          } catch (error) {
+            yield* bootstrap.close().pipe(Effect.ignore)
             throw error
           }
         }),

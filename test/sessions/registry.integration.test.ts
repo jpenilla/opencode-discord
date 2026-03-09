@@ -8,6 +8,7 @@ import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 import { type OpencodeEventQueueShape, OpencodeEventQueue } from "@/opencode/events.ts"
 import { type OpencodeServiceShape, OpencodeService, type PromptResult, type SessionHandle } from "@/opencode/service.ts"
 import { ChannelSessions, ChannelSessionsLive } from "@/sessions/registry.ts"
+import { SessionStore, type PersistedChannelSession, type SessionStoreShape } from "@/state/store.ts"
 import { Logger, type LoggerShape } from "@/util/logging.ts"
 import { unsafeEffect, unsafeStub } from "../support/stub.ts"
 
@@ -15,6 +16,8 @@ const makeConfig = (): AppConfigShape => ({
   discordToken: "discord-token",
   triggerPhrase: "hey opencode",
   sessionInstructions: "",
+  stateDir: "./storage-test",
+  sessionIdleTimeoutMs: 30 * 60 * 1_000,
   toolBridgeSocketPath: "/tmp/bridge.sock",
   toolBridgeToken: "bridge-token",
   sandboxBackend: "bwrap",
@@ -95,6 +98,7 @@ const makeHarness = async (options: {
   const createSessionCount = await Effect.runPromise(Ref.make(0))
   const replyEvents = await Effect.runPromise(Queue.unbounded<string>())
   const eventQueue = await Effect.runPromise(Queue.unbounded<GlobalEvent>())
+  const persistedSessions = await Effect.runPromise(Ref.make<Map<string, PersistedChannelSession>>(new Map()))
 
   const makePostedMessage = (id: string): Message =>
     unsafeStub<Message>({
@@ -252,6 +256,14 @@ const makeHarness = async (options: {
           ),
         ),
       ),
+    attachSession: (workdir, sessionId) =>
+      Effect.succeed({
+        sessionId,
+        client: {} as never,
+        workdir,
+        backend: "bwrap",
+        close: () => Effect.void,
+      } as SessionHandle),
     prompt: (_session, prompt) =>
       Ref.updateAndGet(promptCalls, (current) => [...current, prompt]).pipe(
         Effect.flatMap((calls) =>
@@ -274,10 +286,40 @@ const makeHarness = async (options: {
     isHealthy: () => options.isHealthyImpl?.() ?? Effect.succeed(true),
   }
 
+  const sessionStore: SessionStoreShape = {
+    getSession: (channelId) =>
+      Ref.get(persistedSessions).pipe(Effect.map((sessions) => sessions.get(channelId) ?? null)),
+    upsertSession: (session) =>
+      Ref.update(persistedSessions, (sessions) => {
+        const next = new Map(sessions)
+        next.set(session.channelId, session)
+        return next
+      }),
+    touchSession: (channelId, lastActivityAt) =>
+      Ref.update(persistedSessions, (sessions) => {
+        const next = new Map(sessions)
+        const current = next.get(channelId)
+        if (current) {
+          next.set(channelId, {
+            ...current,
+            lastActivityAt,
+          })
+        }
+        return next
+      }),
+    deleteSession: (channelId) =>
+      Ref.update(persistedSessions, (sessions) => {
+        const next = new Map(sessions)
+        next.delete(channelId)
+        return next
+      }),
+  }
+
   const deps = Layer.mergeAll(
     Layer.succeed(AppConfig, makeConfig()),
     Layer.succeed(Logger, makeLogger()),
     Layer.succeed(OpencodeService, service),
+    Layer.succeed(SessionStore, sessionStore),
     Layer.succeed(OpencodeEventQueue, {
       publish: (event) => Queue.offer(eventQueue, event).pipe(Effect.asVoid),
       take: () => Queue.take(eventQueue),

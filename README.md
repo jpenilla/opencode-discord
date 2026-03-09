@@ -2,7 +2,7 @@
 
 Discord frontend for [OpenCode](https://github.com/sst/opencode).
 
-This project runs OpenCode behind a Discord bot. Each Discord text channel gets its own long-lived OpenCode session and temp workdir, so channel conversations stay isolated while still feeling persistent across messages.
+This project runs OpenCode behind a Discord bot. Each Discord text channel gets its own long-lived OpenCode thread and persistent session home/workspace, so channel conversations stay isolated and survive bot restarts.
 
 ## Overview
 
@@ -10,7 +10,7 @@ What the bot does:
 
 - Creates one OpenCode session per Discord channel.
 - Lets different channels run concurrently.
-- Reuses the same channel session across messages for the lifetime of the process.
+- Reuses the same channel session across messages and lazily reattaches it after bot restarts.
 - Bridges a small set of Discord-native actions back into OpenCode as tools.
 - Supports interactive OpenCode question prompts with Discord components and modals.
 - Exposes slash commands for compaction and interruption.
@@ -19,8 +19,9 @@ Current scope:
 
 - Supported: standard guild text channels.
 - Ignored: DMs, threads, forum posts, announcement channels, and bot-authored messages.
-- State is in memory only.
-- Session workdirs live under `/tmp`.
+- Channel session metadata is persisted in SQLite.
+- Per-channel session homes/workspaces are stored under `./storage` by default.
+- In-flight runs, queued follow-ups, typing state, and question UI are not restored after restart.
 
 ## How Invocation Works
 
@@ -40,15 +41,16 @@ Default trigger phrase: `hey opencode`
 
 ## Session Model
 
-- The first triggered message in a channel creates that channel’s OpenCode session and workdir.
+- The first triggered message in a channel creates that channel’s OpenCode session and session home/workspace.
 - Each channel runs serially.
 - Different channels can run at the same time.
 - Same-channel follow-ups that arrive during an active run are folded into that run instead of starting a second concurrent run.
 - If a channel session becomes unhealthy, the bot recreates the OpenCode worker on the same workdir.
+- Idle per-channel workers are closed after a configurable timeout and lazily reopened on the next message.
 
 Important lifecycle note:
 
-- Restarting the bot resets all in-memory session state.
+- Restarting the bot preserves idle thread history and session files, but not active Discord-side runtime state.
 
 ## Discord UX
 
@@ -107,9 +109,9 @@ What they do:
 - `send-image`
   Upload an image to Discord. Relative paths resolve from the current session workdir and must stay under the synthetic session home.
 - `download-attachments`
-  Download attachments from the triggering message and its replied-to message. Relative destinations resolve from the current session workdir and must stay under the synthetic session home.
+  Download attachments from a specific Discord message by `messageId`. Relative destinations resolve from the current session workdir and must stay under the synthetic session home.
 - `react`
-  Add a reaction to the triggering Discord message.
+  Add a reaction to a specific Discord message by `messageId`.
 - `list-custom-emojis`
   List usable custom emoji in the current Discord context.
 - `list-stickers`
@@ -121,7 +123,8 @@ Current guardrails:
 
 - File/image paths are resolved from the session workdir when relative and must stay under the synthetic session home.
 - Download destinations are resolved from the session workdir when relative and must stay under the synthetic session home.
-- Reactions target only the triggering message.
+- `download-attachments` is limited to messages associated with the current run context.
+- Reactions are allowed for any message in the current Discord channel.
 - Emoji/sticker availability is filtered by the current Discord context and permissions.
 
 Implementation note:
@@ -152,6 +155,10 @@ Main variables:
   Leading text trigger. Default: `hey opencode`
 - `SESSION_INSTRUCTIONS`
   Optional extra instructions appended to OpenCode's system prompt for each Discord channel session
+- `STATE_DIR`
+  Persistent storage root. Default: `./storage`
+- `SESSION_IDLE_TIMEOUT_MS`
+  Idle timeout in milliseconds before an unused per-channel OpenCode worker is closed. Default: `1800000`
 - `SANDBOX_BACKEND`
   One of `auto`, `bwrap`, or `unsafe-dev`
 - `OPENCODE_BIN`
@@ -169,6 +176,8 @@ Notes:
 
 - `DISCORD_TOKEN` is the only required env var.
 - `SESSION_INSTRUCTIONS` is applied per OpenCode session, not injected into every visible Discord message.
+- `STATE_DIR` stores both the SQLite metadata DB and per-channel session homes/workspaces.
+- `SESSION_IDLE_TIMEOUT_MS` closes only the worker process after inactivity; the persisted thread and files remain and are reopened lazily.
 - `SANDBOX_READ_ONLY_PATHS` replaces the default `bwrap` read-only bind list; it does not append to it.
 - `SANDBOX_ENV_PASSTHROUGH` is for additional env vars only. OpenCode auth should usually come from host state.
 
@@ -192,9 +201,9 @@ Startup behavior:
 
 `bwrap` behavior:
 
-- Each worker runs with a dedicated temp workdir.
+- Each channel session has a persistent synthetic home/workspace under `STATE_DIR`.
 - Each worker gets a synthetic home directory, and the OpenCode session cwd is `$HOME/workspace`.
-- The session workdir is the writable project area inside that synthetic home.
+- The session workdir is the writable project area inside that synthetic home, and is mounted into the sandbox at `/home/opencode/workspace`.
 - `/tmp` inside the sandbox is a tmpfs.
 - The repo-local OpenCode config/tool workspace is staged into a temporary copy first and mounted read-only.
 - Only a small env allowlist plus `SANDBOX_ENV_PASSTHROUGH` is inherited.
@@ -244,10 +253,17 @@ Typecheck:
 bun run typecheck
 ```
 
+Run tests:
+
+```bash
+bun run test
+```
+
 ## Operational Notes
 
 - The bot uses the repo-local [`opencode`](./opencode) workspace for its custom Discord tools.
 - Host OpenCode config/auth/model state is copied into worker-specific XDG state under the synthetic home before workers start.
+- Persistent bot-managed state lives under `STATE_DIR` (`./storage` by default).
 - Logs are structured JSON to stdout.
 - Logs can include backend choice, workdirs, server URLs, bridge socket paths, and raw OpenCode event properties, so treat them as potentially sensitive.
 - Outgoing final replies and tool sends allow normal Discord mentions; be careful if you let OpenCode generate arbitrary mention-like text in shared channels.

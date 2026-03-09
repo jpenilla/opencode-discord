@@ -63,6 +63,8 @@ const makeHarness = async (options?: {
     },
     rootDir: "/tmp/session-root",
     workdir: "/home/opencode/workspace",
+    createdAt: Date.now(),
+    lastActivityAt: Date.now(),
     queue: {} as ChannelSession["queue"],
     activeRun: options?.hasActiveRun ?? false ? activeRun : null,
   }

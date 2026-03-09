@@ -31,6 +31,8 @@ const makeSession = (): ChannelSession =>
     opencode: makeSessionHandle(),
     rootDir: "/tmp/session-root",
     workdir: "/home/opencode/workspace",
+    createdAt: Date.now(),
+    lastActivityAt: Date.now(),
     queue: {},
     activeRun: null,
   })

@@ -30,6 +30,8 @@ import {
   type RunRequest,
 } from "@/sessions/session.ts"
 import { Logger } from "@/util/logging.ts"
+import { resolveStatePaths } from "@/state/paths.ts"
+import { SessionStore } from "@/state/store.ts"
 
 export type ChannelSessionsShape = {
   submit: (message: Message, invocation: Invocation) => Effect.Effect<void, unknown>
@@ -64,8 +66,10 @@ export const ChannelSessionsLive = Layer.scoped(
     const config = yield* AppConfig
     const opencode = yield* OpencodeService
     const eventQueue = yield* OpencodeEventQueue
+    const sessionStore = yield* SessionStore
     const stateRef = yield* Ref.make(createSessionRuntimeState())
     const fiberSet = yield* FiberSet.make()
+    const statePaths = resolveStatePaths(config.stateDir)
 
     const sendErrorReply = (message: Message, title: string, error: unknown) =>
       Effect.promise(() =>
@@ -84,11 +88,18 @@ export const ChannelSessionsLive = Layer.scoped(
     const sessionLifecycle = createSessionLifecycle({
       stateRef,
       createOpencodeSession: opencode.createSession,
+      attachOpencodeSession: opencode.attachSession,
+      getPersistedSession: sessionStore.getSession,
+      upsertPersistedSession: sessionStore.upsertSession,
+      touchPersistedSession: sessionStore.touchSession,
+      deletePersistedSession: sessionStore.deleteSession,
       isSessionHealthy: opencode.isHealthy,
       startWorker: (session) => FiberSet.run(fiberSet, worker(session)).pipe(Effect.asVoid),
       logger,
       sessionInstructions: config.sessionInstructions,
       triggerPhrase: config.triggerPhrase,
+      idleTimeoutMs: config.sessionIdleTimeoutMs,
+      sessionsRootDir: statePaths.sessionsRootDir,
     })
     const {
       getSession: getChannelSession,
@@ -98,12 +109,11 @@ export const ChannelSessionsLive = Layer.scoped(
       setActiveRun,
       setIdleCompactionCard,
       createOrGetSession,
+      getOrRestoreSession,
       ensureSessionHealth,
+      closeExpiredSessions,
       shutdownSessions,
     } = sessionLifecycle
-
-    const getSession = (channelId: string) =>
-      getChannelSession(channelId).pipe(Effect.map((session) => session ?? null))
 
     const updateIdleCompactionCard = (sessionId: string, title: string, body: string) =>
       getIdleCompactionCard(sessionId).pipe(
@@ -144,6 +154,17 @@ export const ChannelSessionsLive = Layer.scoped(
       Effect.forever,
       Effect.catchAll((error) =>
         logger.error("opencode event dispatcher failed", {
+          error: formatError(error),
+        }),
+      ),
+      Effect.forkScoped,
+    )
+
+    yield* Effect.sleep(60_000).pipe(
+      Effect.zipRight(closeExpiredSessions()),
+      Effect.forever,
+      Effect.catchAll((error) =>
+        logger.error("idle session sweeper failed", {
           error: formatError(error),
         }),
       ),
@@ -192,7 +213,7 @@ export const ChannelSessionsLive = Layer.scoped(
       )
 
     const commandRuntime = createCommandRuntime({
-      getSession,
+      getSession: getOrRestoreSession,
       getIdleCompactionCard,
       setIdleCompactionCard,
       updateIdleCompactionCard,
@@ -220,36 +241,41 @@ export const ChannelSessionsLive = Layer.scoped(
 
     return {
       submit: (message, invocation): FallibleEffect<void> =>
-        Effect.gen(function* () {
-          const session = yield* getUsableSession(message, "health probe failed before queueing run")
-          const attachmentMessages = yield* collectAttachmentMessages(message)
-          const referencedMessage = attachmentMessages.find((candidate) => candidate.id !== message.id) ?? null
-          const prompt = buildOpencodePrompt({
-            message: promptMessageContext(message, invocation.prompt),
-            referencedMessage: referencedMessage ? promptMessageContext(referencedMessage) : undefined,
-          })
+        Effect.acquireUseRelease(
+          Effect.sync(() => startTypingLoop(message.channel)),
+          () =>
+            Effect.gen(function* () {
+              const session = yield* getUsableSession(message, "health probe failed before queueing run")
+              const attachmentMessages = yield* collectAttachmentMessages(message)
+              const referencedMessage = attachmentMessages.find((candidate) => candidate.id !== message.id) ?? null
+              const prompt = buildOpencodePrompt({
+                message: promptMessageContext(message, invocation.prompt),
+                referencedMessage: referencedMessage ? promptMessageContext(referencedMessage) : undefined,
+              })
 
-          const request = {
-            message,
-            prompt,
-            attachmentMessages,
-          } satisfies RunRequest
+              const request = {
+                message,
+                prompt,
+                attachmentMessages,
+              } satisfies RunRequest
 
-          const destination = yield* enqueueRunRequest(session, request)
-          if (destination === "follow-up") {
-            yield* logger.info("queued follow-up on active run", {
-              channelId: message.channelId,
-              sessionId: session.opencode.sessionId,
-              author: message.author.tag,
-            })
-          } else {
-            yield* logger.info("queued run", {
-              channelId: message.channelId,
-              sessionId: session.opencode.sessionId,
-              author: message.author.tag,
-            })
-          }
-        }),
+              const destination = yield* enqueueRunRequest(session, request)
+              if (destination === "follow-up") {
+                yield* logger.info("queued follow-up on active run", {
+                  channelId: message.channelId,
+                  sessionId: session.opencode.sessionId,
+                  author: message.author.tag,
+                })
+              } else {
+                yield* logger.info("queued run", {
+                  channelId: message.channelId,
+                  sessionId: session.opencode.sessionId,
+                  author: message.author.tag,
+                })
+              }
+            }),
+          (typing) => Effect.promise(() => typing.stop()).pipe(Effect.ignore),
+        ),
       getActiveRunBySessionId,
       handleInteraction: (interaction) =>
         commandRuntime.handleInteraction(interaction).pipe(

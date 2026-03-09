@@ -5,6 +5,7 @@ import { Deferred, Effect, Fiber, Ref } from "effect"
 import type { SessionHandle } from "@/opencode/service.ts"
 import { createSessionLifecycle, type SessionLifecycleState } from "@/sessions/session-lifecycle.ts"
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts"
+import type { PersistedChannelSession } from "@/state/store.ts"
 import { unsafeStub } from "../support/stub.ts"
 
 const makeMessage = (channelId = "channel-1") =>
@@ -63,18 +64,20 @@ const makeHarness = async (options?: {
   const closed = await Effect.runPromise(Ref.make<string[]>([]))
   const nextRoot = await Effect.runPromise(Ref.make(0))
   const nextSession = await Effect.runPromise(Ref.make(0))
+  const persisted = await Effect.runPromise(Ref.make<Map<string, PersistedChannelSession>>(new Map()))
 
-  const createSessionPaths = Ref.modify(nextRoot, (current): readonly [ReturnType<typeof Effect.succeed> extends never ? never : { rootDir: string; workdir: string }, number] => {
-    const index = current + 1
-    const rootDir = `/tmp/session-root-${index}`
-    return [
-      {
-        rootDir,
-        workdir: `${rootDir}/home/workspace`,
-      },
-      index,
-    ]
-  }).pipe(Effect.flatMap((paths) => Effect.succeed(paths)))
+  const createSessionPaths = (_channelId: string) =>
+    Ref.modify(nextRoot, (current): readonly [ReturnType<typeof Effect.succeed> extends never ? never : { rootDir: string; workdir: string }, number] => {
+      const index = current + 1
+      const rootDir = `/tmp/session-root-${index}`
+      return [
+        {
+          rootDir,
+          workdir: `${rootDir}/home/workspace`,
+        },
+        index,
+      ]
+    }).pipe(Effect.flatMap((paths) => Effect.succeed(paths)))
 
   const defaultCreateOpencodeSession = ({
     workdir,
@@ -104,13 +107,42 @@ const makeHarness = async (options?: {
         title,
         systemPromptAppend,
       }),
+    attachOpencodeSession: (workdir, sessionId) =>
+      Effect.succeed(makeHandle(sessionId, workdir, (closedSessionId) => {
+        Effect.runSync(Ref.update(closed, (current) => [...current, closedSessionId]))
+      })),
+    getPersistedSession: (channelId) =>
+      Ref.get(persisted).pipe(Effect.map((current) => current.get(channelId) ?? null)),
+    upsertPersistedSession: (session) =>
+      Ref.update(persisted, (current) => {
+        const next = new Map(current)
+        next.set(session.channelId, session)
+        return next
+      }),
+    touchPersistedSession: (channelId, lastActivityAt) =>
+      Ref.update(persisted, (current) => {
+        const next = new Map(current)
+        const session = next.get(channelId)
+        if (session) {
+          next.set(channelId, { ...session, lastActivityAt })
+        }
+        return next
+      }),
+    deletePersistedSession: (channelId) =>
+      Ref.update(persisted, (current) => {
+        const next = new Map(current)
+        next.delete(channelId)
+        return next
+      }),
     isSessionHealthy: options?.isSessionHealthy ?? (() => Effect.succeed(true)),
     startWorker: (session) => Ref.update(started, (current) => [...current, session.opencode.sessionId]),
     logger,
     sessionInstructions: "",
     triggerPhrase: "hey opencode",
-    createSessionPaths: () => createSessionPaths,
-    removeSessionRoot: (rootDir) => Ref.update(removedRoots, (current) => [...current, rootDir]),
+    idleTimeoutMs: 30 * 60 * 1_000,
+    sessionsRootDir: "/tmp/sessions",
+    createSessionPaths,
+    deleteSessionRoot: (rootDir) => Ref.update(removedRoots, (current) => [...current, rootDir]),
   })
 
   return {
@@ -274,7 +306,7 @@ describe("createSessionLifecycle", () => {
     expect(await Effect.runPromise(Ref.get(closed))).toEqual(["session-1"])
   })
 
-  test("shuts down sessions, closes handles, and removes session roots", async () => {
+  test("shuts down sessions, closes handles, and keeps persistent session roots", async () => {
     const { lifecycle, closed, removedRoots } = await makeHarness()
 
     await Effect.runPromise(lifecycle.createOrGetSession(makeMessage("channel-1")))
@@ -282,9 +314,6 @@ describe("createSessionLifecycle", () => {
     await Effect.runPromise(lifecycle.shutdownSessions())
 
     expect(await Effect.runPromise(Ref.get(closed))).toEqual(["session-1", "session-2"])
-    expect(await Effect.runPromise(Ref.get(removedRoots))).toEqual([
-      "/tmp/session-root-1",
-      "/tmp/session-root-2",
-    ])
+    expect(await Effect.runPromise(Ref.get(removedRoots))).toEqual([])
   })
 })

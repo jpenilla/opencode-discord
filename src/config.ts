@@ -4,6 +4,8 @@ export type AppConfigShape = {
   discordToken: string
   triggerPhrase: string
   sessionInstructions: string
+  stateDir: string
+  sessionIdleTimeoutMs: number
   toolBridgeSocketPath: string
   toolBridgeToken: string
   sandboxBackend: "auto" | "unsafe-dev" | "bwrap"
@@ -34,6 +36,18 @@ const parsePathList = (value: string | undefined) =>
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0)
 
+const parsePositiveInteger = (value: string | undefined, fallback: number, name: string) => {
+  if (!value) {
+    return fallback
+  }
+
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Invalid ${name}: ${value}`)
+  }
+  return parsed
+}
+
 export const AppConfigLive = Layer.effect(
   AppConfig,
   Effect.sync(() => {
@@ -48,6 +62,8 @@ export const AppConfigLive = Layer.effect(
       discordToken,
       triggerPhrase: Bun.env.TRIGGER_PHRASE ?? "hey opencode",
       sessionInstructions: Bun.env.SESSION_INSTRUCTIONS ?? "",
+      stateDir: Bun.env.STATE_DIR ?? "./storage",
+      sessionIdleTimeoutMs: parsePositiveInteger(Bun.env.SESSION_IDLE_TIMEOUT_MS, 30 * 60 * 1_000, "SESSION_IDLE_TIMEOUT_MS"),
       toolBridgeSocketPath,
       toolBridgeToken: crypto.randomUUID(),
       sandboxBackend: parseSandboxBackend(Bun.env.SANDBOX_BACKEND),

@@ -43,6 +43,8 @@ const makeSession = async (withActiveRun: boolean) => {
     },
     rootDir: "/tmp/session-root",
     workdir: "/home/opencode/workspace",
+    createdAt: Date.now(),
+    lastActivityAt: Date.now(),
     queue: {} as ChannelSession["queue"],
     activeRun,
   })
