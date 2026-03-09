@@ -12,7 +12,7 @@ describe("DiscordSystemPlugin", () => {
   test("appends the trimmed session context when a session id is present", async () => {
     process.env[SYSTEM_APPEND_ENV] = "  appendix  "
 
-    const plugin = await DiscordSystemPlugin()
+    const plugin = await DiscordSystemPlugin({} as never)
     const transform = plugin["experimental.chat.system.transform"]
     const output = { system: ["base"] }
 
@@ -30,7 +30,7 @@ describe("DiscordSystemPlugin", () => {
       process.env[SYSTEM_APPEND_ENV] = appendix
     }
 
-    const plugin = await DiscordSystemPlugin()
+    const plugin = await DiscordSystemPlugin({} as never)
     const transform = plugin["experimental.chat.system.transform"]
     const output = { system: ["base"] }
 

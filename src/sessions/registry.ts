@@ -44,8 +44,18 @@ import {
 } from "@/opencode/events.ts"
 import type { Invocation } from "@/discord/triggers.ts"
 import { OpencodeService } from "@/opencode/service.ts"
+import {
+  beginInterruptRequest,
+  decideCompactAfterHealthCheck,
+  decideCompactEntry,
+  decideInterruptEntry,
+  decideRunCompletion,
+} from "@/sessions/command-lifecycle.ts"
+import { collectAttachmentMessages } from "@/sessions/message-context.ts"
 import { collectProgressEvents, runProgressWorker } from "@/sessions/progress.ts"
 import { expireQuestionBatch, setQuestionBatchStatus } from "@/sessions/question-batch-state.ts"
+import { enqueueRunRequest } from "@/sessions/request-routing.ts"
+import { admitRequestBatchToActiveRun, type NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts"
 import {
   buildSessionCreateSpec,
   type ActiveRun,
@@ -111,14 +121,6 @@ const createSessionRuntimeState = (): SessionRuntimeState => ({
   idleCompactionCardsBySessionId: new Map<string, Message>(),
   questionBatchesByRequestId: new Map<string, PendingQuestionBatch>(),
 })
-
-const mergeAttachmentMessages = (target: Map<string, Message>, requests: ReadonlyArray<RunRequest>) => {
-  for (const request of requests) {
-    for (const attachmentMessage of request.attachmentMessages) {
-      target.set(attachmentMessage.id, attachmentMessage)
-    }
-  }
-}
 
 export const ChannelSessionsLive = Layer.scoped(
   ChannelSessions,
@@ -277,18 +279,6 @@ export const ChannelSessionsLive = Layer.scoped(
           rootDir,
           workdir,
         }
-      })
-
-    const collectAttachmentMessages = (message: Message): FallibleEffect<ReadonlyArray<Message>> =>
-      Effect.promise(async () => {
-        const attachmentMessages = new Map<string, Message>([[message.id, message]])
-        if (message.reference?.messageId) {
-          const referenced = await message.fetchReference().catch(() => null)
-          if (referenced) {
-            attachmentMessages.set(referenced.id, referenced)
-          }
-        }
-        return [...attachmentMessages.values()]
       })
 
     const clearSessionGate = (channelId: string, gate: SessionGate) =>
@@ -664,7 +654,7 @@ export const ChannelSessionsLive = Layer.scoped(
 
     const processRequestBatch = (
       session: ChannelSession,
-      initialRequests: ReadonlyArray<RunRequest>,
+      initialRequests: NonEmptyRunRequestBatch,
     ): FallibleEffect<void> =>
       Effect.gen(function* () {
         const progressQueue = yield* Queue.unbounded<RunProgressEvent>()
@@ -683,18 +673,14 @@ export const ChannelSessionsLive = Layer.scoped(
           questionOutcome: noQuestionOutcome(),
           interruptRequested: false,
         }
-        mergeAttachmentMessages(activeRun.attachmentMessagesById, initialRequests)
+        const initialPrompt = admitRequestBatchToActiveRun(activeRun.attachmentMessagesById, initialRequests, "initial")
         yield* setActiveRun(session, activeRun)
 
         const stopTyping = Effect.promise(() => activeRun.typing.stop())
         let failed = false
 
         try {
-          let currentBatch: ReadonlyArray<RunRequest> = initialRequests
-          let result = yield* opencode.prompt(
-            session.opencode,
-            buildBatchedOpencodePrompt(currentBatch.map((request) => request.prompt)),
-          )
+          let result = yield* opencode.prompt(session.opencode, initialPrompt)
 
           while (true) {
             yield* Ref.set(acceptFollowUps, false)
@@ -709,26 +695,34 @@ export const ChannelSessionsLive = Layer.scoped(
               count: followUps.length,
             })
 
-            currentBatch = followUps
-            mergeAttachmentMessages(activeRun.attachmentMessagesById, currentBatch)
-            yield* Ref.set(acceptFollowUps, true)
-            result = yield* opencode.prompt(
-              session.opencode,
-              buildQueuedFollowUpPrompt(currentBatch.map((request) => request.prompt)),
+            const followUpBatch = followUps as NonEmptyRunRequestBatch
+            const followUpPrompt = admitRequestBatchToActiveRun(
+              activeRun.attachmentMessagesById,
+              followUpBatch,
+              "follow-up",
             )
+            yield* Ref.set(acceptFollowUps, true)
+            result = yield* opencode.prompt(session.opencode, followUpPrompt)
           }
 
           const questionOutcome = activeRun.questionOutcome
-          const trimmedTranscript = result.transcript.trim()
+          const completion = decideRunCompletion({
+            transcript: result.transcript,
+            questionOutcome,
+            interruptRequested: activeRun.interruptRequested,
+          })
 
           yield* stopTyping
           yield* finishProgressWorker(session, progressQueue, progressFiber)
-          if (trimmedTranscript) {
-            yield* Effect.promise(() => sendFinalResponse({ message: responseMessage, text: result.transcript }))
-          } else if (questionOutcome._tag === "ui-failure" && !questionOutcome.notified) {
-            yield* sendQuestionUiFailure(responseMessage, questionOutcome.message)
-          } else if (!activeRun.interruptRequested && questionOutcome._tag !== "user-rejected") {
-            yield* Effect.promise(() => sendFinalResponse({ message: responseMessage, text: result.transcript }))
+          switch (completion.type) {
+            case "send-final-response":
+              yield* Effect.promise(() => sendFinalResponse({ message: responseMessage, text: result.transcript }))
+              break
+            case "send-question-ui-failure":
+              yield* sendQuestionUiFailure(responseMessage, completion.message)
+              break
+            case "suppress-response":
+              break
           }
           yield* logger.info("completed run", {
             channelId: session.channelId,
@@ -982,39 +976,30 @@ export const ChannelSessionsLive = Layer.scoped(
           return false
         }
 
-        if (!interaction.inGuild() || interaction.channel?.type !== ChannelType.GuildText) {
-          yield* replyToCommandInteraction(interaction, "This command only works in standard guild text channels.")
-          return true
-        }
-
-        const session = yield* getSession(interaction.channelId)
-        if (!session) {
-          yield* replyToCommandInteraction(interaction, "No OpenCode session exists in this channel yet.")
-          return true
-        }
+        const inGuildTextChannel = interaction.inGuild() && interaction.channel?.type === ChannelType.GuildText
+        const session = inGuildTextChannel ? yield* getSession(interaction.channelId) : null
 
         if (interaction.commandName === "compact") {
-          if (session.activeRun) {
-            yield* replyToCommandInteraction(
-              interaction,
-              "OpenCode is busy in this channel right now. Use /interrupt first or wait for the current run to finish.",
-            )
+          const compactEntry = decideCompactEntry({
+            inGuildTextChannel,
+            hasSession: !!session,
+            hasActiveRun: !!session?.activeRun,
+          })
+          if (compactEntry.type === "reject") {
+            yield* replyToCommandInteraction(interaction, compactEntry.message)
             return true
           }
 
           yield* deferCommandInteraction(interaction)
 
-          const healthy = yield* opencode.isHealthy(session.opencode)
-          if (!healthy) {
-            yield* editCommandInteraction(
-              interaction,
-              "This channel session is unavailable right now. Send a normal message to recreate it.",
-            )
+          const compactHealthDecision = decideCompactAfterHealthCheck(yield* opencode.isHealthy(session!.opencode))
+          if (compactHealthDecision.type === "reject-after-defer") {
+            yield* editCommandInteraction(interaction, compactHealthDecision.message)
             return true
           }
 
           const channel = interaction.channel as SendableChannels
-          const existingCard = yield* getIdleCompactionCard(session.opencode.sessionId)
+          const existingCard = yield* getIdleCompactionCard(session!.opencode.sessionId)
           const compactionCard = yield* Effect.promise(() =>
             upsertInfoCard({
               channel,
@@ -1023,28 +1008,28 @@ export const ChannelSessionsLive = Layer.scoped(
               body: "OpenCode is summarizing earlier context for this session.",
             }),
           ).pipe(
-            Effect.tap((card) => setIdleCompactionCard(session.opencode.sessionId, card)),
+            Effect.tap((card) => setIdleCompactionCard(session!.opencode.sessionId, card)),
             Effect.catchAll((error) =>
               logger.warn("failed to post idle compaction card", {
-                channelId: session.channelId,
-                sessionId: session.opencode.sessionId,
+                channelId: session!.channelId,
+                sessionId: session!.opencode.sessionId,
                 error: formatError(error),
-              }).pipe(Effect.zipRight(setIdleCompactionCard(session.opencode.sessionId, null)), Effect.as(null)),
+              }).pipe(Effect.zipRight(setIdleCompactionCard(session!.opencode.sessionId, null)), Effect.as(null)),
             ),
           )
 
-          yield* opencode.compactSession(session.opencode).pipe(
+          yield* opencode.compactSession(session!.opencode).pipe(
             Effect.tap(() =>
               updateIdleCompactionCard(
-                session.opencode.sessionId,
+                session!.opencode.sessionId,
                 "🗜️ Session compacted",
                 "OpenCode summarized earlier context for this session.",
-              ).pipe(Effect.zipRight(setIdleCompactionCard(session.opencode.sessionId, null))),
+              ).pipe(Effect.zipRight(setIdleCompactionCard(session!.opencode.sessionId, null))),
             ),
             Effect.tapError((error) =>
               logger.error("failed to compact session", {
-                channelId: session.channelId,
-                sessionId: session.opencode.sessionId,
+                channelId: session!.channelId,
+                sessionId: session!.opencode.sessionId,
                 error: formatError(error),
               }),
             ),
@@ -1052,7 +1037,7 @@ export const ChannelSessionsLive = Layer.scoped(
               compactionCard
                 ? Effect.promise(() =>
                     editInfoCard(compactionCard, "❌ Session compaction failed", `OpenCode could not compact this session.\n\n${formatError(error)}`),
-                  ).pipe(Effect.ignore, Effect.zipRight(setIdleCompactionCard(session.opencode.sessionId, null)))
+                  ).pipe(Effect.ignore, Effect.zipRight(setIdleCompactionCard(session!.opencode.sessionId, null)))
                 : Effect.void,
             ),
             Effect.forkDaemon,
@@ -1062,18 +1047,23 @@ export const ChannelSessionsLive = Layer.scoped(
           return true
         }
 
-        const activeRun = session.activeRun
-        if (!activeRun) {
-          yield* replyToCommandInteraction(interaction, "No active OpenCode run is running in this channel.")
+        const interruptEntry = decideInterruptEntry({
+          inGuildTextChannel,
+          hasSession: !!session,
+          hasActiveRun: !!session?.activeRun,
+        })
+        if (interruptEntry.type === "reject") {
+          yield* replyToCommandInteraction(interaction, interruptEntry.message)
           return true
         }
 
         yield* deferCommandInteraction(interaction)
 
-        activeRun.interruptRequested = true
-        const interruptResult = yield* opencode.interruptSession(session.opencode).pipe(Effect.either)
+        const activeRun = session!.activeRun!
+        const rollbackInterruptRequest = beginInterruptRequest(activeRun)
+        const interruptResult = yield* opencode.interruptSession(session!.opencode).pipe(Effect.either)
         if (interruptResult._tag === "Left") {
-          activeRun.interruptRequested = false
+          rollbackInterruptRequest()
           yield* editCommandInteraction(
             interaction,
             formatErrorResponse("## ❌ Failed to interrupt run", formatError(interruptResult.left)),
@@ -1091,8 +1081,8 @@ export const ChannelSessionsLive = Layer.scoped(
         }).pipe(
           Effect.catchAll((error) =>
             logger.warn("failed to post interrupt info card", {
-              channelId: session.channelId,
-              sessionId: session.opencode.sessionId,
+              channelId: session!.channelId,
+              sessionId: session!.opencode.sessionId,
               error: formatError(error),
             }),
           ),
@@ -1430,26 +1420,20 @@ export const ChannelSessionsLive = Layer.scoped(
             attachmentMessages,
           } satisfies RunRequest
 
-          if (session.activeRun) {
-            const acceptFollowUps = yield* Ref.get(session.activeRun.acceptFollowUps)
-            if (acceptFollowUps) {
-              yield* Queue.offer(session.activeRun.followUpQueue, request)
-              yield* logger.info("queued follow-up on active run", {
-                channelId: message.channelId,
-                sessionId: session.opencode.sessionId,
-                author: message.author.tag,
-              })
-              return
-            }
+          const destination = yield* enqueueRunRequest(session, request)
+          if (destination === "follow-up") {
+            yield* logger.info("queued follow-up on active run", {
+              channelId: message.channelId,
+              sessionId: session.opencode.sessionId,
+              author: message.author.tag,
+            })
+          } else {
+            yield* logger.info("queued run", {
+              channelId: message.channelId,
+              sessionId: session.opencode.sessionId,
+              author: message.author.tag,
+            })
           }
-
-          yield* Queue.offer(session.queue, request)
-
-          yield* logger.info("queued run", {
-            channelId: message.channelId,
-            sessionId: session.opencode.sessionId,
-            author: message.author.tag,
-          })
         }),
       getActiveRunBySessionId,
       handleInteraction: (interaction) =>
