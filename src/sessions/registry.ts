@@ -1,8 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises"
-import { join, resolve } from "node:path"
-import { tmpdir } from "node:os"
-
-import { Chunk, Context, Deferred, Effect, Fiber, FiberSet, Layer, Queue, Ref } from "effect"
+import { Chunk, Context, Effect, FiberSet, Layer, Queue, Ref } from "effect"
 import { ChannelType, MessageFlags, type Interaction, type Message, type SendableChannels } from "discord.js"
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
 
@@ -10,14 +6,11 @@ import { AppConfig } from "@/config.ts"
 import { formatErrorResponse } from "@/discord/formatting.ts"
 import { editInfoCard, sendInfoCard, upsertInfoCard } from "@/discord/info-card.ts"
 import {
-  buildBatchedOpencodePrompt,
   buildOpencodePrompt,
-  buildQueuedFollowUpPrompt,
   promptMessageContext,
   sendFinalResponse,
   startTypingLoop,
 } from "@/discord/messages.ts"
-import { buildSessionSystemAppend } from "@/discord/system-context.ts"
 import {
   buildQuestionAnswers,
   buildQuestionModal,
@@ -49,7 +42,6 @@ import {
   decideCompactAfterHealthCheck,
   decideCompactEntry,
   decideInterruptEntry,
-  decideRunCompletion,
 } from "@/sessions/command-lifecycle.ts"
 import { collectAttachmentMessages } from "@/sessions/message-context.ts"
 import { coordinateActiveRunPrompts } from "@/sessions/prompt-coordinator.ts"
@@ -59,13 +51,11 @@ import { rejectQuestionBatch, submitQuestionBatch } from "@/sessions/question-su
 import { enqueueRunRequest } from "@/sessions/request-routing.ts"
 import { executeRunBatch } from "@/sessions/run-executor.ts"
 import { admitRequestBatchToActiveRun, type NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts"
+import { createSessionLifecycle, type SessionLifecycleState } from "@/sessions/session-lifecycle.ts"
 import {
-  buildSessionCreateSpec,
   type ActiveRun,
   type ChannelSession,
-  noQuestionOutcome,
   questionUiFailureOutcome,
-  type RunProgressEvent,
   type RunRequest,
 } from "@/sessions/session.ts"
 import { Logger } from "@/util/logging.ts"
@@ -86,11 +76,6 @@ const formatError = (error: unknown) => {
   return String(error)
 }
 
-type SessionGate = Deferred.Deferred<ChannelSession, unknown>
-type SessionGateDecision = {
-  gate: SessionGate
-  owner: boolean
-}
 type PendingQuestionBatch = {
   request: QuestionRequest
   session: ChannelSession
@@ -102,21 +87,16 @@ type PendingQuestionBatch = {
   status: QuestionBatchStatus | "expired"
   resolvedAnswers?: Array<QuestionAnswer>
 }
-type SessionRuntimeState = {
-  sessionsByChannelId: Map<string, ChannelSession>
-  sessionsBySessionId: Map<string, ChannelSession>
-  activeRunsBySessionId: Map<string, ActiveRun>
-  gatesByChannelId: Map<string, SessionGate>
-  idleCompactionCardsBySessionId: Map<string, Message>
+type SessionRuntimeState = SessionLifecycleState & {
   questionBatchesByRequestId: Map<string, PendingQuestionBatch>
 }
 
 const createSessionRuntimeState = (): SessionRuntimeState => ({
-  sessionsByChannelId: new Map<string, ChannelSession>(),
-  sessionsBySessionId: new Map<string, ChannelSession>(),
-  activeRunsBySessionId: new Map<string, ActiveRun>(),
-  gatesByChannelId: new Map<string, SessionGate>(),
-  idleCompactionCardsBySessionId: new Map<string, Message>(),
+  sessionsByChannelId: new Map(),
+  sessionsBySessionId: new Map(),
+  activeRunsBySessionId: new Map(),
+  gatesByChannelId: new Map(),
+  idleCompactionCardsBySessionId: new Map(),
   questionBatchesByRequestId: new Map<string, PendingQuestionBatch>(),
 })
 
@@ -130,91 +110,87 @@ export const ChannelSessionsLive = Layer.scoped(
     const stateRef = yield* Ref.make(createSessionRuntimeState())
     const fiberSet = yield* FiberSet.make()
 
-    const getSession = (channelId: string) =>
-      Ref.get(stateRef).pipe(Effect.map((state) => state.sessionsByChannelId.get(channelId)))
-    const getActiveRunBySessionId = (sessionId: string) =>
-      Ref.get(stateRef).pipe(Effect.map((state) => state.activeRunsBySessionId.get(sessionId) ?? null))
+    const questionBatchView = (batch: PendingQuestionBatch) => ({
+      request: batch.request,
+      page: batch.page,
+      optionPages: batch.optionPages,
+      drafts: batch.drafts,
+      status: batch.status,
+      resolvedAnswers: batch.resolvedAnswers,
+    })
+
+    const hasPendingQuestionsForSession = (state: SessionRuntimeState, sessionId: string) =>
+      [...state.questionBatchesByRequestId.values()].some(
+        (batch) =>
+          batch.session.opencode.sessionId === sessionId &&
+          (batch.status === "active" || batch.status === "submitting"),
+      )
+
+    const syncTypingForSession = (sessionId: string) =>
+      Ref.get(stateRef).pipe(
+        Effect.flatMap((state) => {
+          const activeRun = state.activeRunsBySessionId.get(sessionId)
+          if (!activeRun) {
+            return Effect.void
+          }
+
+          if (hasPendingQuestionsForSession(state, sessionId)) {
+            return Effect.promise(() => activeRun.typing.pause()).pipe(
+              Effect.timeoutOption("1 second"),
+              Effect.flatMap((result) =>
+                result._tag === "Some"
+                  ? Effect.void
+                  : logger.warn("typing pause timed out while question prompt was active", {
+                      channelId: activeRun.discordMessage.channelId,
+                      sessionId,
+                    }),
+              ),
+            )
+          }
+
+          return Effect.sync(() => {
+            activeRun.typing.resume()
+          })
+        }),
+      )
+
+    const sendErrorReply = (message: Message, title: string, error: unknown) =>
+      Effect.promise(() =>
+        message.reply({
+          content: formatErrorResponse(title, formatError(error)),
+          allowedMentions: { repliedUser: false, parse: [] },
+        }),
+      )
+
+    const sendRunFailure = (message: Message, error: unknown) =>
+      sendErrorReply(message, "## ❌ Opencode failed", error)
+
+    const sendQuestionUiFailure = (message: Message, error: unknown) =>
+      sendErrorReply(message, "## ❌ Failed to show questions", error)
+
+    const sessionLifecycle = createSessionLifecycle({
+      stateRef,
+      createOpencodeSession: opencode.createSession,
+      isSessionHealthy: opencode.isHealthy,
+      startWorker: (session) => FiberSet.run(fiberSet, worker(session)).pipe(Effect.asVoid),
+      logger,
+      sessionInstructions: config.sessionInstructions,
+      triggerPhrase: config.triggerPhrase,
+    })
+    const {
+      getSession: getChannelSession,
+      getActiveRunBySessionId,
+      getIdleCompactionCard,
+      setActiveRun,
+      setIdleCompactionCard,
+      createOrGetSession,
+      ensureSessionHealth,
+      shutdownSessions,
+    } = sessionLifecycle
+
+    const getSession = getChannelSession
     const getQuestionBatch = (requestId: string) =>
       Ref.get(stateRef).pipe(Effect.map((state) => state.questionBatchesByRequestId.get(requestId) ?? null))
-    const getIdleCompactionCard = (sessionId: string) =>
-      Ref.get(stateRef).pipe(Effect.map((state) => state.idleCompactionCardsBySessionId.get(sessionId) ?? null))
-    const putSession = (session: ChannelSession) =>
-      Ref.update(stateRef, (current) => {
-        const sessionsByChannelId = new Map(current.sessionsByChannelId)
-        sessionsByChannelId.set(session.channelId, session)
-        const sessionsBySessionId = new Map(current.sessionsBySessionId)
-        sessionsBySessionId.set(session.opencode.sessionId, session)
-        return {
-          ...current,
-          sessionsByChannelId,
-          sessionsBySessionId,
-        }
-      })
-    const setActiveRun = (session: ChannelSession, activeRun: ActiveRun | null) =>
-      Ref.update(stateRef, (current) => {
-        session.activeRun = activeRun
-
-        const sessionsByChannelId = new Map(current.sessionsByChannelId)
-        sessionsByChannelId.set(session.channelId, session)
-        const sessionsBySessionId = new Map(current.sessionsBySessionId)
-        sessionsBySessionId.set(session.opencode.sessionId, session)
-
-        const activeRunsBySessionId = new Map(current.activeRunsBySessionId)
-        if (activeRun) {
-          activeRunsBySessionId.set(session.opencode.sessionId, activeRun)
-        } else {
-          activeRunsBySessionId.delete(session.opencode.sessionId)
-        }
-
-        return {
-          ...current,
-          sessionsByChannelId,
-          sessionsBySessionId,
-          activeRunsBySessionId,
-        }
-      })
-    const replaceSessionHandle = (session: ChannelSession, replacement: ChannelSession["opencode"]) =>
-      Ref.update(stateRef, (current) => {
-        const previousSessionId = session.opencode.sessionId
-        session.opencode = replacement
-
-        const sessionsByChannelId = new Map(current.sessionsByChannelId)
-        sessionsByChannelId.set(session.channelId, session)
-        const sessionsBySessionId = new Map(current.sessionsBySessionId)
-        sessionsBySessionId.delete(previousSessionId)
-        sessionsBySessionId.set(replacement.sessionId, session)
-
-        const activeRunsBySessionId = new Map(current.activeRunsBySessionId)
-        activeRunsBySessionId.delete(previousSessionId)
-
-        const idleCompactionCardsBySessionId = new Map(current.idleCompactionCardsBySessionId)
-        const idleCompactionCard = idleCompactionCardsBySessionId.get(previousSessionId)
-        idleCompactionCardsBySessionId.delete(previousSessionId)
-        if (idleCompactionCard) {
-          idleCompactionCardsBySessionId.set(replacement.sessionId, idleCompactionCard)
-        }
-
-        return {
-          ...current,
-          sessionsByChannelId,
-          sessionsBySessionId,
-          activeRunsBySessionId,
-          idleCompactionCardsBySessionId,
-        }
-      })
-    const setIdleCompactionCard = (sessionId: string, message: Message | null) =>
-      Ref.update(stateRef, (current) => {
-        const idleCompactionCardsBySessionId = new Map(current.idleCompactionCardsBySessionId)
-        if (message) {
-          idleCompactionCardsBySessionId.set(sessionId, message)
-        } else {
-          idleCompactionCardsBySessionId.delete(sessionId)
-        }
-        return {
-          ...current,
-          idleCompactionCardsBySessionId,
-        }
-      })
     const putQuestionBatch = (batch: PendingQuestionBatch) =>
       Ref.update(stateRef, (current) => {
         const questionBatchesByRequestId = new Map(current.questionBatchesByRequestId)
@@ -265,111 +241,6 @@ export const ChannelSessionsLive = Layer.scoped(
           },
         ]
       })
-    const removeSessionRoot = (rootDir: string) =>
-      Effect.promise(() => rm(resolve(rootDir), { recursive: true, force: true })).pipe(Effect.ignore)
-
-    const createSessionPaths = () =>
-      Effect.promise(async () => {
-        const rootDir = await mkdtemp(join(tmpdir(), "opencode-discord-"))
-        const workdir = join(rootDir, "home", "workspace")
-        await mkdir(workdir, { recursive: true })
-        return {
-          rootDir,
-          workdir,
-        }
-      })
-
-    const clearSessionGate = (channelId: string, gate: SessionGate) =>
-      Ref.update(stateRef, (current) => {
-        if (current.gatesByChannelId.get(channelId) !== gate) {
-          return current
-        }
-
-        const gatesByChannelId = new Map(current.gatesByChannelId)
-        gatesByChannelId.delete(channelId)
-        return {
-          ...current,
-          gatesByChannelId,
-        }
-      })
-
-    const withSessionGate = (channelId: string, task: Effect.Effect<ChannelSession, unknown>): Effect.Effect<ChannelSession, unknown> =>
-      Effect.gen(function* () {
-        const gate = yield* Deferred.make<ChannelSession, unknown>()
-        const { gate: currentGate, owner } = yield* Ref.modify(
-          stateRef,
-          (current): readonly [SessionGateDecision, SessionRuntimeState] => {
-            const existing = current.gatesByChannelId.get(channelId)
-            if (existing) {
-              return [{ gate: existing, owner: false }, current]
-            }
-
-            const gatesByChannelId = new Map(current.gatesByChannelId)
-            gatesByChannelId.set(channelId, gate)
-            return [
-              { gate, owner: true },
-              {
-                ...current,
-                gatesByChannelId,
-              },
-            ]
-          },
-        )
-
-        if (owner) {
-          yield* task.pipe(
-            Effect.exit,
-            Effect.tap((exit) => Deferred.done(currentGate, exit).pipe(Effect.ignore)),
-            Effect.ensuring(clearSessionGate(channelId, currentGate)),
-          )
-        }
-
-        return yield* Deferred.await(currentGate)
-      })
-
-    const questionBatchView = (batch: PendingQuestionBatch) => ({
-      request: batch.request,
-      page: batch.page,
-      optionPages: batch.optionPages,
-      drafts: batch.drafts,
-      status: batch.status,
-      resolvedAnswers: batch.resolvedAnswers,
-    })
-
-    const hasPendingQuestionsForSession = (state: SessionRuntimeState, sessionId: string) =>
-      [...state.questionBatchesByRequestId.values()].some(
-        (batch) =>
-          batch.session.opencode.sessionId === sessionId &&
-          (batch.status === "active" || batch.status === "submitting"),
-      )
-
-    const syncTypingForSession = (sessionId: string) =>
-      Ref.get(stateRef).pipe(
-        Effect.flatMap((state) => {
-          const activeRun = state.activeRunsBySessionId.get(sessionId)
-          if (!activeRun) {
-            return Effect.void
-          }
-
-          if (hasPendingQuestionsForSession(state, sessionId)) {
-            return Effect.promise(() => activeRun.typing.pause()).pipe(
-              Effect.timeoutOption("1 second"),
-              Effect.flatMap((result) =>
-                result._tag === "Some"
-                  ? Effect.void
-                  : logger.warn("typing pause timed out while question prompt was active", {
-                      channelId: activeRun.discordMessage.channelId,
-                      sessionId,
-                    }),
-              ),
-            )
-          }
-
-          return Effect.sync(() => {
-            activeRun.typing.resume()
-          })
-        }),
-      )
 
     const updateIdleCompactionCard = (sessionId: string, title: string, body: string) =>
       getIdleCompactionCard(sessionId).pipe(
@@ -609,20 +480,6 @@ export const ChannelSessionsLive = Layer.scoped(
       Effect.forkScoped,
     )
 
-    const sendErrorReply = (message: Message, title: string, error: unknown) =>
-      Effect.promise(() =>
-        message.reply({
-          content: formatErrorResponse(title, formatError(error)),
-          allowedMentions: { repliedUser: false, parse: [] },
-        }),
-      )
-
-    const sendRunFailure = (message: Message, error: unknown) =>
-      sendErrorReply(message, "## ❌ Opencode failed", error)
-
-    const sendQuestionUiFailure = (message: Message, error: unknown) =>
-      sendErrorReply(message, "## ❌ Failed to show questions", error)
-
     const runExecutor = executeRunBatch({
       runPrompts: ({ channelId, session, activeRun, initialRequests }) =>
         coordinateActiveRunPrompts({
@@ -663,138 +520,6 @@ export const ChannelSessionsLive = Layer.scoped(
           ),
         ),
       )
-
-    const createSession = (message: Message): FallibleEffect<ChannelSession> =>
-      Effect.gen(function* () {
-        const { rootDir, workdir } = yield* createSessionPaths()
-        let opencodeSession: ChannelSession["opencode"] | null = null
-        const systemPromptAppend = buildSessionSystemAppend({
-          message,
-          additionalInstructions: config.sessionInstructions,
-        })
-        const sessionCreateSpec = buildSessionCreateSpec({
-          channelId: message.channelId,
-          workdir,
-          systemPromptAppend,
-        })
-
-        try {
-          opencodeSession = yield* opencode.createSession(
-            sessionCreateSpec.workdir,
-            sessionCreateSpec.title,
-            sessionCreateSpec.systemPromptAppend,
-          )
-          const queue = yield* Queue.unbounded<RunRequest>()
-
-          const session: ChannelSession = {
-            channelId: message.channelId,
-            opencode: opencodeSession,
-            systemPromptAppend,
-            rootDir,
-            workdir,
-            queue,
-            activeRun: null,
-          }
-
-          yield* FiberSet.run(fiberSet, worker(session))
-          yield* putSession(session)
-
-          yield* logger.info("created channel session", {
-            channelId: message.channelId,
-            sessionId: opencodeSession.sessionId,
-            backend: opencodeSession.backend,
-            workdir,
-            triggerPhrase: config.triggerPhrase,
-          })
-
-          return session
-        } catch (error) {
-          if (opencodeSession) {
-            yield* opencodeSession.close().pipe(Effect.ignore)
-          }
-          yield* removeSessionRoot(rootDir)
-          throw error
-        }
-      })
-
-    const createOrGetSession = (message: Message): FallibleEffect<ChannelSession> =>
-      Effect.gen(function* () {
-        const existing = yield* getSession(message.channelId)
-        if (existing) {
-          return existing
-        }
-        return yield* withSessionGate(
-          message.channelId,
-          Effect.gen(function* () {
-            const current = yield* getSession(message.channelId)
-            if (current) {
-              return current
-            }
-            return yield* createSession(message)
-          }),
-        )
-      })
-
-    const recreateSession = (
-      session: ChannelSession,
-      message: Message,
-      reason: string,
-    ): FallibleEffect<ChannelSession> =>
-      withSessionGate(
-        message.channelId,
-        Effect.gen(function* () {
-          const current = yield* getSession(message.channelId)
-          if (!current) {
-            return yield* createSession(message)
-          }
-
-          if (current.opencode.sessionId !== session.opencode.sessionId) {
-            return current
-          }
-
-          const previous = current.opencode
-          const sessionCreateSpec = buildSessionCreateSpec({
-            channelId: message.channelId,
-            workdir: current.workdir,
-            systemPromptAppend: current.systemPromptAppend,
-          })
-          const replacement = yield* opencode.createSession(
-            sessionCreateSpec.workdir,
-            sessionCreateSpec.title,
-            sessionCreateSpec.systemPromptAppend,
-          )
-          yield* replaceSessionHandle(current, replacement)
-          yield* previous.close().pipe(Effect.ignore)
-          yield* logger.warn("recovered channel session", {
-            channelId: current.channelId,
-            previousSessionId: previous.sessionId,
-            sessionId: replacement.sessionId,
-            backend: replacement.backend,
-            workdir: current.workdir,
-            reason,
-          })
-          return current
-        }),
-      )
-
-    const ensureSessionHealth = (
-      session: ChannelSession,
-      message: Message,
-      reason: string,
-      allowBusySession = true,
-    ): FallibleEffect<ChannelSession> =>
-      Effect.gen(function* () {
-        if (allowBusySession && session.activeRun) {
-          return session
-        }
-
-        const healthy = yield* opencode.isHealthy(session.opencode)
-        if (healthy) {
-          return session
-        }
-
-        return yield* recreateSession(session, message, reason)
-      })
 
     const getUsableSession = (message: Message, reason: string): FallibleEffect<ChannelSession> =>
       createOrGetSession(message).pipe(
@@ -1236,12 +961,7 @@ export const ChannelSessionsLive = Layer.scoped(
 
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
-        const state = yield* Ref.get(stateRef)
-        for (const session of state.sessionsByChannelId.values()) {
-          yield* Queue.shutdown(session.queue)
-          yield* session.opencode.close().pipe(Effect.ignore)
-          yield* removeSessionRoot(session.rootDir)
-        }
+        yield* shutdownSessions().pipe(Effect.ignore)
         yield* FiberSet.clear(fiberSet)
       }),
     )
