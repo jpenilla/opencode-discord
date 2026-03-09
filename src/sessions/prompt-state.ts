@@ -1,6 +1,7 @@
 import type { AssistantMessage, ToolPart, UserMessage } from "@opencode-ai/sdk/v2"
 import { Deferred, Effect, Ref } from "effect"
 
+import { isCompactionSummaryAssistant, isObservedAssistantMessage } from "@/opencode/events.ts"
 import type { PromptResult } from "@/opencode/service.ts"
 
 type TrackedAssistant = {
@@ -30,12 +31,9 @@ const isPromptReply = (userMessageId: string, message: AssistantMessage) =>
   message.parentID === userMessageId
 
 const isResolvablePromptReply = (message: AssistantMessage) =>
-  message.error !== undefined ||
-  (
-    message.time.completed !== undefined &&
-    message.finish !== "tool-calls" &&
-    message.finish !== "unknown"
-  )
+  isObservedAssistantMessage(message) &&
+  message.finish !== "tool-calls" &&
+  message.finish !== "unknown"
 
 const cloneTrackedAssistant = (tracked?: TrackedAssistant): TrackedAssistant => ({
   info: tracked?.info ?? null,
@@ -55,7 +53,12 @@ const selectPromptReplyCandidate = (
     if (!info) {
       continue
     }
-    if (!isPromptReply(prompt.userMessageId, info) || !isResolvablePromptReply(info) || tracked.liveToolCallIds.size > 0) {
+    if (
+      !isPromptReply(prompt.userMessageId, info) ||
+      isCompactionSummaryAssistant(info) ||
+      !isResolvablePromptReply(info) ||
+      tracked.liveToolCallIds.size > 0
+    ) {
       continue
     }
 
@@ -199,10 +202,8 @@ export const handleUserMessageUpdated = (
   message: UserMessage,
 ): Effect.Effect<ReadonlyArray<PromptTrackingAction>> =>
   updatePendingPrompt(stateRef, (current) => {
-    if (current.userMessageId && current.userMessageId !== message.id) {
-      return current
-    }
-
+    // Auto compaction can synthesize a follow-up user message that becomes the parent
+    // of the real final assistant reply for the same pending prompt.
     return current.userMessageId === message.id
       ? current
       : {

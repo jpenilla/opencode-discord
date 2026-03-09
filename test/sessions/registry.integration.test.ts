@@ -668,7 +668,7 @@ describe("ChannelSessionsLive integration", () => {
         Effect.gen(function* () {
           const sessions = yield* ChannelSessions
           yield* sessions.submit(message, { prompt: "hello" })
-          expect(yield* Queue.take(harness.replyEvents)).toBe("*🗜️ summary text*")
+          expect(yield* Queue.take(harness.replyEvents)).toBe("🗜️ Compacted Summary\nsummary text")
           expect(yield* Queue.take(harness.replyEvents)).toBe("final reply")
         }).pipe(Effect.provide(harness.layer)),
       ),
@@ -710,7 +710,7 @@ describe("ChannelSessionsLive integration", () => {
               mode: "compaction",
             }))
           )
-          expect(yield* Queue.take(harness.replyEvents)).toBe("*🗜️ summary text*")
+          expect(yield* Queue.take(harness.replyEvents)).toBe("🗜️ Compacted Summary\nsummary text")
         }).pipe(Effect.provide(harness.layer)),
       ),
     )

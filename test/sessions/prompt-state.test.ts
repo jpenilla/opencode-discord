@@ -100,28 +100,37 @@ const makeUserMessage = (id: string): UserMessage =>
   })
 
 describe("prompt-state", () => {
-  test("ignores compaction summaries for prompt completion and keeps waiting for the direct reply", async () => {
+  test("ignores auto-compaction summaries parented to the original user message", async () => {
     const state = await Effect.runPromise(createPromptState())
-    await Effect.runPromise(beginPendingPrompt(state))
+    const completion = await Effect.runPromise(beginPendingPrompt(state))
+    await Effect.runPromise(handleUserMessageUpdated(state, makeUserMessage("user-1")))
 
-    const first = await Effect.runPromise(handleAssistantMessageUpdated(state, makeAssistantMessage({
+    const summaryActions = await Effect.runPromise(handleAssistantMessageUpdated(state, makeAssistantMessage({
       id: "summary-1",
-      parentId: "synthetic-1",
-      summary: true,
-      mode: "compaction",
-      completed: true,
-    })))
-    const second = await Effect.runPromise(handleAssistantMessageUpdated(state, makeAssistantMessage({
-      id: "summary-1",
-      parentId: "synthetic-1",
+      parentId: "user-1",
       summary: true,
       mode: "compaction",
       completed: true,
     })))
 
-    expect(first).toEqual([])
-    expect(second).toEqual([])
+    expect(summaryActions).toEqual([])
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true)
     expect(await Effect.runPromise(Ref.get(state))).not.toBeNull()
+
+    await Effect.runPromise(handleUserMessageUpdated(state, makeUserMessage("user-2")))
+    const finalActions = await Effect.runPromise(handleAssistantMessageUpdated(state, makeAssistantMessage({
+      id: "assistant-1",
+      parentId: "user-2",
+      completed: true,
+    })))
+
+    expect(finalActions).toHaveLength(1)
+    const action = finalActions[0]
+    expect(action?.type).toBe("complete-prompt")
+    if (!action || action.type !== "complete-prompt") {
+      throw new Error("expected a completion action")
+    }
+    expect(action.messageId).toBe("assistant-1")
   })
 
   test("does not complete the prompt until the live tool settles", async () => {

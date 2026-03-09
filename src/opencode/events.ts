@@ -78,6 +78,14 @@ export const getAssistantMessageUpdated = (event: Event): AssistantMessage | nul
   return event.properties.info.role === "assistant" ? event.properties.info : null
 }
 
+export const isCompactionSummaryAssistant = (message: AssistantMessage) =>
+  message.summary === true &&
+  message.mode === "compaction" &&
+  message.agent === "compaction"
+
+export const isObservedAssistantMessage = (message: AssistantMessage) =>
+  message.time.completed !== undefined || message.finish !== undefined || message.error !== undefined
+
 export const getUserMessageUpdated = (event: Event): UserMessage | null => {
   if (event.type !== "message.updated") {
     return null

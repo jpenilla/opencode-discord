@@ -8,6 +8,8 @@ import {
   getQuestionAsked,
   getQuestionRejected,
   getQuestionReplied,
+  isCompactionSummaryAssistant,
+  isObservedAssistantMessage,
   getSessionError,
   getToolPartUpdated,
   getUserMessageUpdated,
@@ -42,14 +44,6 @@ type EventRuntimeDeps = {
   logger: LoggerShape
   formatError: (error: unknown) => string
 }
-
-const isCompactionSummary = (message: NonNullable<ReturnType<typeof getAssistantMessageUpdated>>) =>
-  message.summary === true &&
-  message.mode === "compaction" &&
-  message.agent === "compaction"
-
-const isObservedAssistant = (message: NonNullable<ReturnType<typeof getAssistantMessageUpdated>>) =>
-  message.time.completed !== undefined || message.finish !== undefined || message.error !== undefined
 
 export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
   handleEvent: (event) =>
@@ -123,7 +117,7 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
               ),
             )
 
-      if (assistantMessage && isCompactionSummary(assistantMessage) && isObservedAssistant(assistantMessage)) {
+      if (assistantMessage && isCompactionSummaryAssistant(assistantMessage) && isObservedAssistantMessage(assistantMessage)) {
         yield* emitCompactionSummary(context.session, assistantMessage.id)
       }
 

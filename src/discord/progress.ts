@@ -28,5 +28,5 @@ export const formatCompactionSummary = (text: string) => {
   if (!trimmed) {
     return null
   }
-  return `*🗜️ ${trimmed}*`
+  return `🗜️ Compacted Summary\n${trimmed}`
 }

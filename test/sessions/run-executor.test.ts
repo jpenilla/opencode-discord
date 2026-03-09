@@ -51,10 +51,12 @@ const makeRuntime = async (options?: {
   configureActiveRun?: (activeRun: ActiveRun) => void
 }) => {
   const calls = await Effect.runPromise(Ref.make<string[]>([]))
+  const finalResponseMessageIds = await Effect.runPromise(Ref.make<string[]>([]))
   const record = (entry: string) => Ref.update(calls, (current) => [...current, entry])
 
   return {
     calls,
+    finalResponseMessageIds,
     runtime: {
       runPrompts: ({
         activeRun,
@@ -105,8 +107,10 @@ const makeRuntime = async (options?: {
         record(`terminateQuestionBatches:${sessionId}:${reason}`),
       ensureSessionHealthAfterFailure: (_session: ChannelSession, _responseMessage: Message) =>
         record("ensureSessionHealthAfterFailure"),
-      sendFinalResponse: (_message: Message, text: string) =>
-        record(`sendFinalResponse:${text}`),
+      sendFinalResponse: (message: Message, text: string) =>
+        Ref.update(finalResponseMessageIds, (current) => [...current, message.id]).pipe(
+          Effect.zipRight(record(`sendFinalResponse:${text}`)),
+        ),
       sendRunFailure: (_message: Message, error: unknown) =>
         record(`sendRunFailure:${error instanceof Error ? error.message : String(error)}`),
       sendQuestionUiFailure: (_message: Message, error: unknown) =>
@@ -143,6 +147,19 @@ describe("executeRunBatch", () => {
       "terminateQuestionBatches:session-1:expired",
     ])
     expect(session.activeRun).toBeNull()
+  })
+
+  test("always sends the final Discord reply against the original trigger message", async () => {
+    const session = makeSession()
+    const responseMessage = makeMessage("trigger-message")
+    const initialRequests = makeInitialRequests(responseMessage)
+    const { runtime, finalResponseMessageIds } = await makeRuntime({
+      promptResult: { messageId: "assistant-after-auto-compaction", transcript: "final transcript" },
+    })
+
+    await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests))
+
+    expect(await Effect.runPromise(Ref.get(finalResponseMessageIds))).toEqual(["trigger-message"])
   })
 
   test("sends the question UI failure reply for empty transcripts with an unnotified UI failure", async () => {

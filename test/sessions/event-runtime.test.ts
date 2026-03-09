@@ -406,12 +406,11 @@ describe("createEventRuntime", () => {
     expect(await getRef(sentSummaries)).toEqual(["summary text"])
   })
 
-  test("emits observed compaction summaries through the session summary sink without completing the prompt", async () => {
+  test("keeps waiting for the follow-up assistant after an auto-compaction summary on the original user message", async () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true)
+    const completion = await Effect.runPromise(beginPendingPrompt(promptState))
     const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]))
     const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]))
-
-    await Effect.runPromise(beginPendingPrompt(promptState))
 
     const runtime = createEventRuntime({
       getSessionContext: (sessionId) =>
@@ -422,10 +421,17 @@ describe("createEventRuntime", () => {
         Ref.update(sentSummaries, (current) => [...current, text]),
       readPromptResult: (_session, messageId) =>
         Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
-          Effect.as({
-            messageId,
-            transcript: "summary text",
-          }),
+          Effect.as(
+            messageId === "summary-1"
+              ? {
+                  messageId,
+                  transcript: "summary text",
+                }
+              : {
+                  messageId,
+                  transcript: "final reply",
+                },
+          ),
         ),
       logger: {
         info: () => Effect.void,
@@ -435,16 +441,10 @@ describe("createEventRuntime", () => {
       formatError: (error) => String(error),
     })
 
+    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()))
     await Effect.runPromise(runtime.handleEvent(makeAssistantMessageUpdatedEvent({
       id: "summary-1",
-      parentId: "synthetic-1",
-      summary: true,
-      mode: "compaction",
-      completed: true,
-    })))
-    await Effect.runPromise(runtime.handleEvent(makeAssistantMessageUpdatedEvent({
-      id: "summary-1",
-      parentId: "synthetic-1",
+      parentId: "user-1",
       summary: true,
       mode: "compaction",
       completed: true,
@@ -453,7 +453,20 @@ describe("createEventRuntime", () => {
     expect(await getRef(readPromptCalls)).toEqual(["summary-1"])
     expect(await getRef(sentSummaries)).toEqual(["summary text"])
     expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([])
-    expect(await Effect.runPromise(Ref.get(promptState))).not.toBeNull()
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true)
+
+    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent("user-2")))
+    await Effect.runPromise(runtime.handleEvent(makeAssistantMessageUpdatedEvent({
+      id: "assistant-1",
+      parentId: "user-2",
+      completed: true,
+    })))
+
+    expect(await getRef(readPromptCalls)).toEqual(["summary-1", "assistant-1"])
+    expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
+      messageId: "assistant-1",
+      transcript: "final reply",
+    })
   })
 
   test("waits for the late terminal tool update before completing the pending prompt", async () => {
