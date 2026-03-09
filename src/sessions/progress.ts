@@ -217,27 +217,27 @@ const finalizeLiveCards = (
   reason: RunFinalizationReason,
 ) =>
   Effect.gen(function* () {
-    const terminalState = reason === "interrupted" ? "interrupted" : "shutdown"
+    if (reason === "shutdown") {
+      yield* Effect.forEach(
+        state.activeToolParts.entries(),
+        ([callId, part]) => {
+          const card = state.toolCards.get(callId)
+          if (!card) {
+            return Effect.void
+          }
 
-    yield* Effect.forEach(
-      state.activeToolParts.entries(),
-      ([callId, part]) => {
-        const card = state.toolCards.get(callId)
-        if (!card) {
-          return Effect.void
-        }
-
-        return Effect.promise(() =>
-          editToolCard({
-            card,
-            part,
-            workdir,
-            terminalState,
-          }),
-        ).pipe(Effect.ignore)
-      },
-      { concurrency: "unbounded", discard: true },
-    )
+          return Effect.promise(() =>
+            editToolCard({
+              card,
+              part,
+              workdir,
+              terminalState: "shutdown",
+            }),
+          ).pipe(Effect.ignore)
+        },
+        { concurrency: "unbounded", discard: true },
+      )
+    }
 
     state.activeToolParts.clear()
 

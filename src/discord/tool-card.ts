@@ -4,7 +4,7 @@ import type { ToolPart } from "@opencode-ai/sdk/v2"
 import { displaySessionPath } from "@/sandbox/session-paths.ts"
 
 const EDIT_TOOL_CARDS = true
-export type ToolCardTerminalState = "interrupted" | "shutdown"
+export type ToolCardTerminalState = "shutdown"
 
 const truncate = (value: string, maxLength: number) => {
   if (value.length <= maxLength) {
@@ -14,9 +14,6 @@ const truncate = (value: string, maxLength: number) => {
 }
 
 const formatStatus = (part: ToolPart, terminalState?: ToolCardTerminalState) => {
-  if (terminalState === "interrupted") {
-    return "Interrupted"
-  }
   if (terminalState === "shutdown") {
     return "Stopped"
   }
@@ -34,9 +31,6 @@ const formatStatus = (part: ToolPart, terminalState?: ToolCardTerminalState) => 
 }
 
 const statusEmoji = (part: ToolPart, terminalState?: ToolCardTerminalState) => {
-  if (terminalState === "interrupted") {
-    return "‼️"
-  }
   if (terminalState === "shutdown") {
     return "🛑"
   }
@@ -561,9 +555,7 @@ const renderToolCard = (input: {
     lines.push(`- Results Error: \`${resultInfo.error}\``)
   }
 
-  if (terminalState === "interrupted") {
-    lines.push("- Note: This tool did not complete because the run was interrupted.")
-  } else if (terminalState === "shutdown") {
+  if (terminalState === "shutdown") {
     lines.push("- Note: This tool did not complete because the bot shut down.")
   } else if (part.state.status === "error") {
     lines.push(`- Error: \`${truncate(normalizeDisplayText(part.state.error, input.workdir), 600)}\``)

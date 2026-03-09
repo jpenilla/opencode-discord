@@ -107,14 +107,11 @@ const runFinalizationScenario = async (reason: "interrupted" | "shutdown") => {
 }
 
 describe("runProgressWorker", () => {
-  test("updates live tool and compaction cards to interrupted", async () => {
+  test("updates the live compaction card to interrupted", async () => {
     const result = await runFinalizationScenario("interrupted")
 
     expect(result.sent.map(cardText)).toContain("**💻 🛠️ `bash` Running**\n- Command: `pwd`\n- Purpose: Print cwd")
     expect(result.sent.map(cardText)).toContain("**🗜️ Compacting session**\nOpenCode is summarizing earlier context for this session.")
-    expect(result.edited.map(cardText)).toContain(
-      "**💻 ‼️ `bash` Interrupted**\n- Command: `pwd`\n- Purpose: Print cwd\n- Note: This tool did not complete because the run was interrupted.",
-    )
     expect(result.edited.map(cardText)).toContain(
       "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
     )
