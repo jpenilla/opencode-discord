@@ -98,8 +98,9 @@ const makeHarness = async (options?: {
     getSession: (channelId) => Effect.succeed(channelId === session.channelId ? session : null),
     getIdleCompactionCard: (_sessionId) => Ref.get(idleCardRef),
     setIdleCompactionCard: (_sessionId, card) => Ref.set(idleCardRef, card),
-    updateIdleCompactionCard: (_sessionId, title, body) =>
-      Ref.update(compactionUpdates, (current) => [...current, { title, body }]).pipe(
+    finalizeIdleCompactionCard: (_sessionId, title, body) =>
+      Ref.set(idleCardRef, null).pipe(
+        Effect.zipRight(Ref.update(compactionUpdates, (current) => [...current, { title, body }])),
         Effect.zipRight(Deferred.succeed(compactUpdated, undefined).pipe(Effect.ignore)),
       ),
     isSessionHealthy: () => Effect.succeed(options?.sessionHealthy ?? true),

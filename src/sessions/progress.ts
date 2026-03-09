@@ -58,6 +58,9 @@ const createProgressState = (): ProgressState => ({
 
 const isTodoTool = (tool: string) => tool === "todowrite"
 
+const hasLiveCompaction = (state: ProgressState) =>
+  state.compactionCard !== null || state.compactionPartIds.size > 0
+
 const shouldSkipToolUpdate = (
   state: ProgressState,
   event: Extract<RunProgressEvent, { type: "tool-updated" }>,
@@ -199,6 +202,13 @@ const handleCompactionCard = (
       return
     }
 
+    // session.compacted is only keyed by session id upstream, so a delayed event from an
+    // earlier or aborted compaction attempt can arrive while an unrelated later run is active.
+    // Only treat completion as relevant if this worker already observed the matching compaction.
+    if (!hasLiveCompaction(state)) {
+      return
+    }
+
     const compactedCard = compactionCardContent("compacted")
     yield* Effect.promise(() =>
       upsertInfoCard({
@@ -208,6 +218,7 @@ const handleCompactionCard = (
         body: compactedCard.body,
       }),
     )
+    state.compactionPartIds.clear()
     state.compactionCard = null
   })
 
@@ -240,6 +251,7 @@ const finalizeLiveCards = (
     }
 
     state.activeToolParts.clear()
+    state.compactionPartIds.clear()
 
     if (!state.compactionCard) {
       return

@@ -96,6 +96,24 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
   const getIdleCompactionCard = (sessionId: string) =>
     Ref.get(runtime.stateRef).pipe(Effect.map((state) => state.idleCompactionCardsBySessionId.get(sessionId) ?? null))
 
+  const takeIdleCompactionCard = (sessionId: string) =>
+    Ref.modify(runtime.stateRef, (current): readonly [Message | null, State] => {
+      const existing = current.idleCompactionCardsBySessionId.get(sessionId) ?? null
+      if (!existing) {
+        return [null, current]
+      }
+
+      const idleCompactionCardsBySessionId = new Map(current.idleCompactionCardsBySessionId)
+      idleCompactionCardsBySessionId.delete(sessionId)
+      return [
+        existing,
+        {
+          ...current,
+          idleCompactionCardsBySessionId,
+        },
+      ]
+    })
+
   const toPersistedSession = (session: ChannelSession): PersistedChannelSession => ({
     channelId: session.channelId,
     opencodeSessionId: session.opencode.sessionId,
@@ -587,6 +605,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
     getActiveRunBySessionId,
     getSessionContext,
     getIdleCompactionCard,
+    takeIdleCompactionCard,
     setActiveRun,
     setIdleCompactionCard,
     createOrGetSession,

@@ -90,6 +90,16 @@ const makeQuestionRepliedEvent = (): GlobalEvent =>
     },
   })
 
+const makeSessionCompactedEvent = (): GlobalEvent =>
+  unsafeStub<GlobalEvent>({
+    payload: {
+      type: "session.compacted",
+      properties: {
+        sessionID: "session-1",
+      },
+    },
+  })
+
 const makeHarness = async (options: {
   promptImpl: (input: { prompt: string; callIndex: number }) => Effect.Effect<PromptResult>
   isHealthyImpl?: () => Effect.Effect<boolean>
@@ -601,6 +611,75 @@ describe("ChannelSessionsLive integration", () => {
     ])
     expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
       "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
+    )
+  })
+
+  test("ignores a late compaction completion after idle compaction was interrupted", async () => {
+    const compactStarted = await Effect.runPromise(Deferred.make<void>())
+    const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>())
+    const secondPromptStarted = await Effect.runPromise(Deferred.make<void>())
+    const allowSecondPromptToFinish = await Effect.runPromise(Deferred.make<void>())
+    const harness = await makeHarness({
+      promptImpl: ({ callIndex }) =>
+        callIndex === 1
+          ? Effect.succeed({
+              messageId: "assistant-1",
+              transcript: "hello",
+            })
+          : Deferred.succeed(secondPromptStarted, undefined).pipe(
+              Effect.zipRight(Deferred.await(allowSecondPromptToFinish)),
+              Effect.as({
+                messageId: "assistant-2",
+                transcript: "later",
+              }),
+            ),
+      compactSessionImpl: () =>
+        Deferred.succeed(compactStarted, undefined).pipe(
+          Effect.zipRight(Deferred.await(allowCompactToFinish)),
+        ),
+      interruptSessionImpl: () =>
+        Deferred.succeed(allowCompactToFinish, undefined).pipe(Effect.asVoid),
+    })
+    const initialMessage = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    })
+    const laterMessage = harness.makeMessage({
+      id: "message-2",
+      content: "hey opencode later",
+    })
+    const compactCommand = harness.makeCommandInteraction("compact")
+    const interruptCommand = harness.makeCommandInteraction("interrupt")
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions
+          yield* sessions.submit(initialMessage, { prompt: "hello" })
+          yield* Queue.take(harness.replyEvents)
+          yield* waitForNoActiveRun(sessions, "session-1")
+
+          yield* sessions.handleInteraction(compactCommand.interaction)
+          yield* Deferred.await(compactStarted)
+          yield* sessions.handleInteraction(interruptCommand.interaction)
+
+          yield* sessions.submit(laterMessage, { prompt: "later" })
+          yield* Deferred.await(secondPromptStarted)
+          yield* Effect.promise(() => harness.publishEvent(makeSessionCompactedEvent()))
+          yield* Deferred.succeed(allowSecondPromptToFinish, undefined).pipe(Effect.ignore)
+          yield* Queue.take(harness.replyEvents)
+        }).pipe(Effect.provide(harness.layer)),
+      ),
+    )
+
+    expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
+      "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
+    )
+    expect((await getRef(harness.sentPayloads)).map(cardText)).not.toContain(
+      "**🗜️ Session compacted**\nOpenCode summarized earlier context for this session.",
+    )
+    expect((await getRef(harness.editedPayloads)).map(cardText)).not.toContain(
+      "**🗜️ Session compacted**\nOpenCode summarized earlier context for this session.",
     )
   })
 

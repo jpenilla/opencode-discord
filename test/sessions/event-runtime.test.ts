@@ -113,7 +113,7 @@ describe("createEventRuntime", () => {
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun: null } : null),
       handleQuestionEvent: (event) => Ref.update(questionEvents, (current) => [...current, event]),
-      updateIdleCompactionCard: () => Effect.void,
+      finalizeIdleCompactionCard: () => Effect.void,
     })
 
     await Effect.runPromise(runtime.handleEvent(makeQuestionAskedEvent()))
@@ -133,7 +133,7 @@ describe("createEventRuntime", () => {
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun: null } : null),
       handleQuestionEvent: (event) => Ref.update(questionEvents, (current) => [...current, event]),
-      updateIdleCompactionCard: () => Effect.void,
+      finalizeIdleCompactionCard: () => Effect.void,
     })
 
     await Effect.runPromise(runtime.handleEvent(makeQuestionRepliedEvent()))
@@ -161,7 +161,7 @@ describe("createEventRuntime", () => {
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
-      updateIdleCompactionCard: () => Effect.void,
+      finalizeIdleCompactionCard: () => Effect.void,
     })
 
     await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent()))
@@ -180,7 +180,7 @@ describe("createEventRuntime", () => {
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun: null } : null),
       handleQuestionEvent: () => Effect.void,
-      updateIdleCompactionCard: (sessionId, title, body) =>
+      finalizeIdleCompactionCard: (sessionId, title, body) =>
         Ref.update(idleUpdates, (current) => [...current, { sessionId, title, body }]),
     })
 
@@ -200,7 +200,7 @@ describe("createEventRuntime", () => {
     const runtime = createEventRuntime({
       getSessionContext: () => Effect.succeed(null),
       handleQuestionEvent: () => Ref.update(questionEvents, (count) => count + 1),
-      updateIdleCompactionCard: () => Ref.update(idleUpdates, (count) => count + 1),
+      finalizeIdleCompactionCard: () => Ref.update(idleUpdates, (count) => count + 1),
     })
 
     await Effect.runPromise(runtime.handleEvent(makeQuestionAskedEvent("missing-session")))

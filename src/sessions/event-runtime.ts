@@ -23,7 +23,7 @@ type EventRuntimeDeps = {
       | { type: "replied"; sessionId: string; requestId: string; answers: ReadonlyArray<QuestionAnswer> }
       | { type: "rejected"; sessionId: string; requestId: string },
   ) => Effect.Effect<void, unknown>
-  updateIdleCompactionCard: (sessionId: string, title: string, body: string) => Effect.Effect<void, unknown>
+  finalizeIdleCompactionCard: (sessionId: string, title: string, body: string) => Effect.Effect<void, unknown>
 }
 
 export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
@@ -77,7 +77,7 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
 
       if (progressEvents.some((progressEvent) => progressEvent.type === "session-compacted")) {
         const compactedCard = compactionCardContent("compacted")
-        yield* deps.updateIdleCompactionCard(
+        yield* deps.finalizeIdleCompactionCard(
           sessionId,
           compactedCard.title,
           compactedCard.body,

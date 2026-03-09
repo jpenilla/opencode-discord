@@ -107,6 +107,43 @@ const runFinalizationScenario = async (reason: "interrupted" | "shutdown") => {
 }
 
 describe("runProgressWorker", () => {
+  test("ignores session-compacted without an active compaction in this worker", async () => {
+    const harness = await makeHarness()
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const queue = yield* Queue.unbounded<RunProgressEvent>()
+          const worker = yield* Effect.fork(
+            runProgressWorker(harness.sourceMessage, "/home/opencode/workspace", queue),
+          )
+
+          const ack = yield* Deferred.make<void>()
+          yield* Queue.offer(queue, {
+            type: "session-compacted",
+            compacted: {
+              sessionID: "session-1",
+            },
+          })
+          yield* Queue.offer(queue, {
+            type: "run-finalizing",
+            ack,
+          })
+          yield* Deferred.await(ack)
+          yield* Fiber.interrupt(worker)
+
+          return {
+            sent: yield* Ref.get(harness.sentPayloads),
+            edited: yield* Ref.get(harness.editedPayloads),
+          }
+        }),
+      ),
+    )
+
+    expect(result.sent.map(cardText)).toEqual([])
+    expect(result.edited.map(cardText)).toEqual([])
+  })
+
   test("updates the live compaction card to interrupted", async () => {
     const result = await runFinalizationScenario("interrupted")
 
@@ -115,6 +152,56 @@ describe("runProgressWorker", () => {
     expect(result.edited.map(cardText)).toContain(
       "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
     )
+  })
+
+  test("ignores a late session-compacted event after interrupted compaction finalization", async () => {
+    const harness = await makeHarness()
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const queue = yield* Queue.unbounded<RunProgressEvent>()
+          const worker = yield* Effect.fork(
+            runProgressWorker(harness.sourceMessage, "/home/opencode/workspace", queue),
+          )
+
+          const firstAck = yield* Deferred.make<void>()
+          const secondAck = yield* Deferred.make<void>()
+          yield* Queue.offer(queue, {
+            type: "session-compacting",
+            part: makeCompactionPart(),
+          })
+          yield* Queue.offer(queue, {
+            type: "run-finalizing",
+            ack: firstAck,
+            reason: "interrupted",
+          })
+          yield* Deferred.await(firstAck)
+          yield* Queue.offer(queue, {
+            type: "session-compacted",
+            compacted: {
+              sessionID: "session-1",
+            },
+          })
+          yield* Queue.offer(queue, {
+            type: "run-finalizing",
+            ack: secondAck,
+          })
+          yield* Deferred.await(secondAck)
+          yield* Fiber.interrupt(worker)
+
+          return {
+            sent: yield* Ref.get(harness.sentPayloads),
+            edited: yield* Ref.get(harness.editedPayloads),
+          }
+        }),
+      ),
+    )
+
+    expect(result.sent.map(cardText)).toContain("**🗜️ Compacting session**\nOpenCode is summarizing earlier context for this session.")
+    expect(result.edited.map(cardText)).toEqual([
+      "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
+    ])
   })
 
   test("updates live tool and compaction cards to stopped on shutdown", async () => {

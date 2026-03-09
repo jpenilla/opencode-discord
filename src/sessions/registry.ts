@@ -107,6 +107,7 @@ export const ChannelSessionsLive = Layer.scoped(
       getActiveRunBySessionId,
       getSessionContext,
       getIdleCompactionCard,
+      takeIdleCompactionCard,
       setActiveRun,
       setIdleCompactionCard,
       createOrGetSession,
@@ -116,8 +117,8 @@ export const ChannelSessionsLive = Layer.scoped(
       shutdownSessions,
     } = sessionLifecycle
 
-    const updateIdleCompactionCard = (sessionId: string, title: string, body: string) =>
-      getIdleCompactionCard(sessionId).pipe(
+    const finalizeIdleCompactionCard = (sessionId: string, title: string, body: string) =>
+      takeIdleCompactionCard(sessionId).pipe(
         Effect.flatMap((card) => {
           if (!card) {
             return Effect.void
@@ -125,10 +126,10 @@ export const ChannelSessionsLive = Layer.scoped(
 
           return Effect.promise(() => editInfoCard(card, title, body)).pipe(
             Effect.catchAll((error) =>
-              logger.warn("failed to update idle compaction card", {
+              logger.warn("failed to finalize idle compaction card", {
                 sessionId,
                 error: formatError(error),
-              }).pipe(Effect.zipRight(setIdleCompactionCard(sessionId, null))),
+              }),
             ),
             Effect.asVoid,
           )
@@ -147,7 +148,7 @@ export const ChannelSessionsLive = Layer.scoped(
     const eventRuntime = createEventRuntime({
       getSessionContext,
       handleQuestionEvent: questionRuntime.handleEvent,
-      updateIdleCompactionCard,
+      finalizeIdleCompactionCard,
     })
 
     yield* eventQueue.take().pipe(
@@ -217,7 +218,7 @@ export const ChannelSessionsLive = Layer.scoped(
       getSession: getOrRestoreSession,
       getIdleCompactionCard,
       setIdleCompactionCard,
-      updateIdleCompactionCard,
+      finalizeIdleCompactionCard,
       isSessionHealthy: opencode.isHealthy,
       compactSession: opencode.compactSession,
       interruptSession: opencode.interruptSession,
