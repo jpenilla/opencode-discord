@@ -20,6 +20,11 @@ export type SessionLifecycleState = {
   idleCompactionCardsBySessionId: Map<string, Message>
 }
 
+export type SessionContext = {
+  session: ChannelSession
+  activeRun: ActiveRun | null
+}
+
 type SessionGateDecision = {
   gate: SessionGate
   owner: boolean
@@ -65,6 +70,20 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
 
   const getActiveRunBySessionId = (sessionId: string) =>
     Ref.get(runtime.stateRef).pipe(Effect.map((state) => state.activeRunsBySessionId.get(sessionId) ?? null))
+
+  const getSessionContext = (sessionId: string) =>
+    Ref.get(runtime.stateRef).pipe(
+      Effect.map((state): SessionContext | null => {
+        const session = state.sessionsBySessionId.get(sessionId)
+        if (!session) {
+          return null
+        }
+        return {
+          session,
+          activeRun: state.activeRunsBySessionId.get(sessionId) ?? null,
+        }
+      }),
+    )
 
   const getIdleCompactionCard = (sessionId: string) =>
     Ref.get(runtime.stateRef).pipe(Effect.map((state) => state.idleCompactionCardsBySessionId.get(sessionId) ?? null))
@@ -352,6 +371,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(runt
   return {
     getSession,
     getActiveRunBySessionId,
+    getSessionContext,
     getIdleCompactionCard,
     setActiveRun,
     setIdleCompactionCard,

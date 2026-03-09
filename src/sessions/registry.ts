@@ -128,30 +128,34 @@ export const ChannelSessionsLive = Layer.scoped(
 
     const syncTypingForSession = (sessionId: string) =>
       Ref.get(stateRef).pipe(
-        Effect.flatMap((state) => {
-          const activeRun = state.activeRunsBySessionId.get(sessionId)
-          if (!activeRun) {
-            return Effect.void
-          }
+        Effect.flatMap((state) =>
+          getSessionContext(sessionId).pipe(
+            Effect.flatMap((context) => {
+              const activeRun = context?.activeRun ?? null
+              if (!activeRun) {
+                return Effect.void
+              }
 
-          if (hasPendingQuestionsForSession(state, sessionId)) {
-            return Effect.promise(() => activeRun.typing.pause()).pipe(
-              Effect.timeoutOption("1 second"),
-              Effect.flatMap((result) =>
-                result._tag === "Some"
-                  ? Effect.void
-                  : logger.warn("typing pause timed out while question prompt was active", {
-                      channelId: activeRun.discordMessage.channelId,
-                      sessionId,
-                    }),
-              ),
-            )
-          }
+              if (hasPendingQuestionsForSession(state, sessionId)) {
+                return Effect.promise(() => activeRun.typing.pause()).pipe(
+                  Effect.timeoutOption("1 second"),
+                  Effect.flatMap((result) =>
+                    result._tag === "Some"
+                      ? Effect.void
+                      : logger.warn("typing pause timed out while question prompt was active", {
+                          channelId: activeRun.discordMessage.channelId,
+                          sessionId,
+                        }),
+                  ),
+                )
+              }
 
-          return Effect.sync(() => {
-            activeRun.typing.resume()
-          })
-        }),
+              return Effect.sync(() => {
+                activeRun.typing.resume()
+              })
+            }),
+          ),
+        ),
       )
 
     const sendErrorReply = (message: Message, title: string, error: unknown) =>
@@ -180,6 +184,7 @@ export const ChannelSessionsLive = Layer.scoped(
     const {
       getSession: getChannelSession,
       getActiveRunBySessionId,
+      getSessionContext,
       getIdleCompactionCard,
       setActiveRun,
       setIdleCompactionCard,
@@ -432,14 +437,13 @@ export const ChannelSessionsLive = Layer.scoped(
           return Effect.void
         }
 
-        return Ref.get(stateRef).pipe(
-          Effect.flatMap((state) => {
-            const session = state.sessionsBySessionId.get(sessionId)
-            if (!session) {
+        return getSessionContext(sessionId).pipe(
+          Effect.flatMap((context) => {
+            if (!context) {
               return Effect.void
             }
 
-            const activeRun = state.activeRunsBySessionId.get(sessionId)
+            const { session, activeRun } = context
             const progressEvents = collectProgressEvents(wrapped.payload)
             const questionAsked = getQuestionAsked(wrapped.payload)
             const questionReplied = getQuestionReplied(wrapped.payload)

@@ -129,7 +129,7 @@ describe("createSessionLifecycle", () => {
     const created = await Effect.runPromise(Ref.make(0))
     const closed = await Effect.runPromise(Ref.make<string[]>([]))
 
-    const { lifecycle, stateRef } = await makeHarness({
+    const { lifecycle } = await makeHarness({
       createOpencodeSession: ({ workdir }) =>
         Effect.gen(function* () {
           const count = yield* Ref.modify(created, (current): readonly [number, number] => {
@@ -201,7 +201,7 @@ describe("createSessionLifecycle", () => {
 
   test("bypasses health checks for busy sessions by default", async () => {
     const healthChecks = await Effect.runPromise(Ref.make<string[]>([]))
-    const { lifecycle, stateRef } = await makeHarness({
+    const { lifecycle } = await makeHarness({
       isSessionHealthy: (session) =>
         Ref.update(healthChecks, (current) => [...current, session.sessionId]).pipe(Effect.as(true)),
     })
@@ -221,7 +221,7 @@ describe("createSessionLifecycle", () => {
     const createCount = await Effect.runPromise(Ref.make(0))
     const closed = await Effect.runPromise(Ref.make<string[]>([]))
 
-    const { lifecycle, stateRef } = await makeHarness({
+    const { lifecycle } = await makeHarness({
       createOpencodeSession: ({ workdir }) =>
         Effect.gen(function* () {
           const count = yield* Ref.modify(createCount, (current): readonly [number, number] => {
@@ -262,9 +262,11 @@ describe("createSessionLifecycle", () => {
     expect(session.opencode.sessionId).toBe("session-2")
     expect(await Effect.runPromise(Ref.get(createCount))).toBe(2)
     expect(await Effect.runPromise(lifecycle.getSession(message.channelId))).toBe(session)
-    const state = await Effect.runPromise(Ref.get(stateRef))
-    expect(state.sessionsBySessionId.get(previousSessionId)).toBeUndefined()
-    expect(state.sessionsBySessionId.get(session.opencode.sessionId)).toBe(session)
+    expect(await Effect.runPromise(lifecycle.getSessionContext(previousSessionId))).toBeNull()
+    expect(await Effect.runPromise(lifecycle.getSessionContext(session.opencode.sessionId))).toEqual({
+      session,
+      activeRun: null,
+    })
     expect(await Effect.runPromise(lifecycle.getIdleCompactionCard(previousSessionId))).toBeNull()
     expect(await Effect.runPromise(lifecycle.getIdleCompactionCard(session.opencode.sessionId))).toBe(card)
     expect(await Effect.runPromise(lifecycle.getActiveRunBySessionId(previousSessionId))).toBeNull()
