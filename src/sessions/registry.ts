@@ -55,13 +55,15 @@ import { collectAttachmentMessages } from "@/sessions/message-context.ts"
 import { coordinateActiveRunPrompts } from "@/sessions/prompt-coordinator.ts"
 import { collectProgressEvents, runProgressWorker } from "@/sessions/progress.ts"
 import { expireQuestionBatch, setQuestionBatchStatus } from "@/sessions/question-batch-state.ts"
+import { rejectQuestionBatch, submitQuestionBatch } from "@/sessions/question-submission.ts"
 import { enqueueRunRequest } from "@/sessions/request-routing.ts"
 import { admitRequestBatchToActiveRun, type NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts"
 import {
   buildSessionCreateSpec,
   type ActiveRun,
   type ChannelSession,
-  type QuestionOutcome,
+  noQuestionOutcome,
+  questionUiFailureOutcome,
   type RunProgressEvent,
   type RunRequest,
 } from "@/sessions/session.ts"
@@ -108,12 +110,6 @@ type SessionRuntimeState = {
   questionBatchesByRequestId: Map<string, PendingQuestionBatch>
 }
 
-const noQuestionOutcome = (): QuestionOutcome => ({ _tag: "none" })
-const questionUiFailureOutcome = (message: string, notified = false): QuestionOutcome => ({
-  _tag: "ui-failure",
-  message,
-  notified,
-})
 const createSessionRuntimeState = (): SessionRuntimeState => ({
   sessionsByChannelId: new Map<string, ChannelSession>(),
   sessionsBySessionId: new Map<string, ChannelSession>(),
@@ -490,7 +486,7 @@ export const ChannelSessionsLive = Layer.scoped(
     const finalizeQuestionBatch = (
       requestId: string,
       status: "answered" | "rejected",
-      resolvedAnswers?: Array<QuestionAnswer>,
+      resolvedAnswers?: ReadonlyArray<QuestionAnswer>,
     ): FallibleEffect<void> =>
       Effect.gen(function* () {
         const batch = yield* updateQuestionBatch(requestId, (current) =>
@@ -1081,6 +1077,29 @@ export const ChannelSessionsLive = Layer.scoped(
       update: (batch: PendingQuestionBatch) => PendingQuestionBatch | null,
     ): FallibleEffect<PendingQuestionBatch | null> => updateQuestionBatch(requestId, update)
 
+    const questionSubmissionRuntime = {
+      persistBatch: persistQuestionBatch,
+      updateInteraction: (interaction: Interaction, batch: PendingQuestionBatch) => {
+        if (!interaction.isButton()) {
+          return Effect.void
+        }
+        return Effect.promise(() => interaction.update(createQuestionMessageEdit(questionBatchView(batch))))
+      },
+      editBatch: editQuestionMessage,
+      finalizeBatch: finalizeQuestionBatch,
+      replyExpired: (interaction: Interaction) =>
+        replyToQuestionInteraction(interaction, "This question prompt has expired."),
+      followUpFailure: (interaction: Interaction, message: string) => {
+        if (!interaction.isButton()) {
+          return Effect.void
+        }
+        return Effect.promise(() => interaction.followUp(questionInteractionReply(message)))
+      },
+      submitToOpencode: opencode.replyToQuestion,
+      rejectInOpencode: opencode.rejectQuestion,
+      formatError,
+    } as const
+
     const currentQuestionDraft = (batch: PendingQuestionBatch, questionIndex: number) =>
       batch.drafts[questionIndex] ?? clearQuestionDraft()
 
@@ -1292,86 +1311,20 @@ export const ChannelSessionsLive = Layer.scoped(
               return false
             }
 
-            {
-              const submitting = yield* persistQuestionBatch(action.requestID, (current) => ({
-                ...setQuestionBatchStatus(current, "submitting"),
-              }))
-              if (!submitting) {
-                yield* replyToQuestionInteraction(interaction, "This question prompt has expired.")
-                return true
-              }
-
-              yield* Effect.promise(() =>
-                interaction.update(createQuestionMessageEdit(questionBatchView(submitting))),
-              )
-
-              const answers = buildQuestionAnswers(submitting.request, submitting.drafts)
-              const submitResult = yield* opencode.replyToQuestion(submitting.session.opencode, submitting.request.id, answers).pipe(
-                Effect.either,
-              )
-              if (submitResult._tag === "Left") {
-                const restored = yield* persistQuestionBatch(action.requestID, (current) =>
-                  setQuestionBatchStatus(current, "active"),
-                )
-                if (restored) {
-                  yield* editQuestionMessage(restored).pipe(Effect.ignore)
-                }
-                yield* Effect.promise(() =>
-                  interaction.followUp(
-                    questionInteractionReply(`Failed to submit answers: ${formatError(submitResult.left)}`),
-                  ),
-                ).pipe(Effect.ignore)
-                return true
-              }
-
-              yield* finalizeQuestionBatch(submitting.request.id, "answered", answers)
-              return true
-            }
+            return yield* submitQuestionBatch(questionSubmissionRuntime)({
+              interaction,
+              requestId: action.requestID,
+              answers: buildQuestionAnswers(batch.request, batch.drafts),
+            })
           case "reject":
             if (!interaction.isButton()) {
               return false
             }
 
-            {
-              const rejecting = yield* persistQuestionBatch(action.requestID, (current) => ({
-                ...setQuestionBatchStatus(current, "submitting"),
-              }))
-              if (!rejecting) {
-                yield* replyToQuestionInteraction(interaction, "This question prompt has expired.")
-                return true
-              }
-
-              yield* Effect.promise(() =>
-                interaction.update(createQuestionMessageEdit(questionBatchView(rejecting))),
-              )
-
-              if (rejecting.session.activeRun) {
-                rejecting.session.activeRun.questionOutcome = { _tag: "user-rejected" }
-              }
-              const rejectResult = yield* opencode.rejectQuestion(rejecting.session.opencode, rejecting.request.id).pipe(
-                Effect.either,
-              )
-              if (rejectResult._tag === "Left") {
-                if (rejecting.session.activeRun) {
-                  rejecting.session.activeRun.questionOutcome = noQuestionOutcome()
-                }
-                const restored = yield* persistQuestionBatch(action.requestID, (current) =>
-                  setQuestionBatchStatus(current, "active"),
-                )
-                if (restored) {
-                  yield* editQuestionMessage(restored).pipe(Effect.ignore)
-                }
-                yield* Effect.promise(() =>
-                  interaction.followUp(
-                    questionInteractionReply(`Failed to reject questions: ${formatError(rejectResult.left)}`),
-                  ),
-                ).pipe(Effect.ignore)
-                return true
-              }
-
-              yield* finalizeQuestionBatch(rejecting.request.id, "rejected")
-              return true
-            }
+            return yield* rejectQuestionBatch(questionSubmissionRuntime)({
+              interaction,
+              requestId: action.requestID,
+            })
         }
       })
 

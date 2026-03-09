@@ -24,6 +24,13 @@ export type QuestionOutcome =
   | { _tag: "user-rejected" }
   | { _tag: "ui-failure"; message: string; notified: boolean }
 
+export const noQuestionOutcome = (): QuestionOutcome => ({ _tag: "none" })
+export const questionUiFailureOutcome = (message: string, notified = false): QuestionOutcome => ({
+  _tag: "ui-failure",
+  message,
+  notified,
+})
+
 export type ActiveRun = {
   discordMessage: Message
   workdir: string
