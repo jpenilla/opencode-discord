@@ -39,11 +39,25 @@ const isDismissedQuestionError = (part: any, error: string) => {
   return normalized.includes("dismissed this question") || normalized.includes("user dismissed")
 }
 
+const isAbortedToolError = (part: any, error: string) => {
+  if (part.state?.status !== "error") {
+    return false
+  }
+
+  const normalized = error.toLowerCase()
+  return (
+    normalized.includes("tool execution aborted") ||
+    normalized.includes("execution aborted") ||
+    normalized.includes("tool execution canceled") ||
+    normalized.includes("tool execution cancelled")
+  )
+}
+
 export const renderToolTranscriptPart = (part: any) => {
   const status = part.state?.status ?? "unknown"
   const title = part.state?.title ? ` - ${part.state.title}` : ""
   const error = formatToolState(part.state?.error)
-  if (isDismissedQuestionError(part, error)) {
+  if (isDismissedQuestionError(part, error) || isAbortedToolError(part, error)) {
     return ""
   }
 
