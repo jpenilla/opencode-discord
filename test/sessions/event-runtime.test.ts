@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import type { Event, QuestionAnswer, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
+import type { Event, QuestionAnswer, QuestionRequest, ToolPart, UserMessage } from "@opencode-ai/sdk/v2"
 import { Chunk, Deferred, Effect, Option, Queue, Ref } from "effect"
 import type { Message } from "discord.js"
 
@@ -152,6 +152,26 @@ const makeAssistantMessageUpdatedEvent = (input: {
               created: 1,
             },
       },
+    },
+  })
+
+const makeUserMessageUpdatedEvent = (id = "user-1"): Event =>
+  unsafeStub<Event>({
+    type: "message.updated",
+    properties: {
+      info: {
+        id,
+        sessionID: "session-1",
+        role: "user",
+        agent: "main",
+        model: {
+          providerID: "provider-1",
+          modelID: "model-1",
+        },
+        time: {
+          created: 1,
+        },
+      } satisfies UserMessage,
     },
   })
 
@@ -340,7 +360,7 @@ describe("createEventRuntime", () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true)
     const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]))
 
-    await Effect.runPromise(beginPendingPrompt(promptState, "user-1"))
+    await Effect.runPromise(beginPendingPrompt(promptState))
 
     const runtime = createEventRuntime({
       getSessionContext: (sessionId) =>
@@ -380,7 +400,7 @@ describe("createEventRuntime", () => {
 
   test("waits for the late terminal tool update before completing the pending prompt", async () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true)
-    const completion = await Effect.runPromise(beginPendingPrompt(promptState, "user-1"))
+    const completion = await Effect.runPromise(beginPendingPrompt(promptState))
 
     const runtime = createEventRuntime({
       getSessionContext: (sessionId) =>
@@ -400,6 +420,7 @@ describe("createEventRuntime", () => {
       formatError: (error) => String(error),
     })
 
+    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()))
     await Effect.runPromise(runtime.handleEvent(makeToolEvent("running")))
     await Effect.runPromise(runtime.handleEvent(makeAssistantMessageUpdatedEvent({
       id: "assistant-1",
@@ -429,7 +450,7 @@ describe("createEventRuntime", () => {
 
   test("fails the pending prompt when the correlated assistant aborts", async () => {
     const { session, activeRun, promptState } = await makeSession(true)
-    const completion = await Effect.runPromise(beginPendingPrompt(promptState, "user-1"))
+    const completion = await Effect.runPromise(beginPendingPrompt(promptState))
     const readPromptCalls = await Effect.runPromise(Ref.make(0))
 
     const runtime = createEventRuntime({
@@ -449,6 +470,7 @@ describe("createEventRuntime", () => {
       formatError: (error) => String(error),
     })
 
+    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()))
     await Effect.runPromise(runtime.handleEvent(makeAssistantMessageUpdatedEvent({
       id: "assistant-1",
       parentId: "user-1",
@@ -464,5 +486,42 @@ describe("createEventRuntime", () => {
     const exit = await Effect.runPromise(Effect.exit(Deferred.await(completion)))
     expect(exit._tag).toBe("Failure")
     expect(await getRef(readPromptCalls)).toBe(0)
+  })
+
+  test("can bind the server-created user message after an assistant event arrives first", async () => {
+    const { session, activeRun, promptState } = await makeSession(true)
+    const completion = await Effect.runPromise(beginPendingPrompt(promptState))
+
+    const runtime = createEventRuntime({
+      getSessionContext: (sessionId) =>
+        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
+      handleQuestionEvent: () => Effect.void,
+      finalizeIdleCompactionCard: () => Effect.void,
+      readPromptResult: (_session, messageId) =>
+        Effect.succeed({
+          messageId,
+          transcript: "final reply",
+        }),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
+    })
+
+    await Effect.runPromise(runtime.handleEvent(makeAssistantMessageUpdatedEvent({
+      id: "assistant-1",
+      parentId: "user-1",
+      completed: true,
+    })))
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true)
+
+    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()))
+
+    expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
+      messageId: "assistant-1",
+      transcript: "final reply",
+    })
   })
 })

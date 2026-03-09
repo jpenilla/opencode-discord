@@ -10,12 +10,14 @@ import {
   getQuestionReplied,
   getSessionError,
   getToolPartUpdated,
+  getUserMessageUpdated,
 } from "@/opencode/events.ts"
 import type { OpencodeServiceShape } from "@/opencode/service.ts"
 import {
   handleAssistantMessageUpdated,
   handleSessionError as failPendingPromptFromSessionError,
   handleToolPartUpdated,
+  handleUserMessageUpdated,
   resolvePromptTrackingActions,
 } from "@/sessions/prompt-state.ts"
 import { collectProgressEvents } from "@/sessions/progress.ts"
@@ -55,6 +57,7 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
 
       const { activeRun } = context
       const progressEvents = collectProgressEvents(event)
+      const userMessage = getUserMessageUpdated(event)
       const assistantMessage = getAssistantMessageUpdated(event)
       const sessionError = getSessionError(event)
       const toolPart = getToolPartUpdated(event)
@@ -87,6 +90,7 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
 
       if (activeRun) {
         const promptActions = [
+          ...(userMessage ? yield* handleUserMessageUpdated(activeRun.promptState, userMessage) : []),
           ...(assistantMessage ? yield* handleAssistantMessageUpdated(activeRun.promptState, assistantMessage) : []),
           ...(sessionError
             ? yield* failPendingPromptFromSessionError(

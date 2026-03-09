@@ -1,4 +1,4 @@
-import type { AssistantMessage, ToolPart } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, ToolPart, UserMessage } from "@opencode-ai/sdk/v2"
 import { Deferred, Effect, Ref } from "effect"
 
 import type { PromptResult } from "@/opencode/service.ts"
@@ -9,7 +9,7 @@ type TrackedAssistant = {
 }
 
 export type PendingPrompt = {
-  userMessageId: string
+  userMessageId: string | null
   deferred: Deferred.Deferred<PromptResult, unknown>
   assistantsByMessageId: Map<string, TrackedAssistant>
   emittedSummaryMessageIds: Set<string>
@@ -58,6 +58,10 @@ const cloneTrackedAssistant = (tracked?: TrackedAssistant): TrackedAssistant => 
 const selectPromptReplyCandidate = (
   prompt: PendingPrompt,
 ): { messageId: string; tracked: TrackedAssistant } | null => {
+  if (!prompt.userMessageId) {
+    return null
+  }
+
   let candidate: { messageId: string; tracked: TrackedAssistant } | null = null
   for (const [messageId, tracked] of prompt.assistantsByMessageId.entries()) {
     const info = tracked.info
@@ -189,17 +193,16 @@ export const createPromptState = () => Ref.make<PendingPrompt | null>(null)
 
 export const beginPendingPrompt = (
   stateRef: Ref.Ref<PendingPrompt | null>,
-  userMessageId: string,
 ): Effect.Effect<Deferred.Deferred<PromptResult, unknown>> =>
   Effect.gen(function* () {
     const existing = yield* Ref.get(stateRef)
     if (existing) {
-      throw new Error(`Cannot begin prompt ${userMessageId}: prompt ${existing.userMessageId} is still pending`)
+      throw new Error(`Cannot begin prompt: prompt ${existing.userMessageId ?? "<awaiting-user-message>"} is still pending`)
     }
 
     const deferred = yield* Deferred.make<PromptResult, unknown>()
     yield* Ref.set(stateRef, {
-      userMessageId,
+      userMessageId: null,
       deferred,
       assistantsByMessageId: new Map<string, TrackedAssistant>(),
       emittedSummaryMessageIds: new Set<string>(),
@@ -209,11 +212,10 @@ export const beginPendingPrompt = (
 
 export const failPendingPrompt = (
   stateRef: Ref.Ref<PendingPrompt | null>,
-  userMessageId: string,
   error: unknown,
 ): Effect.Effect<void> =>
   Ref.modify(stateRef, (current): readonly [PendingPrompt | null, PendingPrompt | null] => {
-    if (!current || current.userMessageId !== userMessageId) {
+    if (!current) {
       return [null, current]
     }
 
@@ -224,6 +226,23 @@ export const failPendingPrompt = (
         ? Deferred.fail(current.deferred, error).pipe(Effect.ignore)
         : Effect.void),
   )
+
+export const handleUserMessageUpdated = (
+  stateRef: Ref.Ref<PendingPrompt | null>,
+  message: UserMessage,
+): Effect.Effect<ReadonlyArray<PromptTrackingAction>> =>
+  updatePendingPrompt(stateRef, (current) => {
+    if (current.userMessageId && current.userMessageId !== message.id) {
+      return current
+    }
+
+    return current.userMessageId === message.id
+      ? current
+      : {
+          ...current,
+          userMessageId: message.id,
+        }
+  })
 
 export const handleAssistantMessageUpdated = (
   stateRef: Ref.Ref<PendingPrompt | null>,

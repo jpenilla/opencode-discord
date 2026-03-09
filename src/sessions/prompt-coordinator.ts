@@ -1,6 +1,5 @@
 import { Chunk, Deferred, Effect, Queue, Ref } from "effect"
 
-import { createOpencodeMessageId } from "@/opencode/ids.ts"
 import type { PromptResult, SessionHandle, OpencodeServiceShape } from "@/opencode/service.ts"
 import { beginPendingPrompt, failPendingPrompt } from "@/sessions/prompt-state.ts"
 import { admitRequestBatchToActiveRun, type NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts"
@@ -32,12 +31,11 @@ export const coordinateActiveRunPrompts = (input: ActiveRunPromptCoordinatorInpu
   Effect.gen(function* () {
     const runPrompt = (value: string) =>
       Effect.gen(function* () {
-        const userMessageId = createOpencodeMessageId()
-        const completion = yield* beginPendingPrompt(input.activeRun.promptState, userMessageId)
+        const completion = yield* beginPendingPrompt(input.activeRun.promptState)
 
-        yield* input.submitPrompt(input.session, value, userMessageId).pipe(
+        yield* input.submitPrompt(input.session, value).pipe(
           Effect.catchAll((error) =>
-            failPendingPrompt(input.activeRun.promptState, userMessageId, error).pipe(
+            failPendingPrompt(input.activeRun.promptState, error).pipe(
               Effect.zipRight(Effect.fail(error)),
             )),
         )

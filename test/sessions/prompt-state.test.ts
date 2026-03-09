@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import type { AssistantMessage, ToolPart } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, ToolPart, UserMessage } from "@opencode-ai/sdk/v2"
 import { Deferred, Effect, Option, Ref } from "effect"
 
 import {
@@ -7,6 +7,7 @@ import {
   createPromptState,
   handleAssistantMessageUpdated,
   handleToolPartUpdated,
+  handleUserMessageUpdated,
 } from "@/sessions/prompt-state.ts"
 import { unsafeStub } from "../support/stub.ts"
 
@@ -83,10 +84,25 @@ const makeToolPart = (status: "running" | "error"): ToolPart =>
         },
   })
 
+const makeUserMessage = (id: string): UserMessage =>
+  unsafeStub<UserMessage>({
+    id,
+    sessionID: "session-1",
+    role: "user",
+    agent: "main",
+    model: {
+      providerID: "provider-1",
+      modelID: "model-1",
+    },
+    time: {
+      created: 1,
+    },
+  })
+
 describe("prompt-state", () => {
   test("emits a compaction summary once and keeps waiting for the direct reply", async () => {
     const state = await Effect.runPromise(createPromptState())
-    await Effect.runPromise(beginPendingPrompt(state, "user-1"))
+    await Effect.runPromise(beginPendingPrompt(state))
 
     const first = await Effect.runPromise(handleAssistantMessageUpdated(state, makeAssistantMessage({
       id: "summary-1",
@@ -113,7 +129,9 @@ describe("prompt-state", () => {
 
   test("does not complete the prompt until the live tool settles", async () => {
     const state = await Effect.runPromise(createPromptState())
-    const completion = await Effect.runPromise(beginPendingPrompt(state, "user-1"))
+    const completion = await Effect.runPromise(beginPendingPrompt(state))
+
+    await Effect.runPromise(handleUserMessageUpdated(state, makeUserMessage("user-1")))
 
     expect(await Effect.runPromise(handleToolPartUpdated(state, makeToolPart("running")))).toEqual([])
     expect(await Effect.runPromise(handleAssistantMessageUpdated(state, makeAssistantMessage({
@@ -133,5 +151,28 @@ describe("prompt-state", () => {
     }
     expect(action.messageId).toBe("assistant-1")
     expect(await Effect.runPromise(Ref.get(state))).toBeNull()
+  })
+
+  test("waits to bind the server-created user message before completing the prompt", async () => {
+    const state = await Effect.runPromise(createPromptState())
+    const completion = await Effect.runPromise(beginPendingPrompt(state))
+
+    await Effect.runPromise(handleAssistantMessageUpdated(state, makeAssistantMessage({
+      id: "assistant-1",
+      parentId: "user-1",
+      completed: true,
+    })))
+
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true)
+
+    const actions = await Effect.runPromise(handleUserMessageUpdated(state, makeUserMessage("user-1")))
+
+    expect(actions).toHaveLength(1)
+    const action = actions[0]
+    expect(action?.type).toBe("complete-prompt")
+    if (!action || action.type !== "complete-prompt") {
+      throw new Error("expected a completion action")
+    }
+    expect(action.messageId).toBe("assistant-1")
   })
 })

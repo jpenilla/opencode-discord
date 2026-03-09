@@ -15,6 +15,7 @@ import type {
   GlobalEvent,
   PermissionRequest,
   ToolPart,
+  UserMessage,
 } from "@opencode-ai/sdk/v2"
 import { Context, Effect, Layer, Queue } from "effect"
 
@@ -75,6 +76,13 @@ export const getAssistantMessageUpdated = (event: Event): AssistantMessage | nul
     return null
   }
   return event.properties.info.role === "assistant" ? event.properties.info : null
+}
+
+export const getUserMessageUpdated = (event: Event): UserMessage | null => {
+  if (event.type !== "message.updated") {
+    return null
+  }
+  return event.properties.info.role === "user" ? event.properties.info : null
 }
 
 export const getPermissionUpdated = (event: Event): PermissionRequest | null => {

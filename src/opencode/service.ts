@@ -36,7 +36,7 @@ type SessionModel = {
 export type OpencodeServiceShape = {
   createSession: (workdir: string, title: string, systemPromptAppend?: string) => Effect.Effect<SessionHandle, unknown>
   attachSession: (workdir: string, sessionId: string, systemPromptAppend?: string) => Effect.Effect<SessionHandle, unknown>
-  submitPrompt: (session: SessionHandle, prompt: string, messageId: string) => Effect.Effect<void, unknown>
+  submitPrompt: (session: SessionHandle, prompt: string) => Effect.Effect<void, unknown>
   readPromptResult: (session: SessionHandle, messageId: string) => Effect.Effect<PromptResult, unknown>
   interruptSession: (session: SessionHandle) => Effect.Effect<void, unknown>
   compactSession: (session: SessionHandle) => Effect.Effect<void, unknown>
@@ -402,12 +402,12 @@ export const OpencodeServiceLive = Layer.scoped(
             throw error
           }
         }),
-      submitPrompt: (session, prompt, messageId) =>
+      submitPrompt: (session, prompt) =>
         Effect.gen(function* () {
           const result = yield* Effect.promise(() =>
             session.client.session.promptAsync({
               sessionID: session.sessionId,
-              messageID: messageId,
+              noReply: false,
               parts: [{ type: "text", text: prompt }],
             }),
           )

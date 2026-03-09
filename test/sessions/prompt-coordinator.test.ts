@@ -62,10 +62,10 @@ const makeActiveRunState = async () => ({
 describe("coordinateActiveRunPrompts", () => {
   test("prompts the initial batch, absorbs queued follow-ups, and returns the last result", async () => {
     const activeRun = await makeActiveRunState()
-    const submitCalls: Array<{ prompt: string; messageId: string }> = []
-    const submitPrompt = (_session: SessionHandle, value: string, messageId: string) =>
+    const submitCalls: string[] = []
+    const submitPrompt = (_session: SessionHandle, value: string) =>
       Effect.gen(function* () {
-        const callIndex = submitCalls.push({ prompt: value, messageId })
+        const callIndex = submitCalls.push(value)
         yield* resolveCurrentPrompt(activeRun, {
           messageId: `msg-${callIndex}`,
           transcript: `reply-${callIndex}`,
@@ -89,11 +89,10 @@ describe("coordinateActiveRunPrompts", () => {
       }),
     )
 
-    expect(submitCalls.map((call) => call.prompt)).toEqual([
+    expect(submitCalls).toEqual([
       "initial",
       buildQueuedFollowUpPrompt(["follow-1", "follow-2"]),
     ])
-    expect(submitCalls.every((call) => call.messageId.startsWith("msg_"))).toBe(true)
     expect(result).toEqual({
       messageId: "msg-2",
       transcript: "reply-2",

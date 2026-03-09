@@ -144,6 +144,31 @@ const makeAssistantMessageUpdatedEvent = (input: {
     },
   })
 
+const makeUserMessageUpdatedEvent = (input: {
+  id: string
+  sessionId?: string
+}): GlobalEvent =>
+  unsafeStub<GlobalEvent>({
+    payload: {
+      type: "message.updated",
+      properties: {
+        info: {
+          id: input.id,
+          sessionID: input.sessionId ?? "session-1",
+          role: "user",
+          agent: "main",
+          model: {
+            providerID: "provider-1",
+            modelID: "model-1",
+          },
+          time: {
+            created: 1,
+          },
+        },
+      },
+    },
+  })
+
 const makeToolUpdatedEvent = (input: {
   sessionId?: string
   messageId: string
@@ -413,17 +438,24 @@ const makeHarness = async (options: {
         backend: "bwrap",
         close: () => Effect.void,
       } as SessionHandle),
-    submitPrompt: (_session, prompt, messageId) =>
+    submitPrompt: (_session, prompt) =>
       Ref.updateAndGet(promptCalls, (current) => [...current, prompt]).pipe(
         Effect.flatMap((calls) =>
-          options.promptImpl({
-            prompt,
-            callIndex: calls.length,
-            messageId,
-            sessionId: _session.sessionId,
-            publishEvent,
-            storePromptResult,
-            completePrompt: (result) => completePrompt(_session.sessionId, messageId, result),
+          Effect.gen(function* () {
+            const messageId = `user-${calls.length}`
+            yield* publishEvent(makeUserMessageUpdatedEvent({
+              id: messageId,
+              sessionId: _session.sessionId,
+            }))
+            yield* options.promptImpl({
+              prompt,
+              callIndex: calls.length,
+              messageId,
+              sessionId: _session.sessionId,
+              publishEvent,
+              storePromptResult,
+              completePrompt: (result) => completePrompt(_session.sessionId, messageId, result),
+            })
           }),
         ),
       ),
