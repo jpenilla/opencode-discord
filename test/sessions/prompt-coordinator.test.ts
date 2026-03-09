@@ -62,10 +62,10 @@ const makeActiveRunState = async () => ({
 describe("coordinateActiveRunPrompts", () => {
   test("prompts the initial batch, absorbs queued follow-ups, and returns the last result", async () => {
     const activeRun = await makeActiveRunState()
-    const submitCalls: string[] = []
-    const submitPrompt = (_session: SessionHandle, value: string) =>
+    const submitCalls: Array<{ prompt: string; messageId: string }> = []
+    const submitPrompt = (_session: SessionHandle, value: string, messageId: string) =>
       Effect.gen(function* () {
-        const callIndex = submitCalls.push(value)
+        const callIndex = submitCalls.push({ prompt: value, messageId })
         yield* resolveCurrentPrompt(activeRun, {
           messageId: `msg-${callIndex}`,
           transcript: `reply-${callIndex}`,
@@ -89,10 +89,11 @@ describe("coordinateActiveRunPrompts", () => {
       }),
     )
 
-    expect(submitCalls).toEqual([
+    expect(submitCalls.map((call) => call.prompt)).toEqual([
       "initial",
       buildQueuedFollowUpPrompt(["follow-1", "follow-2"]),
     ])
+    expect(submitCalls.every((call) => call.messageId.startsWith("msg_"))).toBe(true)
     expect(result).toEqual({
       messageId: "msg-2",
       transcript: "reply-2",
@@ -177,5 +178,23 @@ describe("coordinateActiveRunPrompts", () => {
     expect(result.messageId).toBe("msg-2")
     expect([...activeRun.attachmentMessagesById.keys()]).toEqual(["m-1", "m-2", "m-3"])
     expect(await Effect.runPromise(Queue.takeAll(sessionQueue).pipe(Effect.map((items) => [...items])))).toEqual([])
+  })
+
+  test("fails immediately when prompt submission fails", async () => {
+    const activeRun = await makeActiveRunState()
+
+    await expect(Effect.runPromise(
+      coordinateActiveRunPrompts({
+        channelId: "c-1",
+        session: makeSessionHandle(),
+        activeRun,
+        initialRequests: [makeRequest("m-1", "initial")],
+        awaitIdleCompaction: () => Effect.void,
+        submitPrompt: () => Effect.fail(new Error("submit failed")),
+        logger: makeLogger(),
+      }),
+    )).rejects.toThrow("submit failed")
+
+    expect(await Effect.runPromise(Ref.get(activeRun.promptState))).toBeNull()
   })
 })
