@@ -12,17 +12,14 @@ import {
 } from "@/discord/messages.ts"
 import {
   OpencodeEventQueue,
-  getEventSessionId,
-  getQuestionAsked,
-  getQuestionRejected,
-  getQuestionReplied,
 } from "@/opencode/events.ts"
 import type { Invocation } from "@/discord/triggers.ts"
 import { OpencodeService } from "@/opencode/service.ts"
 import { createCommandRuntime } from "@/sessions/command-runtime.ts"
+import { createEventRuntime } from "@/sessions/event-runtime.ts"
 import { collectAttachmentMessages } from "@/sessions/message-context.ts"
 import { coordinateActiveRunPrompts } from "@/sessions/prompt-coordinator.ts"
-import { collectProgressEvents, runProgressWorker } from "@/sessions/progress.ts"
+import { runProgressWorker } from "@/sessions/progress.ts"
 import { createQuestionRuntime } from "@/sessions/question-runtime.ts"
 import { enqueueRunRequest } from "@/sessions/request-routing.ts"
 import { executeRunBatch } from "@/sessions/run-executor.ts"
@@ -136,64 +133,14 @@ export const ChannelSessionsLive = Layer.scoped(
       formatError,
     })
 
+    const eventRuntime = createEventRuntime({
+      getSessionContext,
+      handleQuestionEvent: questionRuntime.handleEvent,
+      updateIdleCompactionCard,
+    })
+
     yield* eventQueue.take().pipe(
-      Effect.flatMap((wrapped) => {
-        const sessionId = getEventSessionId(wrapped.payload)
-        if (!sessionId) {
-          return Effect.void
-        }
-
-        return getSessionContext(sessionId).pipe(
-          Effect.flatMap((context) => {
-            if (!context) {
-              return Effect.void
-            }
-
-            const { session, activeRun } = context
-            const progressEvents = collectProgressEvents(wrapped.payload)
-            const questionAsked = getQuestionAsked(wrapped.payload)
-            const questionReplied = getQuestionReplied(wrapped.payload)
-            const questionRejected = getQuestionRejected(wrapped.payload)
-
-            return Effect.gen(function* () {
-              if (questionAsked) {
-                yield* questionRuntime.handleEvent({
-                  type: "asked",
-                  sessionId,
-                  request: questionAsked,
-                })
-              }
-              if (questionReplied) {
-                yield* questionRuntime.handleEvent({
-                  type: "replied",
-                  sessionId,
-                  requestId: questionReplied.requestID,
-                  answers: questionReplied.answers,
-                })
-              }
-              if (questionRejected) {
-                yield* questionRuntime.handleEvent({
-                  type: "rejected",
-                  sessionId,
-                  requestId: questionRejected.requestID,
-                })
-              }
-
-              if (activeRun) {
-                yield* Effect.forEach(progressEvents, (progressEvent) =>
-                  Queue.offer(activeRun.progressQueue, progressEvent).pipe(Effect.asVoid),
-                ).pipe(Effect.asVoid)
-              } else if (progressEvents.some((event) => event.type === "session-compacted")) {
-                yield* updateIdleCompactionCard(
-                  sessionId,
-                  "🗜️ Session compacted",
-                  "OpenCode summarized earlier context for this session.",
-                )
-              }
-            })
-          }),
-        )
-      }),
+      Effect.flatMap((wrapped) => eventRuntime.handleEvent(wrapped.payload)),
       Effect.forever,
       Effect.catchAll((error) =>
         logger.error("opencode event dispatcher failed", {
