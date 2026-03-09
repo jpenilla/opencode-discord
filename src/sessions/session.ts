@@ -7,6 +7,12 @@ import type { Ref } from "effect/Ref"
 import type { TypingLoop } from "@/discord/messages.ts"
 import type { SessionHandle } from "@/opencode/service.ts"
 
+export type SessionCreateSpec = {
+  workdir: string
+  title: string
+  systemPromptAppend?: string
+}
+
 export type RunRequest = {
   message: Message
   prompt: string
@@ -48,3 +54,13 @@ export type ChannelSession = {
   queue: Queue<RunRequest>
   activeRun: ActiveRun | null
 }
+
+export const buildSessionCreateSpec = (input: {
+  channelId: string
+  workdir: string
+  systemPromptAppend?: string
+}): SessionCreateSpec => ({
+  workdir: input.workdir,
+  title: `Discord #${input.channelId}`,
+  systemPromptAppend: input.systemPromptAppend,
+})

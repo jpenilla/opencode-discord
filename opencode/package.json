@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "bun test ./test",
     "typecheck": "tsgo -p tsconfig.json"
   },
   "dependencies": {

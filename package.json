@@ -8,6 +8,8 @@
   "scripts": {
     "dev": "bun --env-file=.env src/index.ts",
     "start": "bun --env-file=.env src/index.ts",
+    "test:root": "bun test ./test",
+    "test": "bun run test:root && bun run --cwd opencode test",
     "typecheck:root": "tsgo -p tsconfig.json",
     "typecheck": "bun run typecheck:root && bun run --cwd opencode typecheck"
   },

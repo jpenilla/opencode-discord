@@ -1,11 +1,11 @@
-name: Typecheck
+name: CI
 
 on:
   push:
   pull_request:
 
 jobs:
-  typecheck:
+  ci:
     runs-on: ubuntu-latest
 
     steps:
@@ -22,3 +22,6 @@ jobs:
 
       - name: Run typecheck
         run: bun run typecheck
+
+      - name: Run tests
+        run: bun run test

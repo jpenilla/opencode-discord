@@ -45,7 +45,15 @@ import {
 import type { Invocation } from "@/discord/triggers.ts"
 import { OpencodeService } from "@/opencode/service.ts"
 import { collectProgressEvents, runProgressWorker } from "@/sessions/progress.ts"
-import type { ActiveRun, ChannelSession, QuestionOutcome, RunProgressEvent, RunRequest } from "@/sessions/session.ts"
+import { expireQuestionBatch, setQuestionBatchStatus } from "@/sessions/question-batch-state.ts"
+import {
+  buildSessionCreateSpec,
+  type ActiveRun,
+  type ChannelSession,
+  type QuestionOutcome,
+  type RunProgressEvent,
+  type RunRequest,
+} from "@/sessions/session.ts"
 import { Logger } from "@/util/logging.ts"
 
 export type ChannelSessionsShape = {
@@ -95,8 +103,6 @@ const questionUiFailureOutcome = (message: string, notified = false): QuestionOu
   message,
   notified,
 })
-const emptyResolvedAnswers = (request: QuestionRequest): Array<QuestionAnswer> => request.questions.map(() => [])
-const sessionTitle = (channelId: string) => `Discord #${channelId}`
 const createSessionRuntimeState = (): SessionRuntimeState => ({
   sessionsByChannelId: new Map<string, ChannelSession>(),
   sessionsBySessionId: new Map<string, ChannelSession>(),
@@ -496,11 +502,9 @@ export const ChannelSessionsLive = Layer.scoped(
       resolvedAnswers?: Array<QuestionAnswer>,
     ): FallibleEffect<void> =>
       Effect.gen(function* () {
-        const batch = yield* updateQuestionBatch(requestId, (current) => ({
-          ...current,
-          status,
-          resolvedAnswers: resolvedAnswers ?? (status === "rejected" ? emptyResolvedAnswers(current.request) : undefined),
-        }))
+        const batch = yield* updateQuestionBatch(requestId, (current) =>
+          setQuestionBatchStatus(current, status, resolvedAnswers),
+        )
         if (!batch) {
           return
         }
@@ -537,10 +541,7 @@ export const ChannelSessionsLive = Layer.scoped(
           }
 
           return [
-            stale.map((batch) => ({
-              ...batch,
-              status: "expired" as const,
-            })),
+            stale.map((batch) => expireQuestionBatch(batch)),
             {
               ...current,
               questionBatchesByRequestId,
@@ -791,9 +792,18 @@ export const ChannelSessionsLive = Layer.scoped(
           message,
           additionalInstructions: config.sessionInstructions,
         })
+        const sessionCreateSpec = buildSessionCreateSpec({
+          channelId: message.channelId,
+          workdir,
+          systemPromptAppend,
+        })
 
         try {
-          opencodeSession = yield* opencode.createSession(workdir, sessionTitle(message.channelId), systemPromptAppend)
+          opencodeSession = yield* opencode.createSession(
+            sessionCreateSpec.workdir,
+            sessionCreateSpec.title,
+            sessionCreateSpec.systemPromptAppend,
+          )
           const queue = yield* Queue.unbounded<RunRequest>()
 
           const session: ChannelSession = {
@@ -863,10 +873,15 @@ export const ChannelSessionsLive = Layer.scoped(
           }
 
           const previous = current.opencode
+          const sessionCreateSpec = buildSessionCreateSpec({
+            channelId: message.channelId,
+            workdir: current.workdir,
+            systemPromptAppend: current.systemPromptAppend,
+          })
           const replacement = yield* opencode.createSession(
-            current.workdir,
-            sessionTitle(message.channelId),
-            current.systemPromptAppend,
+            sessionCreateSpec.workdir,
+            sessionCreateSpec.title,
+            sessionCreateSpec.systemPromptAppend,
           )
           yield* replaceSessionHandle(current, replacement)
           yield* previous.close().pipe(Effect.ignore)
@@ -1305,8 +1320,7 @@ export const ChannelSessionsLive = Layer.scoped(
 
             {
               const submitting = yield* persistQuestionBatch(action.requestID, (current) => ({
-                ...current,
-                status: "submitting",
+                ...setQuestionBatchStatus(current, "submitting"),
               }))
               if (!submitting) {
                 yield* replyToQuestionInteraction(interaction, "This question prompt has expired.")
@@ -1322,10 +1336,9 @@ export const ChannelSessionsLive = Layer.scoped(
                 Effect.either,
               )
               if (submitResult._tag === "Left") {
-                const restored = yield* persistQuestionBatch(action.requestID, (current) => ({
-                  ...current,
-                  status: "active",
-                }))
+                const restored = yield* persistQuestionBatch(action.requestID, (current) =>
+                  setQuestionBatchStatus(current, "active"),
+                )
                 if (restored) {
                   yield* editQuestionMessage(restored).pipe(Effect.ignore)
                 }
@@ -1347,8 +1360,7 @@ export const ChannelSessionsLive = Layer.scoped(
 
             {
               const rejecting = yield* persistQuestionBatch(action.requestID, (current) => ({
-                ...current,
-                status: "submitting",
+                ...setQuestionBatchStatus(current, "submitting"),
               }))
               if (!rejecting) {
                 yield* replyToQuestionInteraction(interaction, "This question prompt has expired.")
@@ -1369,10 +1381,9 @@ export const ChannelSessionsLive = Layer.scoped(
                 if (rejecting.session.activeRun) {
                   rejecting.session.activeRun.questionOutcome = noQuestionOutcome()
                 }
-                const restored = yield* persistQuestionBatch(action.requestID, (current) => ({
-                  ...current,
-                  status: "active",
-                }))
+                const restored = yield* persistQuestionBatch(action.requestID, (current) =>
+                  setQuestionBatchStatus(current, "active"),
+                )
                 if (restored) {
                   yield* editQuestionMessage(restored).pipe(Effect.ignore)
                 }
