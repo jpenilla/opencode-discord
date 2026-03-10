@@ -1,7 +1,11 @@
 import { ContainerBuilder, TextDisplayBuilder } from "@discordjs/builders";
 import { MessageFlags, type Message, type SendableChannels } from "discord.js";
 import type { ToolPart } from "@opencode-ai/sdk/v2";
-import { displaySessionPath } from "@/sandbox/session-paths.ts";
+import {
+  SANDBOX_HOME_DIR,
+  displaySessionPath,
+  resolveSessionPath,
+} from "@/sandbox/session-paths.ts";
 
 const EDIT_TOOL_CARDS = true;
 export type ToolCardTerminalState = "shutdown";
@@ -130,16 +134,39 @@ const findUnknownInput = (input: Record<string, unknown>, keys: readonly string[
 
 const displayPath = (path: string, workdir: string) => displaySessionPath(workdir, path);
 
+const formatPathSummaryLine = (path: string, workdir: string) => {
+  const normalized = displayPath(path, workdir);
+  return normalized === "." ? "`.` (cwd)" : `\`${normalized}\``;
+};
+
 const normalizeDisplayText = (value: string, workdir: string) => {
   return value.replace(/(?:\/private)?\/[^\s`"'|)]+/g, (token) => displayPath(token, workdir));
 };
 
+const normalizePatchFilePath = (path: string, workdir: string) => {
+  const trimmed = path.trim();
+  const slashPrefixed = trimmed.startsWith(SANDBOX_HOME_DIR.slice(1)) ? `/${trimmed}` : trimmed;
+  const displayed = displaySessionPath(workdir, resolveSessionPath(workdir, slashPrefixed));
+
+  if (
+    displayed !== "." &&
+    !displayed.startsWith("./") &&
+    !displayed.startsWith("../") &&
+    !displayed.startsWith("~/") &&
+    !displayed.startsWith("/")
+  ) {
+    return `./${displayed}`;
+  }
+
+  return displayed;
+};
+
 const extractPatchFiles = (value: string, workdir: string) => {
-  const hunkFiles = [...value.matchAll(/\*\*\* (?:Add|Delete|Update|Move to): (.+)/g)].map(
-    (match) => displayPath(match[1].trim(), workdir),
+  const hunkFiles = [...value.matchAll(/\*\*\* (?:(?:Add|Delete|Update) File|Move to): (.+)/g)].map(
+    (match) => normalizePatchFilePath(match[1], workdir),
   );
   const outputFiles = [...value.matchAll(/(?:^|\n)(?:A|M|D|R\d+|C\d+)\s+([^\n]+)/g)].map((match) =>
-    displayPath(match[1].trim(), workdir),
+    normalizePatchFilePath(match[1], workdir),
   );
   return [...new Set([...hunkFiles, ...outputFiles])].sort();
 };
@@ -251,33 +278,29 @@ type FormatterInput = {
 type ToolInputFormatter = (input: FormatterInput) => string[];
 
 const formatPatchInputLines: ToolInputFormatter = ({ part, workdir, input }) => {
-  const patchInput = findStringInput(input, ["patch", "content", "diff", "input"]);
+  const patchInput = findStringInput(input, ["patchText", "patch", "content", "diff", "input"]);
   const patchRaw = "raw" in part.state && typeof part.state.raw === "string" ? part.state.raw : "";
   const patchOutput = part.state.status === "completed" ? part.state.output : "";
   const files = extractPatchFiles(`${patchInput ?? ""}\n${patchRaw}\n${patchOutput}`, workdir);
 
   if (files.length === 0) {
-    return part.state.status === "completed" ? ["- Edited: applied patch"] : [];
+    return part.state.status === "completed" ? ["Applied patch"] : [];
   }
 
-  if (files.length <= 3) {
-    return [`- Edited: ${files.map((file) => `\`${file}\``).join(", ")}`];
-  }
-
-  return [`- Edited: ${files.map((file) => `\`${file}\``).join(", ")}`];
+  return [files.map((file) => `\`${file}\``).join(", ")];
 };
 
 const formatBashInputLines: ToolInputFormatter = ({ part, workdir, input }) => {
   const command = findStringInput(input, ["cmd", "command", "script", "shell"]);
   if (command) {
-    return [`- Command: ${formatTextValue(command, workdir, 220)}`];
+    return [formatTextValue(command, workdir, 220)];
   }
   if (
     "raw" in part.state &&
     typeof part.state.raw === "string" &&
     part.state.raw.trim().length > 0
   ) {
-    return [`- Command: ${formatTextValue(part.state.raw, workdir, 220)}`];
+    return [formatTextValue(part.state.raw, workdir, 220)];
   }
   return [];
 };
@@ -287,8 +310,7 @@ const formatReadInputLines: ToolInputFormatter = ({ workdir, input }) => {
   if (!filePath) {
     return [];
   }
-  const normalized = displayPath(filePath, workdir);
-  return normalized === "." ? ["- File: `.` (cwd)"] : [`- File: \`${normalized}\``];
+  return [formatPathSummaryLine(filePath, workdir)];
 };
 
 const formatGlobInputLines: ToolInputFormatter = ({ workdir, input }) => {
@@ -333,17 +355,17 @@ const formatWriteInputLines: ToolInputFormatter = ({ workdir, input }) => {
   const path = findStringInput(input, ["filePath", "path", "file"]);
   const content = findStringInput(input, ["content", "text"]);
   const lines: string[] = [];
-  if (path) lines.push(`- File: \`${displayPath(path, workdir)}\``);
+  if (path) lines.push(formatPathSummaryLine(path, workdir));
   if (content) lines.push(`- Size: \`${content.length} chars\``);
   return lines;
 };
 
 const formatTaskInputLines: ToolInputFormatter = ({ workdir, input }) => {
   const description = findStringInput(input, ["description", "prompt", "task"]);
-  const agent = findStringInput(input, ["agent", "agentID"]);
+  const agent = findStringInput(input, ["agent", "agentID", "subagent_type", "subagentType"]);
   const model = findStringInput(input, ["model", "modelID"]);
   const lines: string[] = [];
-  if (description) lines.push(`- Task: ${formatTextValue(description, workdir, 200)}`);
+  if (description) lines.push(formatTextValue(description, workdir, 200));
   if (agent) lines.push(`- Agent: \`${agent}\``);
   if (model) lines.push(`- Model: \`${model}\``);
   return lines;
@@ -356,7 +378,7 @@ const formatWebfetchInputLines: ToolInputFormatter = ({ part, input }) => {
 
   if (url) {
     const compact = compactUrl(url);
-    lines.push(`- URL: \`${compact ? truncate(compact, 180) : truncate(url, 180)}\``);
+    lines.push(`\`${compact ? truncate(compact, 180) : truncate(url, 180)}\``);
   }
 
   if (format && format !== "markdown") {
@@ -386,7 +408,7 @@ const formatSearchInputLines: ToolInputFormatter = ({ workdir, input }) => {
   const query = findStringInput(input, ["query", "q", "pattern", "search"]);
   const path = findStringInput(input, ["path", "cwd", "root"]);
   const lines: string[] = [];
-  if (query) lines.push(`- Query: ${formatTextValue(query, workdir, 180)}`);
+  if (query) lines.push(formatTextValue(query, workdir, 180));
   if (path) lines.push(`- Path: \`${displayPath(path, workdir)}\``);
   return lines;
 };
@@ -495,15 +517,29 @@ const formatToolInputLines = (part: ToolPart, workdir: string) => {
   return formatGenericInputLines(input, workdir);
 };
 
-const shouldShowStep = (part: ToolPart, step: string) => {
-  if (
-    part.tool.includes("patch") ||
-    part.tool === "todowrite" ||
-    part.tool === "grep" ||
-    part.tool === "webfetch"
-  ) {
-    return false;
+type StepDisplayMode = "hidden" | "summary" | "bullet";
+
+const TOOL_STEP_DISPLAY: Record<string, StepDisplayMode> = {
+  bash: "summary",
+  read: "hidden",
+  write: "hidden",
+  task: "hidden",
+  todowrite: "hidden",
+  grep: "hidden",
+  webfetch: "hidden",
+  websearch: "hidden",
+  codesearch: "hidden",
+};
+
+const stepDisplayMode = (tool: string): StepDisplayMode => {
+  if (tool.includes("patch")) {
+    return "hidden";
   }
+
+  return TOOL_STEP_DISPLAY[tool] ?? "bullet";
+};
+
+const shouldShowStep = (step: string) => {
   const compact = singleLine(step);
   if (compact.length === 0 || compact.length > 140) {
     return false;
@@ -515,6 +551,21 @@ const shouldShowStep = (part: ToolPart, step: string) => {
     return false;
   }
   return true;
+};
+
+const formatStepLine = (part: ToolPart, step: string) => {
+  if (!shouldShowStep(step)) {
+    return null;
+  }
+
+  switch (stepDisplayMode(part.tool)) {
+    case "hidden":
+      return null;
+    case "summary":
+      return step;
+    case "bullet":
+      return `- Step: ${step}`;
+  }
 };
 
 const searchResultInfo = (part: ToolPart): { count: number } | { error: string } | null => {
@@ -565,8 +616,9 @@ const renderToolCard = (input: {
   const title = titleForPart(part);
   if (title) {
     const step = normalizeDisplayText(title, input.workdir);
-    if (shouldShowStep(part, step)) {
-      lines.push(part.tool === "bash" ? `- Purpose: ${step}` : `- Step: ${step}`);
+    const stepLine = formatStepLine(part, step);
+    if (stepLine) {
+      lines.push(stepLine);
     }
   }
 

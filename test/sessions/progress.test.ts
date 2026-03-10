@@ -181,9 +181,7 @@ describe("runProgressWorker", () => {
   test("updates the live compaction card to interrupted", async () => {
     const result = await runFinalizationScenario("interrupted");
 
-    expect(result.sent.map(cardText)).toContain(
-      "**💻 🛠️ `bash` Running**\n- Command: `pwd`\n- Purpose: Print cwd",
-    );
+    expect(result.sent.map(cardText)).toContain("**💻 🛠️ `bash` Running**\n`pwd`\nPrint cwd");
     expect(result.sent.map(cardText)).toContain(
       "**🗜️ Compacting session**\nOpenCode is summarizing earlier context for this session.",
     );
@@ -253,7 +251,7 @@ describe("runProgressWorker", () => {
     const result = await runFinalizationScenario("shutdown");
 
     expect(result.edited.map(cardText)).toContain(
-      "**💻 🛑 `bash` Stopped**\n- Command: `pwd`\n- Purpose: Print cwd\n- Note: This tool did not complete because the bot shut down.",
+      "**💻 🛑 `bash` Stopped**\n`pwd`\nPrint cwd\n- Note: This tool did not complete because the bot shut down.",
     );
     expect(result.edited.map(cardText)).toContain(
       "**🛑 Compaction stopped**\nOpenCode stopped compacting this session because the bot shut down.",
