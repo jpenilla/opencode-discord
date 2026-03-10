@@ -20,6 +20,12 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Check formatting
+        run: bun run fmt:check
+
+      - name: Run lint
+        run: bun run lint
+
       - name: Run typecheck
         run: bun run typecheck
 
