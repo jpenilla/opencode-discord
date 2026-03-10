@@ -198,11 +198,6 @@ const makeHarness = async (options?: {
       );
       return compactionCard;
     },
-    editInfoCard: async (_message, title, body) => {
-      await Effect.runPromise(
-        Ref.update(compactionUpdates, (current) => [...current, { title, body }]),
-      );
-    },
     sendInfoCard: async (_channel, title, body) => {
       await Effect.runPromise(
         Ref.update(sentInfoCards, (current) => [...current, { title, body }]),

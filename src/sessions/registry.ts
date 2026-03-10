@@ -315,7 +315,6 @@ export const ChannelSessionsLive = Layer.scoped(
       compactSession: opencode.compactSession,
       interruptSession: opencode.interruptSession,
       upsertInfoCard,
-      editInfoCard,
       sendInfoCard,
       logger,
       formatError,
