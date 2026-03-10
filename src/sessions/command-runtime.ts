@@ -13,7 +13,6 @@ import {
   GUILD_COMMAND_NAME,
   isGuildCommandName,
   isVisibilityToggleCommandName,
-  type GuildCommandName,
 } from "@/discord/commands.ts";
 import {
   beginInterruptRequest,
