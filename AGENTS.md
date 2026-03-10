@@ -1,3 +1,8 @@
+# General Instructions
+
+- Use `--no-gpg-sign` for commits and generally for Git operations that may require signing, since you don't
+  know if the user has signing enabled by default.
+
 # btca MCP Usage Instructions
 
 Use btca whenever a task depends on understanding a repo, docs site, or configured resource
