@@ -33,7 +33,6 @@ import type { LoggerShape } from "@/util/logging.ts";
 type PendingQuestionBatch = {
   request: QuestionRequest;
   session: ChannelSession;
-  ownerId: string;
   version: number;
   lastModifiedBy: string | null;
   message: Message | null;
@@ -281,7 +280,6 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
         const batch: PendingQuestionBatch = {
           request,
           session,
-          ownerId: activeRun.discordMessage.author.id,
           version: 0,
           lastModifiedBy: null,
           message: null,
@@ -468,14 +466,6 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
         const batch = yield* getQuestionBatch(action.requestID);
         if (!batch) {
           yield* replyToQuestionInteraction(interaction, "This question prompt has expired.");
-          return true;
-        }
-
-        if (interaction.user.id !== batch.ownerId) {
-          yield* replyToQuestionInteraction(
-            interaction,
-            "Only the user who started this run can answer these questions.",
-          );
           return true;
         }
 

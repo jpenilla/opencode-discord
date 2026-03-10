@@ -1273,13 +1273,8 @@ describe("ChannelSessionsLive integration", () => {
       ),
     );
 
-    expect(await getRef(questionInteraction.interactionReplies)).toEqual([
-      {
-        content: "Only the user who started this run can answer these questions.",
-        flags: 64,
-        allowedMentions: { parse: [] },
-      },
-    ]);
+    expect(await getRef(questionInteraction.interactionReplies)).toEqual([]);
+    expect((await getRef(questionInteraction.interactionEdits)).length).toBe(1);
   });
 
   test("surfaces a question UI failure reply when posting the question card fails", async () => {

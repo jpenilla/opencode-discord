@@ -279,7 +279,7 @@ describe("createQuestionRuntime", () => {
     });
   });
 
-  test("rejects question interactions from other users", async () => {
+  test("allows question interactions from other users", async () => {
     const harness = await makeHarness();
 
     await Effect.runPromise(
@@ -300,9 +300,8 @@ describe("createQuestionRuntime", () => {
     );
 
     expect(handled).toBe(true);
-    expect((await getRef(harness.interactionReplies))[0]?.content).toBe(
-      "Only the user who started this run can answer these questions.",
-    );
+    expect(await getRef(harness.interactionReplies)).toEqual([]);
+    expect(await getRef(harness.replyCalls)).toEqual([harness.request.id]);
   });
 
   test("expires question batches for a session and treats later interactions as expired", async () => {
@@ -378,13 +377,14 @@ describe("createQuestionRuntime", () => {
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
           customId: `ocq:${harness.request.id}:0:question-prev`,
+          userId: "intruder",
         }),
       ),
     );
 
     expect(handled).toBe(true);
     expect((await getRef(harness.interactionReplies)).at(-1)?.content).toBe(
-      "This question prompt changed before your action was applied. Review the latest card and try again.",
+      "Another user updated this question prompt before your action was applied. Review the latest card and try again.",
     );
   });
 
@@ -413,13 +413,14 @@ describe("createQuestionRuntime", () => {
         harness.makeModalInteraction({
           customId: `ocq:${harness.request.id}:0:modal:0`,
           value: "Other",
+          userId: "intruder",
         }),
       ),
     );
 
     expect(handled).toBe(true);
     expect((await getRef(harness.interactionReplies)).at(-1)?.content).toBe(
-      "This question prompt changed before your action was applied. Review the latest card and try again.",
+      "Another user updated this question prompt before your action was applied. Review the latest card and try again.",
     );
   });
 });

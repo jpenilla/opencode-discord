@@ -72,7 +72,7 @@ Question prompts:
 - Supports single-select and multi-select questions.
 - Supports optional custom answers through a modal when the question allows it.
 - Supports paging through both questions and large option sets.
-- Only the user who started the run can answer the question batch.
+- Any user in the channel can answer the question batch.
 - Rejected, expired, or replaced prompts are updated in place.
 
 ## Slash Commands
