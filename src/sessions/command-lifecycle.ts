@@ -1,6 +1,8 @@
 import type { ActiveRun, QuestionOutcome } from "@/sessions/session.ts";
 
 export type CommandRejection = { type: "reject"; message: string };
+export const GUILD_TEXT_COMMAND_ONLY_MESSAGE =
+  "This command only works in standard guild text channels.";
 
 export const decideCompactEntry = (input: {
   inGuildTextChannel: boolean;
@@ -8,7 +10,7 @@ export const decideCompactEntry = (input: {
   hasActiveRun: boolean;
 }): CommandRejection | { type: "defer-and-check-health" } => {
   if (!input.inGuildTextChannel) {
-    return { type: "reject", message: "This command only works in standard guild text channels." };
+    return { type: "reject", message: GUILD_TEXT_COMMAND_ONLY_MESSAGE };
   }
   if (!input.hasSession) {
     return { type: "reject", message: "No OpenCode session exists in this channel yet." };
@@ -41,7 +43,7 @@ export const decideInterruptEntry = (input: {
   hasIdleCompaction: boolean;
 }): CommandRejection | { type: "defer-and-interrupt"; target: "run" | "compaction" } => {
   if (!input.inGuildTextChannel) {
-    return { type: "reject", message: "This command only works in standard guild text channels." };
+    return { type: "reject", message: GUILD_TEXT_COMMAND_ONLY_MESSAGE };
   }
   if (!input.hasSession) {
     return { type: "reject", message: "No OpenCode session exists in this channel yet." };

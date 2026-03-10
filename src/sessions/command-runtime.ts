@@ -10,10 +10,17 @@ import { Effect } from "effect";
 import { compactionCardContent } from "@/discord/compaction-card.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import {
+  GUILD_COMMAND_NAME,
+  isGuildCommandName,
+  isVisibilityToggleCommandName,
+  type GuildCommandName,
+} from "@/discord/commands.ts";
+import {
   beginInterruptRequest,
   decideCompactAfterHealthCheck,
   decideCompactEntry,
   decideInterruptEntry,
+  GUILD_TEXT_COMMAND_ONLY_MESSAGE,
 } from "@/sessions/command-lifecycle.ts";
 import type { ChannelSession } from "@/sessions/session.ts";
 import {
@@ -69,8 +76,9 @@ type CommandRuntimeDeps = {
   formatError: (error: unknown) => string;
 };
 
-const isVisibilityToggleCommand = (commandName: string) =>
-  commandName === "toggle-thinking" || commandName === "toggle-compaction-summaries";
+type VisibilityToggleCommandName =
+  | typeof GUILD_COMMAND_NAME.toggleThinking
+  | typeof GUILD_COMMAND_NAME.toggleCompactionSummaries;
 
 const replyToCommandInteraction = (interaction: Interaction, message: string) => {
   if (!interaction.isChatInputCommand()) {
@@ -122,18 +130,15 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
         return false;
       }
 
-      if (
-        interaction.commandName !== "compact" &&
-        interaction.commandName !== "interrupt" &&
-        !isVisibilityToggleCommand(interaction.commandName)
-      ) {
+      const { commandName } = interaction;
+      if (!isGuildCommandName(commandName)) {
         return false;
       }
 
       const inGuildTextChannel =
         interaction.inGuild() && interaction.channel?.type === ChannelType.GuildText;
       const session = inGuildTextChannel
-        ? yield* isVisibilityToggleCommand(interaction.commandName)
+        ? yield* isVisibilityToggleCommandName(commandName)
             ? deps.getLiveSession(interaction.channelId)
             : deps.getSession(interaction.channelId)
         : null;
@@ -141,54 +146,67 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
         session.progressChannel = interaction.channel as SendableChannels;
       }
 
-      if (isVisibilityToggleCommand(interaction.commandName)) {
-        if (!inGuildTextChannel) {
+      const handleVisibilityToggle = (
+        toggleCommandName: VisibilityToggleCommandName,
+      ): Effect.Effect<boolean, unknown> =>
+        Effect.gen(function* () {
+          if (!inGuildTextChannel) {
+            yield* replyToCommandInteraction(interaction, GUILD_TEXT_COMMAND_ONLY_MESSAGE);
+            return true;
+          }
+
+          const persistedSettings = yield* deps.getChannelSettings(interaction.channelId);
+          const currentSettings = resolveChannelSettings(
+            deps.channelSettingsDefaults,
+            persistedSettings,
+          );
+          const nextSettings: PersistedChannelSettings =
+            toggleCommandName === GUILD_COMMAND_NAME.toggleThinking
+              ? {
+                  channelId: interaction.channelId,
+                  showThinking: !currentSettings.showThinking,
+                  showCompactionSummaries: persistedSettings?.showCompactionSummaries,
+                }
+              : {
+                  channelId: interaction.channelId,
+                  showThinking: persistedSettings?.showThinking,
+                  showCompactionSummaries: !currentSettings.showCompactionSummaries,
+                };
+
+          yield* deps.upsertChannelSettings(nextSettings);
+
+          const resolvedSettings = resolveChannelSettings(
+            deps.channelSettingsDefaults,
+            nextSettings,
+          );
+          if (session) {
+            session.channelSettings = resolvedSettings;
+          }
+
           yield* replyToCommandInteraction(
             interaction,
-            "This command only works in standard guild text channels.",
+            toggleCommandName === GUILD_COMMAND_NAME.toggleThinking
+              ? `Thinking messages are now ${
+                  resolvedSettings.showThinking ? "enabled" : "disabled"
+                } in this channel.`
+              : `Compaction summaries are now ${
+                  resolvedSettings.showCompactionSummaries ? "enabled" : "disabled"
+                } in this channel.`,
           );
           return true;
-        }
+        });
 
-        const persistedSettings = yield* deps.getChannelSettings(interaction.channelId);
-        const currentSettings = resolveChannelSettings(
-          deps.channelSettingsDefaults,
-          persistedSettings,
-        );
-        const nextSettings: PersistedChannelSettings =
-          interaction.commandName === "toggle-thinking"
-            ? {
-                channelId: interaction.channelId,
-                showThinking: !currentSettings.showThinking,
-                showCompactionSummaries: persistedSettings?.showCompactionSummaries,
-              }
-            : {
-                channelId: interaction.channelId,
-                showThinking: persistedSettings?.showThinking,
-                showCompactionSummaries: !currentSettings.showCompactionSummaries,
-              };
-
-        yield* deps.upsertChannelSettings(nextSettings);
-
-        const resolvedSettings = resolveChannelSettings(deps.channelSettingsDefaults, nextSettings);
-        if (session) {
-          session.channelSettings = resolvedSettings;
-        }
-
-        yield* replyToCommandInteraction(
-          interaction,
-          interaction.commandName === "toggle-thinking"
-            ? `Thinking messages are now ${
-                resolvedSettings.showThinking ? "enabled" : "disabled"
-              } in this channel.`
-            : `Compaction summaries are now ${
-                resolvedSettings.showCompactionSummaries ? "enabled" : "disabled"
-              } in this channel.`,
-        );
-        return true;
+      switch (commandName) {
+        case GUILD_COMMAND_NAME.toggleThinking:
+        case GUILD_COMMAND_NAME.toggleCompactionSummaries:
+          return yield* handleVisibilityToggle(commandName);
+        case GUILD_COMMAND_NAME.compact:
+          break;
+        case GUILD_COMMAND_NAME.interrupt:
+          break;
       }
 
-      if (interaction.commandName === "compact") {
+      if (commandName === GUILD_COMMAND_NAME.compact) {
         const compactEntry = decideCompactEntry({
           inGuildTextChannel,
           hasSession: !!session,
