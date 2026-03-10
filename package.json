@@ -6,6 +6,7 @@
     "opencode"
   ],
   "scripts": {
+    "check": "bun run fmt:check && bun run lint && bun run typecheck && bun run test",
     "dev": "bun --env-file=.env src/index.ts",
     "start": "bun --env-file=.env src/index.ts",
     "test:root": "bun test ./test",
