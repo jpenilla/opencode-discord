@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, type Guild } from "discord.js"
+import { SlashCommandBuilder, type Guild } from "discord.js";
 
 const GUILD_COMMANDS = [
   new SlashCommandBuilder()
@@ -7,8 +7,8 @@ const GUILD_COMMANDS = [
   new SlashCommandBuilder()
     .setName("interrupt")
     .setDescription("Interrupt the active OpenCode run in this channel"),
-].map((command) => command.toJSON())
+].map((command) => command.toJSON());
 
 export const syncGuildCommands = async (guild: Guild) => {
-  await guild.commands.set(GUILD_COMMANDS)
-}
+  await guild.commands.set(GUILD_COMMANDS);
+};

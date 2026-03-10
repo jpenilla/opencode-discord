@@ -1,411 +1,428 @@
-import { ContainerBuilder, TextDisplayBuilder } from "@discordjs/builders"
-import { MessageFlags, type Message, type SendableChannels } from "discord.js"
-import type { ToolPart } from "@opencode-ai/sdk/v2"
-import { displaySessionPath } from "@/sandbox/session-paths.ts"
+import { ContainerBuilder, TextDisplayBuilder } from "@discordjs/builders";
+import { MessageFlags, type Message, type SendableChannels } from "discord.js";
+import type { ToolPart } from "@opencode-ai/sdk/v2";
+import { displaySessionPath } from "@/sandbox/session-paths.ts";
 
-const EDIT_TOOL_CARDS = true
-export type ToolCardTerminalState = "shutdown"
+const EDIT_TOOL_CARDS = true;
+export type ToolCardTerminalState = "shutdown";
 
 const truncate = (value: string, maxLength: number) => {
   if (value.length <= maxLength) {
-    return value
+    return value;
   }
-  return `${value.slice(0, maxLength - 1)}…`
-}
+  return `${value.slice(0, maxLength - 1)}…`;
+};
 
 const formatStatus = (part: ToolPart, terminalState?: ToolCardTerminalState) => {
   if (terminalState === "shutdown") {
-    return "Stopped"
+    return "Stopped";
   }
 
   switch (part.state.status) {
     case "pending":
-      return "Queued"
+      return "Queued";
     case "running":
-      return "Running"
+      return "Running";
     case "completed":
-      return "Completed"
+      return "Completed";
     case "error":
-      return "Failed"
+      return "Failed";
   }
-}
+};
 
 const statusEmoji = (part: ToolPart, terminalState?: ToolCardTerminalState) => {
   if (terminalState === "shutdown") {
-    return "🛑"
+    return "🛑";
   }
 
   switch (part.state.status) {
     case "pending":
-      return "⏳"
+      return "⏳";
     case "running":
-      return "🛠️"
+      return "🛠️";
     case "completed":
-      return "✅"
+      return "✅";
     case "error":
-      return "❌"
+      return "❌";
   }
-}
+};
 
 const toolEmoji = (tool: string) => {
   switch (tool) {
     case "invalid":
-      return "⚠️"
+      return "⚠️";
     case "bash":
-      return "💻"
+      return "💻";
     case "read":
-      return "📖"
+      return "📖";
     case "glob":
     case "grep":
-      return "🔎"
+      return "🔎";
     case "edit":
     case "write":
-      return "✏️"
+      return "✏️";
     case "task":
-      return "🧩"
+      return "🧩";
     case "webfetch":
     case "websearch":
-      return "🌐"
+      return "🌐";
     case "codesearch":
-      return "🧠"
+      return "🧠";
     case "skill":
-      return "🎯"
+      return "🎯";
     case "apply_patch":
-      return "🩹"
+      return "🩹";
     case "todoread":
     case "todowrite":
-      return "📝"
+      return "📝";
     case "plan_exit":
-      return "🚪"
+      return "🚪";
     case "batch":
-      return "📦"
+      return "📦";
     case "lsp":
-      return "🧭"
+      return "🧭";
     default:
-      return tool.includes("patch") ? "🩹" : "🛠️"
+      return tool.includes("patch") ? "🩹" : "🛠️";
   }
-}
+};
 
 const formatDuration = (part: ToolPart) => {
   if (part.state.status !== "completed" && part.state.status !== "error") {
-    return null
+    return null;
   }
 
-  const start = part.state.time.start
-  const end = part.state.time.end
-  const milliseconds = Math.max(0, end - start)
-  return `${(milliseconds / 1000).toFixed(2)}s`
-}
+  const start = part.state.time.start;
+  const end = part.state.time.end;
+  const milliseconds = Math.max(0, end - start);
+  return `${(milliseconds / 1000).toFixed(2)}s`;
+};
 
 const titleForPart = (part: ToolPart) =>
-  part.state.status === "running" || part.state.status === "completed" ? part.state.title : undefined
+  part.state.status === "running" || part.state.status === "completed"
+    ? part.state.title
+    : undefined;
 
-const singleLine = (value: string) => value.replace(/\s+/g, " ").trim()
+const singleLine = (value: string) => value.replace(/\s+/g, " ").trim();
 
-const quoted = (value: string, maxLength: number) => `\`${truncate(singleLine(value), maxLength)}\``
+const quoted = (value: string, maxLength: number) =>
+  `\`${truncate(singleLine(value), maxLength)}\``;
 
-const inputObject = (part: ToolPart) => part.state.input
+const inputObject = (part: ToolPart) => part.state.input;
 
 const findStringInput = (input: Record<string, unknown>, keys: readonly string[]) => {
   for (const key of keys) {
-    const value = input[key]
+    const value = input[key];
     if (typeof value === "string" && value.trim().length > 0) {
-      return value
+      return value;
     }
   }
-  return null
-}
+  return null;
+};
 
 const findUnknownInput = (input: Record<string, unknown>, keys: readonly string[]) => {
   for (const key of keys) {
     if (key in input && input[key] !== undefined && input[key] !== null) {
-      return input[key]
+      return input[key];
     }
   }
-  return null
-}
+  return null;
+};
 
-const displayPath = (path: string, workdir: string) => displaySessionPath(workdir, path)
+const displayPath = (path: string, workdir: string) => displaySessionPath(workdir, path);
 
 const normalizeDisplayText = (value: string, workdir: string) => {
-  return value.replace(/(?:\/private)?\/[^\s`"'|)]+/g, (token) => displayPath(token, workdir))
-}
+  return value.replace(/(?:\/private)?\/[^\s`"'|)]+/g, (token) => displayPath(token, workdir));
+};
 
 const extractPatchFiles = (value: string, workdir: string) => {
-  const hunkFiles = [...value.matchAll(/\*\*\* (?:Add|Delete|Update|Move to): (.+)/g)].map((match) =>
-    displayPath(match[1].trim(), workdir),
-  )
+  const hunkFiles = [...value.matchAll(/\*\*\* (?:Add|Delete|Update|Move to): (.+)/g)].map(
+    (match) => displayPath(match[1].trim(), workdir),
+  );
   const outputFiles = [...value.matchAll(/(?:^|\n)(?:A|M|D|R\d+|C\d+)\s+([^\n]+)/g)].map((match) =>
     displayPath(match[1].trim(), workdir),
-  )
-  return [...new Set([...hunkFiles, ...outputFiles])].sort()
-}
+  );
+  return [...new Set([...hunkFiles, ...outputFiles])].sort();
+};
 
-const formatTextValue = (value: string, workdir: string, maxLength: number) => quoted(normalizeDisplayText(value, workdir), maxLength)
+const formatTextValue = (value: string, workdir: string, maxLength: number) =>
+  quoted(normalizeDisplayText(value, workdir), maxLength);
 
-const titleCaseKey = (key: string) => key.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").replace(/\s+/g, " ").replace(/^./, (value) => value.toUpperCase())
+const titleCaseKey = (key: string) =>
+  key
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^./, (value) => value.toUpperCase());
 
-const isPathLikeKey = (key: string) => /(path|file|dir|cwd|root|target|workspace)/i.test(key)
+const isPathLikeKey = (key: string) => /(path|file|dir|cwd|root|target|workspace)/i.test(key);
 
 const compactUrl = (value: string) => {
   try {
-    const url = new URL(value)
-    const path = url.pathname === "/" ? "" : url.pathname
-    const queryEntries = [...url.searchParams.entries()]
+    const url = new URL(value);
+    const path = url.pathname === "/" ? "" : url.pathname;
+    const queryEntries = [...url.searchParams.entries()];
     const query =
       queryEntries.length === 0
         ? ""
         : `?${queryEntries
             .slice(0, 2)
             .map(([key, item]) => `${key}=${truncate(item, 24)}`)
-            .join("&")}${queryEntries.length > 2 ? "&…" : ""}`
-    return `${url.hostname}${path}${query}`
+            .join("&")}${queryEntries.length > 2 ? "&…" : ""}`;
+    return `${url.hostname}${path}${query}`;
   } catch {
-    return null
+    return null;
   }
-}
+};
 
 const parseWebfetchTitle = (title: string) => {
-  const suffixStart = title.lastIndexOf(" (")
+  const suffixStart = title.lastIndexOf(" (");
   if (suffixStart === -1 || !title.endsWith(")")) {
-    return null
+    return null;
   }
 
   return {
     url: title.slice(0, suffixStart),
     contentType: title.slice(suffixStart + 2, -1),
-  }
-}
+  };
+};
 
 const summarizeContentType = (value: string) => {
-  const mime = value.split(";")[0]?.trim().toLowerCase()
+  const mime = value.split(";")[0]?.trim().toLowerCase();
   switch (mime) {
     case "application/json":
-      return "JSON"
+      return "JSON";
     case "text/html":
-      return "HTML"
+      return "HTML";
     case "text/plain":
-      return "Text"
+      return "Text";
     case "text/markdown":
     case "text/x-markdown":
-      return "Markdown"
+      return "Markdown";
     default:
-      return mime || value
+      return mime || value;
   }
-}
+};
 
 const formatGenericValue = (key: string, value: unknown, workdir: string): string | null => {
   if (typeof value === "string") {
-    const url = compactUrl(value)
+    const url = compactUrl(value);
     if (url) {
-      return `\`${truncate(url, 140)}\``
+      return `\`${truncate(url, 140)}\``;
     }
 
     if (isPathLikeKey(key)) {
-      return `\`${displayPath(value, workdir)}\``
+      return `\`${displayPath(value, workdir)}\``;
     }
 
-    return formatTextValue(value, workdir, 160)
+    return formatTextValue(value, workdir, 160);
   }
 
   if (typeof value === "number" || typeof value === "boolean") {
-    return `\`${String(value)}\``
+    return `\`${String(value)}\``;
   }
 
   if (Array.isArray(value)) {
-    return `\`${value.length} items\``
+    return `\`${value.length} items\``;
   }
 
   if (value && typeof value === "object") {
-    return `\`${Object.keys(value).length} fields\``
+    return `\`${Object.keys(value).length} fields\``;
   }
 
-  return null
-}
+  return null;
+};
 
 const formatGenericInputLines = (input: Record<string, unknown>, workdir: string) => {
   return Object.entries(input)
     .filter(([, value]) => value !== undefined && value !== null)
     .sort(([a], [b]) => a.localeCompare(b))
     .flatMap(([key, value]) => {
-      const formatted = formatGenericValue(key, value, workdir)
-      return formatted ? [`- ${titleCaseKey(key)}: ${formatted}`] : []
-    })
-}
+      const formatted = formatGenericValue(key, value, workdir);
+      return formatted ? [`- ${titleCaseKey(key)}: ${formatted}`] : [];
+    });
+};
 
 type FormatterInput = {
-  part: ToolPart
-  workdir: string
-  input: Record<string, unknown>
-}
+  part: ToolPart;
+  workdir: string;
+  input: Record<string, unknown>;
+};
 
-type ToolInputFormatter = (input: FormatterInput) => string[]
+type ToolInputFormatter = (input: FormatterInput) => string[];
 
 const formatPatchInputLines: ToolInputFormatter = ({ part, workdir, input }) => {
-  const patchInput = findStringInput(input, ["patch", "content", "diff", "input"])
-  const patchRaw = "raw" in part.state && typeof part.state.raw === "string" ? part.state.raw : ""
-  const patchOutput = part.state.status === "completed" ? part.state.output : ""
-  const files = extractPatchFiles(`${patchInput ?? ""}\n${patchRaw}\n${patchOutput}`, workdir)
+  const patchInput = findStringInput(input, ["patch", "content", "diff", "input"]);
+  const patchRaw = "raw" in part.state && typeof part.state.raw === "string" ? part.state.raw : "";
+  const patchOutput = part.state.status === "completed" ? part.state.output : "";
+  const files = extractPatchFiles(`${patchInput ?? ""}\n${patchRaw}\n${patchOutput}`, workdir);
 
   if (files.length === 0) {
-    return part.state.status === "completed" ? ["- Edited: applied patch"] : []
+    return part.state.status === "completed" ? ["- Edited: applied patch"] : [];
   }
 
   if (files.length <= 3) {
-    return [`- Edited: ${files.map((file) => `\`${file}\``).join(", ")}`]
+    return [`- Edited: ${files.map((file) => `\`${file}\``).join(", ")}`];
   }
 
-  return [`- Edited: ${files.map((file) => `\`${file}\``).join(", ")}`]
-}
+  return [`- Edited: ${files.map((file) => `\`${file}\``).join(", ")}`];
+};
 
 const formatBashInputLines: ToolInputFormatter = ({ part, workdir, input }) => {
-  const command = findStringInput(input, ["cmd", "command", "script", "shell"])
+  const command = findStringInput(input, ["cmd", "command", "script", "shell"]);
   if (command) {
-    return [`- Command: ${formatTextValue(command, workdir, 220)}`]
+    return [`- Command: ${formatTextValue(command, workdir, 220)}`];
   }
-  if ("raw" in part.state && typeof part.state.raw === "string" && part.state.raw.trim().length > 0) {
-    return [`- Command: ${formatTextValue(part.state.raw, workdir, 220)}`]
+  if (
+    "raw" in part.state &&
+    typeof part.state.raw === "string" &&
+    part.state.raw.trim().length > 0
+  ) {
+    return [`- Command: ${formatTextValue(part.state.raw, workdir, 220)}`];
   }
-  return []
-}
+  return [];
+};
 
 const formatReadInputLines: ToolInputFormatter = ({ workdir, input }) => {
-  const filePath = findStringInput(input, ["filePath", "path", "filepath", "target"])
+  const filePath = findStringInput(input, ["filePath", "path", "filepath", "target"]);
   if (!filePath) {
-    return []
+    return [];
   }
-  const normalized = displayPath(filePath, workdir)
-  return normalized === "." ? ["- File: `.` (cwd)"] : [`- File: \`${normalized}\``]
-}
+  const normalized = displayPath(filePath, workdir);
+  return normalized === "." ? ["- File: `.` (cwd)"] : [`- File: \`${normalized}\``];
+};
 
 const formatGlobInputLines: ToolInputFormatter = ({ workdir, input }) => {
-  const pattern = findStringInput(input, ["pattern", "glob", "query"])
-  const path = findStringInput(input, ["path", "cwd", "root"])
-  const hidden = findUnknownInput(input, ["includeHidden", "hidden", "dot"])
-  const lines: string[] = []
-  if (pattern) lines.push(`- Pattern: ${formatTextValue(pattern, workdir, 180)}`)
-  if (path) lines.push(`- Path: \`${displayPath(path, workdir)}\``)
-  if (typeof hidden === "boolean") lines.push(`- Hidden: \`${hidden}\``)
-  return lines
-}
+  const pattern = findStringInput(input, ["pattern", "glob", "query"]);
+  const path = findStringInput(input, ["path", "cwd", "root"]);
+  const hidden = findUnknownInput(input, ["includeHidden", "hidden", "dot"]);
+  const lines: string[] = [];
+  if (pattern) lines.push(`- Pattern: ${formatTextValue(pattern, workdir, 180)}`);
+  if (path) lines.push(`- Path: \`${displayPath(path, workdir)}\``);
+  if (typeof hidden === "boolean") lines.push(`- Hidden: \`${hidden}\``);
+  return lines;
+};
 
 const formatGrepInputLines: ToolInputFormatter = ({ workdir, input }) => {
-  const pattern = findStringInput(input, ["pattern", "query", "search"])
-  const path = findStringInput(input, ["path", "cwd", "root"])
-  const caseSensitive = findUnknownInput(input, ["caseSensitive", "ignoreCase"])
-  const context = findUnknownInput(input, ["context", "before", "after"])
-  const lines: string[] = []
-  if (pattern) lines.push(`- Pattern: ${formatTextValue(pattern, workdir, 180)}`)
-  if (path) lines.push(`- Path: \`${displayPath(path, workdir)}\``)
-  if (typeof caseSensitive === "boolean") lines.push(`- Case Sensitive: \`${caseSensitive}\``)
-  if (typeof context === "number") lines.push(`- Context: \`${context}\``)
-  return lines
-}
+  const pattern = findStringInput(input, ["pattern", "query", "search"]);
+  const path = findStringInput(input, ["path", "cwd", "root"]);
+  const caseSensitive = findUnknownInput(input, ["caseSensitive", "ignoreCase"]);
+  const context = findUnknownInput(input, ["context", "before", "after"]);
+  const lines: string[] = [];
+  if (pattern) lines.push(`- Pattern: ${formatTextValue(pattern, workdir, 180)}`);
+  if (path) lines.push(`- Path: \`${displayPath(path, workdir)}\``);
+  if (typeof caseSensitive === "boolean") lines.push(`- Case Sensitive: \`${caseSensitive}\``);
+  if (typeof context === "number") lines.push(`- Context: \`${context}\``);
+  return lines;
+};
 
 const formatEditInputLines: ToolInputFormatter = ({ workdir, input }) => {
-  const path = findStringInput(input, ["filePath", "path", "file"])
-  const search = findStringInput(input, ["oldText", "search", "find"])
-  const replace = findStringInput(input, ["newText", "replace", "replacement"])
-  const lines: string[] = []
-  if (path) lines.push(`- File: \`${displayPath(path, workdir)}\``)
+  const path = findStringInput(input, ["filePath", "path", "file"]);
+  const search = findStringInput(input, ["oldText", "search", "find"]);
+  const replace = findStringInput(input, ["newText", "replace", "replacement"]);
+  const lines: string[] = [];
+  if (path) lines.push(`- File: \`${displayPath(path, workdir)}\``);
   if (search && replace) {
-    lines.push(`- Edit: ${formatTextValue(`${singleLine(search)} -> ${singleLine(replace)}`, workdir, 200)}`)
+    lines.push(
+      `- Edit: ${formatTextValue(`${singleLine(search)} -> ${singleLine(replace)}`, workdir, 200)}`,
+    );
   }
-  return lines
-}
+  return lines;
+};
 
 const formatWriteInputLines: ToolInputFormatter = ({ workdir, input }) => {
-  const path = findStringInput(input, ["filePath", "path", "file"])
-  const content = findStringInput(input, ["content", "text"])
-  const lines: string[] = []
-  if (path) lines.push(`- File: \`${displayPath(path, workdir)}\``)
-  if (content) lines.push(`- Size: \`${content.length} chars\``)
-  return lines
-}
+  const path = findStringInput(input, ["filePath", "path", "file"]);
+  const content = findStringInput(input, ["content", "text"]);
+  const lines: string[] = [];
+  if (path) lines.push(`- File: \`${displayPath(path, workdir)}\``);
+  if (content) lines.push(`- Size: \`${content.length} chars\``);
+  return lines;
+};
 
 const formatTaskInputLines: ToolInputFormatter = ({ workdir, input }) => {
-  const description = findStringInput(input, ["description", "prompt", "task"])
-  const agent = findStringInput(input, ["agent", "agentID"])
-  const model = findStringInput(input, ["model", "modelID"])
-  const lines: string[] = []
-  if (description) lines.push(`- Task: ${formatTextValue(description, workdir, 200)}`)
-  if (agent) lines.push(`- Agent: \`${agent}\``)
-  if (model) lines.push(`- Model: \`${model}\``)
-  return lines
-}
+  const description = findStringInput(input, ["description", "prompt", "task"]);
+  const agent = findStringInput(input, ["agent", "agentID"]);
+  const model = findStringInput(input, ["model", "modelID"]);
+  const lines: string[] = [];
+  if (description) lines.push(`- Task: ${formatTextValue(description, workdir, 200)}`);
+  if (agent) lines.push(`- Agent: \`${agent}\``);
+  if (model) lines.push(`- Model: \`${model}\``);
+  return lines;
+};
 
 const formatWebfetchInputLines: ToolInputFormatter = ({ part, input }) => {
-  const url = findStringInput(input, ["url", "link"])
-  const format = findStringInput(input, ["format"])
-  const lines: string[] = []
+  const url = findStringInput(input, ["url", "link"]);
+  const format = findStringInput(input, ["format"]);
+  const lines: string[] = [];
 
   if (url) {
-    const compact = compactUrl(url)
-    lines.push(`- URL: \`${compact ? truncate(compact, 180) : truncate(url, 180)}\``)
+    const compact = compactUrl(url);
+    lines.push(`- URL: \`${compact ? truncate(compact, 180) : truncate(url, 180)}\``);
   }
 
   if (format && format !== "markdown") {
-    lines.push(`- Format: \`${format}\``)
+    lines.push(`- Format: \`${format}\``);
   }
 
   if (part.state.status === "completed") {
-    const title = titleForPart(part)
+    const title = titleForPart(part);
     if (title) {
-      const parsed = parseWebfetchTitle(title)
+      const parsed = parseWebfetchTitle(title);
       if (parsed) {
         if (url && parsed.url !== url) {
-          const finalUrl = compactUrl(parsed.url)
-          lines.push(`- Final URL: \`${finalUrl ? truncate(finalUrl, 180) : truncate(parsed.url, 180)}\``)
+          const finalUrl = compactUrl(parsed.url);
+          lines.push(
+            `- Final URL: \`${finalUrl ? truncate(finalUrl, 180) : truncate(parsed.url, 180)}\``,
+          );
         }
-        lines.push(`- Response: \`${summarizeContentType(parsed.contentType)}\``)
+        lines.push(`- Response: \`${summarizeContentType(parsed.contentType)}\``);
       }
     }
   }
 
-  return lines
-}
+  return lines;
+};
 
 const formatSearchInputLines: ToolInputFormatter = ({ workdir, input }) => {
-  const query = findStringInput(input, ["query", "q", "pattern", "search"])
-  const path = findStringInput(input, ["path", "cwd", "root"])
-  const lines: string[] = []
-  if (query) lines.push(`- Query: ${formatTextValue(query, workdir, 180)}`)
-  if (path) lines.push(`- Path: \`${displayPath(path, workdir)}\``)
-  return lines
-}
+  const query = findStringInput(input, ["query", "q", "pattern", "search"]);
+  const path = findStringInput(input, ["path", "cwd", "root"]);
+  const lines: string[] = [];
+  if (query) lines.push(`- Query: ${formatTextValue(query, workdir, 180)}`);
+  if (path) lines.push(`- Path: \`${displayPath(path, workdir)}\``);
+  return lines;
+};
 
 const formatSkillInputLines: ToolInputFormatter = ({ input }) => {
-  const name = findStringInput(input, ["name", "skill", "id"])
-  const action = findStringInput(input, ["action", "mode", "op"])
-  const lines: string[] = []
-  if (name) lines.push(`- Skill: \`${name}\``)
-  if (action) lines.push(`- Action: \`${action}\``)
-  return lines
-}
+  const name = findStringInput(input, ["name", "skill", "id"]);
+  const action = findStringInput(input, ["action", "mode", "op"]);
+  const lines: string[] = [];
+  if (name) lines.push(`- Skill: \`${name}\``);
+  if (action) lines.push(`- Action: \`${action}\``);
+  return lines;
+};
 
 const formatTodoInputLines: ToolInputFormatter = ({ input }) => {
-  const todos = findUnknownInput(input, ["todos", "items", "tasks"])
+  const todos = findUnknownInput(input, ["todos", "items", "tasks"]);
   if (!Array.isArray(todos)) {
-    return []
+    return [];
   }
 
-  const lines: string[] = []
+  const lines: string[] = [];
   for (const todo of todos) {
     if (!todo || typeof todo !== "object") {
-      continue
+      continue;
     }
 
-    const record = todo as Record<string, unknown>
+    const record = todo as Record<string, unknown>;
     const content =
       (typeof record.content === "string" && record.content) ||
       (typeof record.text === "string" && record.text) ||
       (typeof record.title === "string" && record.title) ||
-      "(untitled)"
+      "(untitled)";
     const status =
       (typeof record.status === "string" && record.status) ||
       (typeof record.state === "string" && record.state) ||
-      (typeof record.done === "boolean" ? (record.done ? "done" : "pending") : "")
-    const normalizedStatus = status.toLowerCase()
+      (typeof record.done === "boolean" ? (record.done ? "done" : "pending") : "");
+    const normalizedStatus = status.toLowerCase();
     const emoji =
       normalizedStatus === "done" || normalizedStatus === "completed"
         ? "✅"
@@ -413,36 +430,36 @@ const formatTodoInputLines: ToolInputFormatter = ({ input }) => {
           ? "⏳"
           : normalizedStatus === "cancelled" || normalizedStatus === "canceled"
             ? "⛔"
-            : "🕒"
+            : "🕒";
 
-    lines.push(`${emoji} ${truncate(singleLine(content), 120)}`)
+    lines.push(`${emoji} ${truncate(singleLine(content), 120)}`);
   }
-  return lines
-}
+  return lines;
+};
 
 const formatPlanExitInputLines: ToolInputFormatter = ({ workdir, input }) => {
-  const reason = findStringInput(input, ["reason", "message", "status"])
-  return reason ? [`- Exit: ${formatTextValue(reason, workdir, 180)}`] : []
-}
+  const reason = findStringInput(input, ["reason", "message", "status"]);
+  return reason ? [`- Exit: ${formatTextValue(reason, workdir, 180)}`] : [];
+};
 
 const formatBatchInputLines: ToolInputFormatter = ({ input }) => {
-  const items = findUnknownInput(input, ["items", "calls", "tasks"])
-  return Array.isArray(items) ? [`- Batched Calls: \`${items.length}\``] : []
-}
+  const items = findUnknownInput(input, ["items", "calls", "tasks"]);
+  return Array.isArray(items) ? [`- Batched Calls: \`${items.length}\``] : [];
+};
 
 const formatLspInputLines: ToolInputFormatter = ({ workdir, input }) => {
-  const action = findStringInput(input, ["action", "method", "operation"])
-  const path = findStringInput(input, ["path", "filePath", "uri"])
-  const lines: string[] = []
-  if (action) lines.push(`- Action: \`${action}\``)
-  if (path) lines.push(`- Path: \`${displayPath(path, workdir)}\``)
-  return lines
-}
+  const action = findStringInput(input, ["action", "method", "operation"]);
+  const path = findStringInput(input, ["path", "filePath", "uri"]);
+  const lines: string[] = [];
+  if (action) lines.push(`- Action: \`${action}\``);
+  if (path) lines.push(`- Path: \`${displayPath(path, workdir)}\``);
+  return lines;
+};
 
 const formatInvalidInputLines: ToolInputFormatter = ({ workdir, input }) => {
-  const reason = findStringInput(input, ["reason", "error", "message"])
-  return reason ? [`- Reason: ${formatTextValue(reason, workdir, 180)}`] : []
-}
+  const reason = findStringInput(input, ["reason", "error", "message"]);
+  return reason ? [`- Reason: ${formatTextValue(reason, workdir, 180)}`] : [];
+};
 
 const TOOL_INPUT_FORMATTERS: Record<string, ToolInputFormatter> = {
   bash: formatBashInputLines,
@@ -462,117 +479,124 @@ const TOOL_INPUT_FORMATTERS: Record<string, ToolInputFormatter> = {
   batch: formatBatchInputLines,
   lsp: formatLspInputLines,
   invalid: formatInvalidInputLines,
-}
+};
 
 const formatToolInputLines = (part: ToolPart, workdir: string) => {
-  const input = inputObject(part)
+  const input = inputObject(part);
   if (part.tool === "apply_patch" || part.tool.includes("patch")) {
-    return formatPatchInputLines({ part, workdir, input })
+    return formatPatchInputLines({ part, workdir, input });
   }
 
-  const formatter = TOOL_INPUT_FORMATTERS[part.tool]
+  const formatter = TOOL_INPUT_FORMATTERS[part.tool];
   if (formatter) {
-    return formatter({ part, workdir, input })
+    return formatter({ part, workdir, input });
   }
 
-  return formatGenericInputLines(input, workdir)
-}
+  return formatGenericInputLines(input, workdir);
+};
 
 const shouldShowStep = (part: ToolPart, step: string) => {
-  if (part.tool.includes("patch") || part.tool === "todowrite" || part.tool === "grep" || part.tool === "webfetch") {
-    return false
+  if (
+    part.tool.includes("patch") ||
+    part.tool === "todowrite" ||
+    part.tool === "grep" ||
+    part.tool === "webfetch"
+  ) {
+    return false;
   }
-  const compact = singleLine(step)
+  const compact = singleLine(step);
   if (compact.length === 0 || compact.length > 140) {
-    return false
+    return false;
   }
   if (compact === "." || compact.startsWith("./")) {
-    return false
+    return false;
   }
   if (/^[./\w-]+$/.test(compact)) {
-    return false
+    return false;
   }
-  return true
-}
+  return true;
+};
 
 const searchResultInfo = (part: ToolPart): { count: number } | { error: string } | null => {
   if (part.state.status !== "completed") {
-    return null
+    return null;
   }
 
   if (part.tool === "glob") {
-    const count = part.state.metadata?.count
+    const count = part.state.metadata?.count;
     if (typeof count === "number" && Number.isFinite(count) && count >= 0) {
-      return { count }
+      return { count };
     }
-    return { error: "unexpected glob metadata (count missing)" }
+    return { error: "unexpected glob metadata (count missing)" };
   }
 
   if (part.tool === "grep") {
-    const matches = part.state.metadata?.matches
+    const matches = part.state.metadata?.matches;
     if (typeof matches === "number" && Number.isFinite(matches) && matches >= 0) {
-      return { count: matches }
+      return { count: matches };
     }
-    return { error: "unexpected grep metadata (matches missing)" }
+    return { error: "unexpected grep metadata (matches missing)" };
   }
 
-  return null
-}
+  return null;
+};
 
 const renderToolCard = (input: {
-  part: ToolPart
-  workdir: string
-  terminalState?: ToolCardTerminalState
+  part: ToolPart;
+  workdir: string;
+  terminalState?: ToolCardTerminalState;
 }) => {
-  const { part, terminalState } = input
-  const duration = terminalState ? null : formatDuration(part)
-  const statusLabel = duration ? `${formatStatus(part, terminalState)} in ${duration}` : formatStatus(part, terminalState)
+  const { part, terminalState } = input;
+  const duration = terminalState ? null : formatDuration(part);
+  const statusLabel = duration
+    ? `${formatStatus(part, terminalState)} in ${duration}`
+    : formatStatus(part, terminalState);
   const header =
     part.tool === "todowrite"
       ? "**📝 Todo list**"
-      : `**${toolEmoji(part.tool)} ${statusEmoji(part, terminalState)} \`${part.tool}\` ${statusLabel}**`
-  const lines = [
-    header,
-  ]
+      : `**${toolEmoji(part.tool)} ${statusEmoji(part, terminalState)} \`${part.tool}\` ${statusLabel}**`;
+  const lines = [header];
 
-  const inputLines = formatToolInputLines(part, input.workdir)
+  const inputLines = formatToolInputLines(part, input.workdir);
   if (inputLines.length > 0) {
-    lines.push(...inputLines)
+    lines.push(...inputLines);
   }
 
-  const title = titleForPart(part)
+  const title = titleForPart(part);
   if (title) {
-    const step = normalizeDisplayText(title, input.workdir)
+    const step = normalizeDisplayText(title, input.workdir);
     if (shouldShowStep(part, step)) {
-      lines.push(part.tool === "bash" ? `- Purpose: ${step}` : `- Step: ${step}`)
+      lines.push(part.tool === "bash" ? `- Purpose: ${step}` : `- Step: ${step}`);
     }
   }
 
-  const resultInfo = searchResultInfo(part)
+  const resultInfo = searchResultInfo(part);
   if (resultInfo && "count" in resultInfo) {
-    lines.push(`- Results: \`${resultInfo.count}\``)
+    lines.push(`- Results: \`${resultInfo.count}\``);
   } else if (resultInfo && "error" in resultInfo) {
-    lines.push(`- Results Error: \`${resultInfo.error}\``)
+    lines.push(`- Results Error: \`${resultInfo.error}\``);
   }
 
   if (terminalState === "shutdown") {
-    lines.push("- Note: This tool did not complete because the bot shut down.")
+    lines.push("- Note: This tool did not complete because the bot shut down.");
   } else if (part.state.status === "error") {
-    lines.push(`- Error: \`${truncate(normalizeDisplayText(part.state.error, input.workdir), 600)}\``)
+    lines.push(
+      `- Error: \`${truncate(normalizeDisplayText(part.state.error, input.workdir), 600)}\``,
+    );
   }
 
   const container = new ContainerBuilder().addTextDisplayComponents(
     new TextDisplayBuilder().setContent(lines.join("\n")),
-  )
+  );
 
-  return [container]
-}
+  return [container];
+};
 
 const createPayload = (input: {
-  part: ToolPart
-  workdir: string
-  includeNotificationSuppression: boolean
-  terminalState?: ToolCardTerminalState
+  part: ToolPart;
+  workdir: string;
+  includeNotificationSuppression: boolean;
+  terminalState?: ToolCardTerminalState;
 }) => ({
   flags: input.includeNotificationSuppression
     ? MessageFlags.IsComponentsV2 | MessageFlags.SuppressNotifications
@@ -583,17 +607,17 @@ const createPayload = (input: {
     terminalState: input.terminalState,
   }),
   allowedMentions: { parse: [] as Array<never> },
-})
+});
 
 export const upsertToolCard = async (input: {
-  sourceMessage: Message
-  existingCard: Message | null
-  part: ToolPart
-  workdir: string
-  mode?: "edit-or-send" | "always-send"
-  terminalState?: ToolCardTerminalState
+  sourceMessage: Message;
+  existingCard: Message | null;
+  part: ToolPart;
+  workdir: string;
+  mode?: "edit-or-send" | "always-send";
+  terminalState?: ToolCardTerminalState;
 }) => {
-  const mode = input.mode ?? "edit-or-send"
+  const mode = input.mode ?? "edit-or-send";
   if (mode === "edit-or-send" && EDIT_TOOL_CARDS && input.existingCard) {
     try {
       await input.existingCard.edit(
@@ -603,15 +627,15 @@ export const upsertToolCard = async (input: {
           includeNotificationSuppression: false,
           terminalState: input.terminalState,
         }),
-      )
-      return input.existingCard
+      );
+      return input.existingCard;
     } catch {
       // fall through and create a fresh card if the previous message was deleted/uneditable.
     }
   }
 
   if (!input.sourceMessage.channel.isSendable()) {
-    throw new Error("Channel is not sendable for tool progress card")
+    throw new Error("Channel is not sendable for tool progress card");
   }
 
   return (input.sourceMessage.channel as SendableChannels).send(
@@ -621,14 +645,14 @@ export const upsertToolCard = async (input: {
       includeNotificationSuppression: true,
       terminalState: input.terminalState,
     }),
-  )
-}
+  );
+};
 
 export const editToolCard = (input: {
-  card: Message
-  part: ToolPart
-  workdir: string
-  terminalState: ToolCardTerminalState
+  card: Message;
+  part: ToolPart;
+  workdir: string;
+  terminalState: ToolCardTerminalState;
 }) =>
   input.card.edit(
     createPayload({
@@ -637,4 +661,4 @@ export const editToolCard = (input: {
       includeNotificationSuppression: false,
       terminalState: input.terminalState,
     }),
-  )
+  );

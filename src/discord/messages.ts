@@ -1,169 +1,170 @@
-import type { APIEmbedField, Embed, Message, SendableChannels } from "discord.js"
-import { MessageFlags } from "discord.js"
+import type { APIEmbedField, Embed, Message, SendableChannels } from "discord.js";
+import { MessageFlags } from "discord.js";
 
-import { splitDiscordMessage } from "@/discord/formatting.ts"
-import { normalizeOutgoingMentions } from "@/discord/mentions.ts"
+import { splitDiscordMessage } from "@/discord/formatting.ts";
+import { normalizeOutgoingMentions } from "@/discord/mentions.ts";
 
-const DISCORD_MESSAGE_LIMIT = 2000
+const DISCORD_MESSAGE_LIMIT = 2000;
 
-const summarizeField = (field: APIEmbedField | Embed["fields"][number]) => `${field.name}: ${field.value}`
+const summarizeField = (field: APIEmbedField | Embed["fields"][number]) =>
+  `${field.name}: ${field.value}`;
 
 export const summarizeEmbeds = (message: Message) => {
   if (message.embeds.length === 0) {
-    return "None"
+    return "None";
   }
 
   return message.embeds
     .map((embed, index) => {
-      const parts: Array<string> = [`Embed ${index + 1}`]
-      if (embed.title) parts.push(`title=${embed.title}`)
-      if (embed.description) parts.push(`description=${embed.description}`)
-      if (embed.url) parts.push(`url=${embed.url}`)
-      if (embed.fields.length > 0) parts.push(`fields=${embed.fields.map(summarizeField).join("; ")}`)
-      return `- ${parts.join(" | ")}`
+      const parts: Array<string> = [`Embed ${index + 1}`];
+      if (embed.title) parts.push(`title=${embed.title}`);
+      if (embed.description) parts.push(`description=${embed.description}`);
+      if (embed.url) parts.push(`url=${embed.url}`);
+      if (embed.fields.length > 0)
+        parts.push(`fields=${embed.fields.map(summarizeField).join("; ")}`);
+      return `- ${parts.join(" | ")}`;
     })
-    .join("\n")
-}
+    .join("\n");
+};
 
 export const summarizeAttachmentAvailability = (message: Message) =>
-  message.attachments.size > 0 ? "yes" : "no"
+  message.attachments.size > 0 ? "yes" : "no";
 
 type PromptMessageContext = {
-  userTag: string
-  messageId: string
-  content: string
-  attachmentContext: string
-  embedSummary: string
-}
+  userTag: string;
+  messageId: string;
+  content: string;
+  attachmentContext: string;
+  embedSummary: string;
+};
 
-export const promptMessageContext = (message: Message, contentOverride?: string): PromptMessageContext => ({
+export const promptMessageContext = (
+  message: Message,
+  contentOverride?: string,
+): PromptMessageContext => ({
   userTag: message.author.tag,
   messageId: message.id,
   content: (contentOverride ?? message.content).trim() || "(empty message)",
   attachmentContext: summarizeAttachmentAvailability(message),
   embedSummary: summarizeEmbeds(message),
-})
+});
 
 const appendPromptMessageContext = (
   sections: string[],
   context: PromptMessageContext,
   prefix = "",
 ) => {
-  sections.push(`${prefix}Discord user: ${context.userTag}`)
-  sections.push(`${prefix}Discord message ID: ${context.messageId}`)
-  sections.push(`${prefix}Message:`)
-  sections.push(context.content)
-  sections.push("", `${prefix}Attachments:`, context.attachmentContext)
-  sections.push("", `${prefix}Embed summary:`, context.embedSummary)
-}
+  sections.push(`${prefix}Discord user: ${context.userTag}`);
+  sections.push(`${prefix}Discord message ID: ${context.messageId}`);
+  sections.push(`${prefix}Message:`);
+  sections.push(context.content);
+  sections.push("", `${prefix}Attachments:`, context.attachmentContext);
+  sections.push("", `${prefix}Embed summary:`, context.embedSummary);
+};
 
 export const buildOpencodePrompt = (input: {
-  message: PromptMessageContext
-  referencedMessage?: PromptMessageContext
+  message: PromptMessageContext;
+  referencedMessage?: PromptMessageContext;
 }) => {
-  const sections: string[] = []
-  appendPromptMessageContext(sections, input.message)
+  const sections: string[] = [];
+  appendPromptMessageContext(sections, input.message);
 
   if (input.referencedMessage) {
-    sections.push("")
-    appendPromptMessageContext(sections, input.referencedMessage, "Referenced ")
+    sections.push("");
+    appendPromptMessageContext(sections, input.referencedMessage, "Referenced ");
   }
 
-  return sections.join("\n")
-}
+  return sections.join("\n");
+};
 
 const wrapDiscordPrompts = (heading: string, prompts: ReadonlyArray<string>) =>
   [
     heading,
-    ...prompts.map((prompt, index) => [`<discord-message index="${index + 1}">`, prompt, "</discord-message>"].join("\n")),
-  ].join("\n\n")
+    ...prompts.map((prompt, index) =>
+      [`<discord-message index="${index + 1}">`, prompt, "</discord-message>"].join("\n"),
+    ),
+  ].join("\n\n");
 
 const splitOutgoingText = (
   message: Message | null,
   text: string,
   options?: {
-    emptyFallback?: string
-    trim?: boolean
+    emptyFallback?: string;
+    trim?: boolean;
   },
 ) => {
-  let normalized = message ? normalizeOutgoingMentions(message, text) : text
+  let normalized = message ? normalizeOutgoingMentions(message, text) : text;
   if (options?.trim) {
-    normalized = normalized.trim()
+    normalized = normalized.trim();
   }
   if (!normalized) {
-    normalized = options?.emptyFallback ?? ""
+    normalized = options?.emptyFallback ?? "";
   }
   if (!normalized) {
-    return []
+    return [];
   }
-  return splitDiscordMessage(normalized)
-}
+  return splitDiscordMessage(normalized);
+};
 
 const sendChunks = async (
   chunks: ReadonlyArray<string>,
   send: (chunk: string, index: number) => Promise<void>,
 ) => {
   for (const [index, chunk] of chunks.entries()) {
-    await send(chunk, index)
+    await send(chunk, index);
   }
-}
+};
 
 export const buildBatchedOpencodePrompt = (prompts: ReadonlyArray<string>) => {
   if (prompts.length === 1) {
-    return prompts[0] ?? ""
+    return prompts[0] ?? "";
   }
 
   return wrapDiscordPrompts(
     "Multiple Discord messages arrived before you responded. Read all of them and address them together in order.",
     prompts,
-  )
-}
+  );
+};
 
 export const buildQueuedFollowUpPrompt = (prompts: ReadonlyArray<string>) =>
   wrapDiscordPrompts(
     "Additional Discord messages arrived while you were working. Read all of them, address them, and continue the task.",
     prompts,
-  )
+  );
 
-export const sendFinalResponse = async (input: {
-  message: Message
-  text: string
-}) => {
+export const sendFinalResponse = async (input: { message: Message; text: string }) => {
   const chunks = splitOutgoingText(input.message, input.text, {
     emptyFallback: "(no response content)",
-  })
+  });
 
   await sendChunks(chunks, async (chunk, index) => {
     if (index === 0) {
       await input.message.reply({
         content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
         allowedMentions: { repliedUser: true, parse: ["users", "roles", "everyone"] },
-      })
-      return
+      });
+      return;
     }
 
     if (!input.message.channel.isSendable()) {
-      return
+      return;
     }
 
     await (input.message.channel as SendableChannels).send({
       content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
       allowedMentions: { parse: ["users", "roles", "everyone"] },
-    })
-  })
-}
+    });
+  });
+};
 
-export const sendProgressUpdate = async (input: {
-  message: Message
-  text: string
-}) => {
+export const sendProgressUpdate = async (input: { message: Message; text: string }) => {
   if (!input.message.channel.isSendable()) {
-    return
+    return;
   }
 
-  const chunks = splitOutgoingText(input.message, input.text, { trim: true })
+  const chunks = splitOutgoingText(input.message, input.text, { trim: true });
   if (chunks.length === 0) {
-    return
+    return;
   }
 
   await sendChunks(chunks, async (chunk) => {
@@ -171,18 +172,18 @@ export const sendProgressUpdate = async (input: {
       content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
       allowedMentions: { parse: ["users", "roles", "everyone"] },
       flags: MessageFlags.SuppressNotifications,
-    })
-  })
-}
+    });
+  });
+};
 
 export const sendChannelProgressUpdate = async (input: {
-  channel: SendableChannels
-  mentionContext?: Message | null
-  text: string
+  channel: SendableChannels;
+  mentionContext?: Message | null;
+  text: string;
 }) => {
-  const chunks = splitOutgoingText(input.mentionContext ?? null, input.text, { trim: true })
+  const chunks = splitOutgoingText(input.mentionContext ?? null, input.text, { trim: true });
   if (chunks.length === 0) {
-    return
+    return;
   }
 
   await sendChunks(chunks, async (chunk) => {
@@ -190,96 +191,96 @@ export const sendChannelProgressUpdate = async (input: {
       content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
       allowedMentions: { parse: ["users", "roles", "everyone"] },
       flags: MessageFlags.SuppressNotifications,
-    })
-  })
-}
+    });
+  });
+};
 
 export type TypingLoop = {
-  pause: () => Promise<void>
-  resume: () => void
-  stop: () => Promise<void>
-}
+  pause: () => Promise<void>;
+  resume: () => void;
+  stop: () => Promise<void>;
+};
 
 export const startTypingLoop = (channel: Message["channel"]): TypingLoop => {
-  const TYPING_REFRESH_MS = 9_000
-  let stopped = false
-  let paused = false
-  let timer: ReturnType<typeof setTimeout> | null = null
-  let inFlight: Promise<void> | null = null
-  let stopPromise: Promise<void> | null = null
+  const TYPING_REFRESH_MS = 9_000;
+  let stopped = false;
+  let paused = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let inFlight: Promise<void> | null = null;
+  let stopPromise: Promise<void> | null = null;
 
   const clearTimer = () => {
     if (!timer) {
-      return
+      return;
     }
-    clearTimeout(timer)
-    timer = null
-  }
+    clearTimeout(timer);
+    timer = null;
+  };
 
   const schedule = (delay: number) => {
-    clearTimer()
+    clearTimer();
     if (stopped || paused) {
-      return
+      return;
     }
 
     timer = setTimeout(() => {
-      timer = null
-      void tick()
-    }, delay)
-  }
+      timer = null;
+      void tick();
+    }, delay);
+  };
 
   const tick = async () => {
     if (stopped || paused || inFlight || !channel.isSendable()) {
-      return
+      return;
     }
 
     const send = (async () => {
       try {
-        await channel.sendTyping()
+        await channel.sendTyping();
       } catch {
         // Keep retrying during the run; transient API/gateway issues should not permanently stop typing.
       }
-    })()
+    })();
 
-    inFlight = send
+    inFlight = send;
     try {
-      await send
+      await send;
     } finally {
       if (inFlight === send) {
-        inFlight = null
+        inFlight = null;
       }
     }
 
-    schedule(TYPING_REFRESH_MS)
-  }
+    schedule(TYPING_REFRESH_MS);
+  };
 
-  void tick()
+  void tick();
 
   return {
     pause: async () => {
-      paused = true
-      clearTimer()
+      paused = true;
+      clearTimer();
       if (inFlight) {
-        await inFlight
+        await inFlight;
       }
     },
     resume: () => {
       if (stopped || !paused) {
-        return
+        return;
       }
-      paused = false
-      void tick()
+      paused = false;
+      void tick();
     },
     stop: async () => {
       if (stopPromise) {
-        return await stopPromise
+        return await stopPromise;
       }
 
-      stopped = true
-      paused = true
-      clearTimer()
-      stopPromise = inFlight ?? Promise.resolve()
-      await stopPromise
+      stopped = true;
+      paused = true;
+      clearTimer();
+      stopPromise = inFlight ?? Promise.resolve();
+      await stopPromise;
     },
-  }
-}
+  };
+};

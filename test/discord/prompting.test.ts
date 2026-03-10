@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test"
-import { ChannelType, type Message } from "discord.js"
+import { describe, expect, test } from "bun:test";
+import { ChannelType, type Message } from "discord.js";
 
 import {
   buildBatchedOpencodePrompt,
@@ -7,16 +7,16 @@ import {
   buildQueuedFollowUpPrompt,
   promptMessageContext,
   summarizeEmbeds,
-} from "@/discord/messages.ts"
-import { buildSessionSystemAppend } from "@/discord/system-context.ts"
-import { unsafeStub } from "../support/stub.ts"
+} from "@/discord/messages.ts";
+import { buildSessionSystemAppend } from "@/discord/system-context.ts";
+import { unsafeStub } from "../support/stub.ts";
 
 type EmbedStub = {
-  title?: string
-  description?: string
-  url?: string
-  fields?: Array<{ name: string; value: string }>
-}
+  title?: string;
+  description?: string;
+  url?: string;
+  fields?: Array<{ name: string; value: string }>;
+};
 
 const baseMessageFields = () => ({
   id: "m-1",
@@ -25,19 +25,18 @@ const baseMessageFields = () => ({
   attachments: { size: 0 },
   embeds: [] as EmbedStub[],
   inGuild: () => false,
-})
+});
 
-const makeMessage = (
-  overrides: Partial<ReturnType<typeof baseMessageFields>> = {},
-) => unsafeStub<Message>({ ...baseMessageFields(), ...overrides })
+const makeMessage = (overrides: Partial<ReturnType<typeof baseMessageFields>> = {}) =>
+  unsafeStub<Message>({ ...baseMessageFields(), ...overrides });
 
 const makeGuildTextMessage = (
   overrides: Partial<{
-    content: string
-    guildId: string
-    channelId: string
-    guild: { name: string }
-    channel: { type: ChannelType; name: string; topic?: string | null }
+    content: string;
+    guildId: string;
+    channelId: string;
+    guild: { name: string };
+    channel: { type: ChannelType; name: string; topic?: string | null };
   }> = {},
 ) =>
   unsafeStub<Message>({
@@ -48,12 +47,12 @@ const makeGuildTextMessage = (
     guild: { name: "Test Guild" },
     channel: { type: ChannelType.GuildText, name: "general", topic: null },
     ...overrides,
-  })
+  });
 
 describe("summarizeEmbeds", () => {
   test("returns None for messages without embeds", () => {
-    expect(summarizeEmbeds(makeMessage())).toBe("None")
-  })
+    expect(summarizeEmbeds(makeMessage())).toBe("None");
+  });
 
   test("formats embed details into a readable summary", () => {
     const message = makeMessage({
@@ -65,13 +64,13 @@ describe("summarizeEmbeds", () => {
           fields: [{ name: "Alpha", value: "Beta" }],
         },
       ],
-    })
+    });
 
     expect(summarizeEmbeds(message)).toBe(
       "- Embed 1 | title=Title | description=Description | url=https://example.com | fields=Alpha: Beta",
-    )
-  })
-})
+    );
+  });
+});
 
 describe("promptMessageContext", () => {
   test("trims message content and records attachment state", () => {
@@ -79,7 +78,7 @@ describe("promptMessageContext", () => {
       id: "m-2",
       content: "  hello world  ",
       attachments: { size: 2 },
-    })
+    });
 
     expect(promptMessageContext(message)).toEqual({
       userTag: "user#0001",
@@ -87,17 +86,17 @@ describe("promptMessageContext", () => {
       content: "hello world",
       attachmentContext: "yes",
       embedSummary: "None",
-    })
-  })
+    });
+  });
 
   test("falls back to a placeholder for empty messages", () => {
     const message = makeMessage({
       content: "   ",
-    })
+    });
 
-    expect(promptMessageContext(message).content).toBe("(empty message)")
-  })
-})
+    expect(promptMessageContext(message).content).toBe("(empty message)");
+  });
+});
 
 describe("buildOpencodePrompt", () => {
   test("renders the main Discord message context", () => {
@@ -124,8 +123,8 @@ describe("buildOpencodePrompt", () => {
         "Embed summary:",
         "None",
       ].join("\n"),
-    )
-  })
+    );
+  });
 
   test("renders referenced message context with a prefixed block", () => {
     expect(
@@ -169,34 +168,34 @@ describe("buildOpencodePrompt", () => {
         "Referenced Embed summary:",
         "Embed 1",
       ].join("\n"),
-    )
-  })
-})
+    );
+  });
+});
 
 describe("batched prompt wrappers", () => {
   test("passes through a single batched prompt unchanged", () => {
-    expect(buildBatchedOpencodePrompt(["one"])).toBe("one")
-  })
+    expect(buildBatchedOpencodePrompt(["one"])).toBe("one");
+  });
 
   test("wraps multiple batched prompts in indexed blocks", () => {
     expect(buildBatchedOpencodePrompt(["one", "two"])).toBe(
       [
         "Multiple Discord messages arrived before you responded. Read all of them and address them together in order.",
-        "<discord-message index=\"1\">\none\n</discord-message>",
-        "<discord-message index=\"2\">\ntwo\n</discord-message>",
+        '<discord-message index="1">\none\n</discord-message>',
+        '<discord-message index="2">\ntwo\n</discord-message>',
       ].join("\n\n"),
-    )
-  })
+    );
+  });
 
   test("wraps queued follow-up prompts with the queued heading", () => {
     expect(buildQueuedFollowUpPrompt(["later"])).toBe(
       [
         "Additional Discord messages arrived while you were working. Read all of them, address them, and continue the task.",
-        "<discord-message index=\"1\">\nlater\n</discord-message>",
+        '<discord-message index="1">\nlater\n</discord-message>',
       ].join("\n\n"),
-    )
-  })
-})
+    );
+  });
+});
 
 describe("buildSessionSystemAppend", () => {
   test("returns only additional instructions when no guild text context is available", () => {
@@ -205,8 +204,8 @@ describe("buildSessionSystemAppend", () => {
         message: makeMessage(),
         additionalInstructions: "Be concise.",
       }),
-    ).toBe(["Additional instructions:", "Be concise."].join("\n"))
-  })
+    ).toBe(["Additional instructions:", "Be concise."].join("\n"));
+  });
 
   test("returns guild and channel context without a topic when none exists", () => {
     expect(
@@ -220,8 +219,8 @@ describe("buildSessionSystemAppend", () => {
         "- Server: Test Guild (ID: g-1)",
         "- Channel: #general (ID: c-1)",
       ].join("\n"),
-    )
-  })
+    );
+  });
 
   test("joins additional instructions and guild context with one blank line", () => {
     expect(
@@ -241,6 +240,6 @@ describe("buildSessionSystemAppend", () => {
         "- Channel: #general (ID: c-1)",
         "- Channel topic: Work queue",
       ].join("\n"),
-    )
-  })
-})
+    );
+  });
+});

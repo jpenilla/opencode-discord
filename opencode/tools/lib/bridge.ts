@@ -1,21 +1,21 @@
-import { request } from "node:http"
+import { request } from "node:http";
 
-const bridgeSocketPath = process.env.OPENCODE_DISCORD_BRIDGE_SOCKET
-const bridgeToken = process.env.OPENCODE_DISCORD_BRIDGE_TOKEN
+const bridgeSocketPath = process.env.OPENCODE_DISCORD_BRIDGE_SOCKET;
+const bridgeToken = process.env.OPENCODE_DISCORD_BRIDGE_TOKEN;
 
 const ensureBridgeConfig = () => {
   if (!bridgeSocketPath || !bridgeToken) {
-    throw new Error("Missing OPENCODE_DISCORD_BRIDGE_SOCKET or OPENCODE_DISCORD_BRIDGE_TOKEN")
+    throw new Error("Missing OPENCODE_DISCORD_BRIDGE_SOCKET or OPENCODE_DISCORD_BRIDGE_TOKEN");
   }
 
   return {
     bridgeSocketPath,
     bridgeToken,
-  }
-}
+  };
+};
 
 const bridgeRequest = async <T>(path: string, body: Record<string, unknown>): Promise<T> => {
-  const { bridgeSocketPath, bridgeToken } = ensureBridgeConfig()
+  const { bridgeSocketPath, bridgeToken } = ensureBridgeConfig();
 
   const response = await new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
     const req = request(
@@ -29,32 +29,35 @@ const bridgeRequest = async <T>(path: string, body: Record<string, unknown>): Pr
         },
       },
       (res) => {
-        const chunks: Buffer[] = []
+        const chunks: Buffer[] = [];
         res.on("data", (chunk) => {
-          chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk)
-        })
+          chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+        });
         res.on("end", () => {
           resolve({
             statusCode: res.statusCode ?? 500,
             body: Buffer.concat(chunks).toString("utf8"),
-          })
-        })
+          });
+        });
       },
-    )
+    );
 
-    req.on("error", reject)
-    req.end(JSON.stringify(body))
-  })
+    req.on("error", reject);
+    req.end(JSON.stringify(body));
+  });
 
-  const data = response.body.length > 0 ? JSON.parse(response.body) as { error?: string } & T : {} as T & { error?: string }
+  const data =
+    response.body.length > 0
+      ? (JSON.parse(response.body) as { error?: string } & T)
+      : ({} as T & { error?: string });
   if (response.statusCode < 200 || response.statusCode >= 300) {
-    throw new Error(data.error ?? `Bridge request failed with status ${response.statusCode}`)
+    throw new Error(data.error ?? `Bridge request failed with status ${response.statusCode}`);
   }
 
-  return data
-}
+  return data;
+};
 
 export const sendBridgeRequest = async (path: string, body: Record<string, unknown>) => {
-  const data = await bridgeRequest<{ message?: string }>(path, body)
-  return data.message ?? "ok"
-}
+  const data = await bridgeRequest<{ message?: string }>(path, body);
+  return data.message ?? "ok";
+};

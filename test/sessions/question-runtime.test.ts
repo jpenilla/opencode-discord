@@ -1,41 +1,51 @@
-import { describe, expect, test } from "bun:test"
-import type { Interaction, Message, MessageCreateOptions, MessageEditOptions } from "discord.js"
-import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
-import { Effect, Ref } from "effect"
+import { describe, expect, test } from "bun:test";
+import type { Interaction, Message, MessageCreateOptions, MessageEditOptions } from "discord.js";
+import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
+import { Effect, Ref } from "effect";
 
-import { createQuestionRuntime } from "@/sessions/question-runtime.ts"
-import { createPromptState } from "@/sessions/prompt-state.ts"
-import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts"
-import { unsafeStub } from "../support/stub.ts"
+import { createQuestionRuntime } from "@/sessions/question-runtime.ts";
+import { createPromptState } from "@/sessions/prompt-state.ts";
+import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
+import { unsafeStub } from "../support/stub.ts";
 
 const makeRequest = (id = "req-1") =>
   unsafeStub<QuestionRequest>({
     id,
-    questions: [{ header: "Question", question: "Question?", options: [{ label: "Yes", description: "desc" }] }],
-  })
+    questions: [
+      {
+        header: "Question",
+        question: "Question?",
+        options: [{ label: "Yes", description: "desc" }],
+      },
+    ],
+  });
 
-const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref))
+const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
 
 const makeHarness = async (options?: {
-  postQuestionResult?: "success" | "failure"
-  rejectResult?: "success" | "failure"
+  postQuestionResult?: "success" | "failure";
+  rejectResult?: "success" | "failure";
 }) => {
-  const postedPayloads = await Effect.runPromise(Ref.make<MessageCreateOptions[]>([]))
-  const editedPayloads = await Effect.runPromise(Ref.make<MessageEditOptions[]>([]))
-  const interactionReplies = await Effect.runPromise(Ref.make<Array<{ content?: string | null }>>([]))
-  const sentQuestionUiFailures = await Effect.runPromise(Ref.make<string[]>([]))
-  const replyCalls = await Effect.runPromise(Ref.make<string[]>([]))
-  const rejectCalls = await Effect.runPromise(Ref.make<string[]>([]))
-  const typingPauseCount = await Effect.runPromise(Ref.make(0))
-  const typingResumeCount = await Effect.runPromise(Ref.make(0))
-  const typingStopCount = await Effect.runPromise(Ref.make(0))
-  const promptState = await Effect.runPromise(createPromptState())
+  const postedPayloads = await Effect.runPromise(Ref.make<MessageCreateOptions[]>([]));
+  const editedPayloads = await Effect.runPromise(Ref.make<MessageEditOptions[]>([]));
+  const interactionReplies = await Effect.runPromise(
+    Ref.make<Array<{ content?: string | null }>>([]),
+  );
+  const sentQuestionUiFailures = await Effect.runPromise(Ref.make<string[]>([]));
+  const replyCalls = await Effect.runPromise(Ref.make<string[]>([]));
+  const rejectCalls = await Effect.runPromise(Ref.make<string[]>([]));
+  const typingPauseCount = await Effect.runPromise(Ref.make(0));
+  const typingResumeCount = await Effect.runPromise(Ref.make(0));
+  const typingStopCount = await Effect.runPromise(Ref.make(0));
+  const promptState = await Effect.runPromise(createPromptState());
 
   const questionMessage: Message = unsafeStub<Message>({
     id: "question-message",
     edit: (payload: MessageEditOptions): Promise<Message> =>
-      Effect.runPromise(Ref.update(editedPayloads, (current) => [...current, payload])).then(() => questionMessage),
-  })
+      Effect.runPromise(Ref.update(editedPayloads, (current) => [...current, payload])).then(
+        () => questionMessage,
+      ),
+  });
 
   const discordMessage = unsafeStub<Message>({
     id: "discord-message",
@@ -44,11 +54,11 @@ const makeHarness = async (options?: {
     reply: (payload: MessageCreateOptions) =>
       Effect.runPromise(Ref.update(postedPayloads, (current) => [...current, payload])).then(() => {
         if (options?.postQuestionResult === "failure") {
-          throw new Error("post failed")
+          throw new Error("post failed");
         }
-        return questionMessage
+        return questionMessage;
       }),
-  })
+  });
 
   const activeRun: ActiveRun = {
     discordMessage,
@@ -61,14 +71,14 @@ const makeHarness = async (options?: {
     typing: {
       pause: () => Effect.runPromise(Ref.update(typingPauseCount, (count) => count + 1)),
       resume: () => {
-        void Effect.runPromise(Ref.update(typingResumeCount, (count) => count + 1))
+        void Effect.runPromise(Ref.update(typingResumeCount, (count) => count + 1));
       },
       stop: () => Effect.runPromise(Ref.update(typingStopCount, (count) => count + 1)),
     },
     finalizeProgress: () => Effect.void,
     questionOutcome: noQuestionOutcome(),
     interruptRequested: false,
-  }
+  };
 
   const session: ChannelSession = {
     channelId: "channel-1",
@@ -88,8 +98,8 @@ const makeHarness = async (options?: {
     emittedCompactionSummaryMessageIds: new Set<string>(),
     queue: {} as ChannelSession["queue"],
     activeRun,
-  }
-  session.activeRun = activeRun
+  };
+  session.activeRun = activeRun;
 
   const runtime = await Effect.runPromise(
     createQuestionRuntime({
@@ -100,7 +110,9 @@ const makeHarness = async (options?: {
       rejectQuestion: (_opencode, requestId) =>
         Ref.update(rejectCalls, (current) => [...current, requestId]).pipe(
           Effect.flatMap(() =>
-            options?.rejectResult === "failure" ? Effect.fail(new Error("reject failed")) : Effect.void,
+            options?.rejectResult === "failure"
+              ? Effect.fail(new Error("reject failed"))
+              : Effect.void,
           ),
         ),
       sendQuestionUiFailure: (_message, error) =>
@@ -112,12 +124,12 @@ const makeHarness = async (options?: {
       },
       formatError: (error: unknown) => (error instanceof Error ? error.message : String(error)),
     }),
-  )
+  );
 
   const makeButtonInteraction = (input: {
-    customId: string
-    userId?: string
-    messageId?: string
+    customId: string;
+    userId?: string;
+    messageId?: string;
   }) =>
     unsafeStub<Interaction>({
       customId: input.customId,
@@ -135,7 +147,7 @@ const makeHarness = async (options?: {
       followUp: (_payload: unknown) => Promise.resolve(questionMessage),
       showModal: (_modal: unknown) => Promise.resolve(),
       deferUpdate: () => Promise.resolve(),
-    })
+    });
 
   return {
     runtime,
@@ -153,12 +165,12 @@ const makeHarness = async (options?: {
     typingResumeCount,
     typingStopCount,
     makeButtonInteraction,
-  }
-}
+  };
+};
 
 describe("createQuestionRuntime", () => {
   test("posts a question batch once and resumes typing after a reply event", async () => {
-    const harness = await makeHarness()
+    const harness = await makeHarness();
 
     await Effect.runPromise(
       harness.runtime.handleEvent({
@@ -166,17 +178,17 @@ describe("createQuestionRuntime", () => {
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
       }),
-    )
+    );
     await Effect.runPromise(
       harness.runtime.handleEvent({
         type: "asked",
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
       }),
-    )
+    );
 
-    expect((await getRef(harness.postedPayloads)).length).toBe(1)
-    expect(await getRef(harness.typingPauseCount)).toBe(1)
+    expect((await getRef(harness.postedPayloads)).length).toBe(1);
+    expect(await getRef(harness.typingPauseCount)).toBe(1);
 
     await Effect.runPromise(
       harness.runtime.handleEvent({
@@ -185,17 +197,17 @@ describe("createQuestionRuntime", () => {
         requestId: harness.request.id,
         answers: [["Yes"]] satisfies ReadonlyArray<QuestionAnswer>,
       }),
-    )
+    );
 
-    expect((await getRef(harness.editedPayloads)).length).toBe(1)
-    expect(await getRef(harness.typingResumeCount)).toBe(1)
-  })
+    expect((await getRef(harness.editedPayloads)).length).toBe(1);
+    expect(await getRef(harness.typingResumeCount)).toBe(1);
+  });
 
   test("sends a UI failure reply when posting the question and rejecting it both fail", async () => {
     const harness = await makeHarness({
       postQuestionResult: "failure",
       rejectResult: "failure",
-    })
+    });
 
     await Effect.runPromise(
       harness.runtime.handleEvent({
@@ -203,20 +215,20 @@ describe("createQuestionRuntime", () => {
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
       }),
-    )
+    );
 
-    expect(await getRef(harness.rejectCalls)).toEqual([harness.request.id])
-    expect(await getRef(harness.sentQuestionUiFailures)).toEqual(["post failed"])
-    expect(await getRef(harness.typingStopCount)).toBe(1)
+    expect(await getRef(harness.rejectCalls)).toEqual([harness.request.id]);
+    expect(await getRef(harness.sentQuestionUiFailures)).toEqual(["post failed"]);
+    expect(await getRef(harness.typingStopCount)).toBe(1);
     expect(harness.activeRun.questionOutcome).toEqual({
       _tag: "ui-failure",
       message: "post failed",
       notified: true,
-    })
-  })
+    });
+  });
 
   test("rejects question interactions from other users", async () => {
-    const harness = await makeHarness()
+    const harness = await makeHarness();
 
     await Effect.runPromise(
       harness.runtime.handleEvent({
@@ -224,7 +236,7 @@ describe("createQuestionRuntime", () => {
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
       }),
-    )
+    );
 
     const handled = await Effect.runPromise(
       harness.runtime.handleInteraction(
@@ -233,16 +245,16 @@ describe("createQuestionRuntime", () => {
           userId: "intruder",
         }),
       ),
-    )
+    );
 
-    expect(handled).toBe(true)
+    expect(handled).toBe(true);
     expect((await getRef(harness.interactionReplies))[0]?.content).toBe(
       "Only the user who started this run can answer these questions.",
-    )
-  })
+    );
+  });
 
   test("expires question batches for a session and treats later interactions as expired", async () => {
-    const harness = await makeHarness()
+    const harness = await makeHarness();
 
     await Effect.runPromise(
       harness.runtime.handleEvent({
@@ -250,9 +262,11 @@ describe("createQuestionRuntime", () => {
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
       }),
-    )
+    );
 
-    await Effect.runPromise(harness.runtime.terminateForSession(harness.session.opencode.sessionId, "expired"))
+    await Effect.runPromise(
+      harness.runtime.terminateForSession(harness.session.opencode.sessionId, "expired"),
+    );
 
     const handled = await Effect.runPromise(
       harness.runtime.handleInteraction(
@@ -260,15 +274,17 @@ describe("createQuestionRuntime", () => {
           customId: `ocq:${harness.request.id}:submit`,
         }),
       ),
-    )
+    );
 
-    expect(handled).toBe(true)
-    expect((await getRef(harness.editedPayloads)).length).toBe(1)
-    expect((await getRef(harness.interactionReplies))[0]?.content).toBe("This question prompt has expired.")
-  })
+    expect(handled).toBe(true);
+    expect((await getRef(harness.editedPayloads)).length).toBe(1);
+    expect((await getRef(harness.interactionReplies))[0]?.content).toBe(
+      "This question prompt has expired.",
+    );
+  });
 
   test("interrupts question batches for a session", async () => {
-    const harness = await makeHarness()
+    const harness = await makeHarness();
 
     await Effect.runPromise(
       harness.runtime.handleEvent({
@@ -276,12 +292,14 @@ describe("createQuestionRuntime", () => {
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
       }),
-    )
+    );
 
-    await Effect.runPromise(harness.runtime.terminateForSession(harness.session.opencode.sessionId, "interrupted"))
+    await Effect.runPromise(
+      harness.runtime.terminateForSession(harness.session.opencode.sessionId, "interrupted"),
+    );
 
-    const edits = await getRef(harness.editedPayloads)
-    expect(edits).toHaveLength(1)
-    expect(JSON.stringify(edits[0])).toContain("‼️ Questions interrupted")
-  })
-})
+    const edits = await getRef(harness.editedPayloads);
+    expect(edits).toHaveLength(1);
+    expect(JSON.stringify(edits[0])).toContain("‼️ Questions interrupted");
+  });
+});

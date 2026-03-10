@@ -1,5 +1,5 @@
-import { tool } from "@opencode-ai/plugin"
-import { sendBridgeRequest } from "./lib/bridge.ts"
+import { tool } from "@opencode-ai/plugin";
+import { sendBridgeRequest } from "./lib/bridge.ts";
 
 export default tool({
   description:
@@ -8,6 +8,6 @@ export default tool({
   async execute(_, context) {
     return sendBridgeRequest("/tool/list-custom-emojis", {
       sessionID: context.sessionID,
-    })
+    });
   },
-})
+});

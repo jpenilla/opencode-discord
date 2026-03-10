@@ -1,16 +1,16 @@
-import { Chunk, Deferred, Effect, Queue } from "effect"
-import type { Message, SendableChannels } from "discord.js"
-import type { Event, ToolPart } from "@opencode-ai/sdk/v2"
+import { Chunk, Deferred, Effect, Queue } from "effect";
+import type { Message, SendableChannels } from "discord.js";
+import type { Event, ToolPart } from "@opencode-ai/sdk/v2";
 
-import { compactionCardContent } from "@/discord/compaction-card.ts"
-import { editInfoCard, upsertInfoCard } from "@/discord/info-card.ts"
-import { sendProgressUpdate } from "@/discord/messages.ts"
-import { editToolCard, upsertToolCard } from "@/discord/tool-card.ts"
+import { compactionCardContent } from "@/discord/compaction-card.ts";
+import { editInfoCard, upsertInfoCard } from "@/discord/info-card.ts";
+import { sendProgressUpdate } from "@/discord/messages.ts";
+import { editToolCard, upsertToolCard } from "@/discord/tool-card.ts";
 import {
   formatPatchUpdated,
   formatSessionStatus,
   formatThinkingCompleted,
-} from "@/discord/progress.ts"
+} from "@/discord/progress.ts";
 import {
   getCompactionPart,
   getPatchPart,
@@ -18,8 +18,8 @@ import {
   getSessionCompacted,
   getSessionStatusUpdated,
   getToolPartUpdated,
-} from "@/opencode/events.ts"
-import type { RunFinalizationReason, RunProgressEvent } from "@/sessions/session.ts"
+} from "@/opencode/events.ts";
+import type { RunFinalizationReason, RunProgressEvent } from "@/sessions/session.ts";
 
 const SKIPPED_TOOL_CARD_NAMES = new Set([
   "send-file",
@@ -30,19 +30,19 @@ const SKIPPED_TOOL_CARD_NAMES = new Set([
   "list-stickers",
   "send-sticker",
   "question",
-])
+]);
 
 type ProgressState = {
-  patchPartIds: Set<string>
-  toolStates: Map<string, string>
-  toolCards: Map<string, Message>
-  activeToolParts: Map<string, ToolPart>
-  todoCards: Message[]
-  compactionCard: Message | null
-  compactionPartIds: Set<string>
-  retryStatusKeys: Set<string>
-  completedReasoningPartIds: Set<string>
-}
+  patchPartIds: Set<string>;
+  toolStates: Map<string, string>;
+  toolCards: Map<string, Message>;
+  activeToolParts: Map<string, ToolPart>;
+  todoCards: Message[];
+  compactionCard: Message | null;
+  compactionPartIds: Set<string>;
+  retryStatusKeys: Set<string>;
+  completedReasoningPartIds: Set<string>;
+};
 
 const createProgressState = (): ProgressState => ({
   patchPartIds: new Set<string>(),
@@ -54,95 +54,94 @@ const createProgressState = (): ProgressState => ({
   compactionPartIds: new Set<string>(),
   retryStatusKeys: new Set<string>(),
   completedReasoningPartIds: new Set<string>(),
-})
+});
 
-const isTodoTool = (tool: string) => tool === "todowrite"
+const isTodoTool = (tool: string) => tool === "todowrite";
 
 const hasLiveCompaction = (state: ProgressState) =>
-  state.compactionCard !== null || state.compactionPartIds.size > 0
+  state.compactionCard !== null || state.compactionPartIds.size > 0;
 
 const shouldSkipToolUpdate = (
   state: ProgressState,
   event: Extract<RunProgressEvent, { type: "tool-updated" }>,
 ) => {
   if (SKIPPED_TOOL_CARD_NAMES.has(event.part.tool)) {
-    return true
+    return true;
   }
   if (isTodoTool(event.part.tool) && event.part.state.status !== "completed") {
-    return true
+    return true;
   }
 
   const title =
-    event.part.state.status === "running" || event.part.state.status === "completed" ? event.part.state.title : ""
-  const nextKey = `${event.part.state.status}:${title}`
-  const previousKey = state.toolStates.get(event.part.callID)
+    event.part.state.status === "running" || event.part.state.status === "completed"
+      ? event.part.state.title
+      : "";
+  const nextKey = `${event.part.state.status}:${title}`;
+  const previousKey = state.toolStates.get(event.part.callID);
   if (previousKey === nextKey) {
-    return true
+    return true;
   }
 
-  state.toolStates.set(event.part.callID, nextKey)
-  return false
-}
+  state.toolStates.set(event.part.callID, nextKey);
+  return false;
+};
 
 const progressUpdateForEvent = (event: RunProgressEvent, state: ProgressState) => {
   switch (event.type) {
     case "run-finalizing":
-      return null
+      return null;
     case "reasoning-completed": {
       if (state.completedReasoningPartIds.has(event.partId)) {
-        return null
+        return null;
       }
-      const thinkingText = event.text.trim()
+      const thinkingText = event.text.trim();
       if (thinkingText.length === 0) {
-        return null
+        return null;
       }
-      state.completedReasoningPartIds.add(event.partId)
-      return formatThinkingCompleted(thinkingText)
+      state.completedReasoningPartIds.add(event.partId);
+      return formatThinkingCompleted(thinkingText);
     }
     case "patch-updated": {
       if (state.patchPartIds.has(event.part.id)) {
-        return null
+        return null;
       }
-      state.patchPartIds.add(event.part.id)
-      return formatPatchUpdated(event.part)
+      state.patchPartIds.add(event.part.id);
+      return formatPatchUpdated(event.part);
     }
     case "session-compacting":
     case "session-compacted":
-      return null
+      return null;
     case "session-status":
       if (event.status.type === "retry") {
-        const key = `${event.status.attempt}:${event.status.message}`
+        const key = `${event.status.attempt}:${event.status.message}`;
         if (state.retryStatusKeys.has(key)) {
-          return null
+          return null;
         }
-        state.retryStatusKeys.add(key)
+        state.retryStatusKeys.add(key);
       }
-      return formatSessionStatus(event.status)
+      return formatSessionStatus(event.status);
   }
-}
+};
 
 const deletePreviousTodoCards = (state: ProgressState, currentCard: Message) =>
   Effect.gen(function* () {
     for (const previousTodoCard of state.todoCards) {
       if (previousTodoCard.id === currentCard.id) {
-        continue
+        continue;
       }
-      yield* Effect.promise(() => previousTodoCard.delete()).pipe(Effect.ignore)
+      yield* Effect.promise(() => previousTodoCard.delete()).pipe(Effect.ignore);
     }
-    state.todoCards = [currentCard]
-  })
+    state.todoCards = [currentCard];
+  });
 
-const trackLiveToolState = (
-  state: ProgressState,
-  part: ToolPart,
-) => {
+const trackLiveToolState = (state: ProgressState, part: ToolPart) => {
   if (part.state.status === "pending" || part.state.status === "running") {
-    state.activeToolParts.set(part.callID, part)
-    return
+    state.activeToolParts.set(part.callID, part);
+    return;
   }
 
-  state.activeToolParts.delete(part.callID)
-}
+  state.activeToolParts.delete(part.callID);
+};
 
 const handleToolCard = (
   state: ProgressState,
@@ -152,11 +151,11 @@ const handleToolCard = (
 ) =>
   Effect.gen(function* () {
     if (shouldSkipToolUpdate(state, event)) {
-      return
+      return;
     }
 
-    const todoTool = isTodoTool(event.part.tool)
-    const existingCard = state.toolCards.get(event.part.callID) ?? null
+    const todoTool = isTodoTool(event.part.tool);
+    const existingCard = state.toolCards.get(event.part.callID) ?? null;
     const card = yield* Effect.promise(() =>
       upsertToolCard({
         sourceMessage: message,
@@ -165,14 +164,14 @@ const handleToolCard = (
         part: event.part,
         mode: todoTool ? "always-send" : "edit-or-send",
       }),
-    )
-    state.toolCards.set(event.part.callID, card)
-    trackLiveToolState(state, event.part)
+    );
+    state.toolCards.set(event.part.callID, card);
+    trackLiveToolState(state, event.part);
 
     if (todoTool) {
-      yield* deletePreviousTodoCards(state, card)
+      yield* deletePreviousTodoCards(state, card);
     }
-  })
+  });
 
 const handleCompactionCard = (
   state: ProgressState,
@@ -181,16 +180,16 @@ const handleCompactionCard = (
 ) =>
   Effect.gen(function* () {
     if (!message.channel.isSendable()) {
-      throw new Error("Channel is not sendable for compaction card")
+      throw new Error("Channel is not sendable for compaction card");
     }
-    const channel = message.channel as SendableChannels
+    const channel = message.channel as SendableChannels;
 
     if (event.type === "session-compacting") {
       if (state.compactionPartIds.has(event.part.id)) {
-        return
+        return;
       }
-      state.compactionPartIds.add(event.part.id)
-      const compactingCard = compactionCardContent("compacting")
+      state.compactionPartIds.add(event.part.id);
+      const compactingCard = compactionCardContent("compacting");
       state.compactionCard = yield* Effect.promise(() =>
         upsertInfoCard({
           channel,
@@ -198,18 +197,18 @@ const handleCompactionCard = (
           title: compactingCard.title,
           body: compactingCard.body,
         }),
-      )
-      return
+      );
+      return;
     }
 
     // session.compacted is only keyed by session id upstream, so a delayed event from an
     // earlier or aborted compaction attempt can arrive while an unrelated later run is active.
     // Only treat completion as relevant if this worker already observed the matching compaction.
     if (!hasLiveCompaction(state)) {
-      return
+      return;
     }
 
-    const compactedCard = compactionCardContent("compacted")
+    const compactedCard = compactionCardContent("compacted");
     yield* Effect.promise(() =>
       upsertInfoCard({
         channel,
@@ -217,24 +216,20 @@ const handleCompactionCard = (
         title: compactedCard.title,
         body: compactedCard.body,
       }),
-    )
-    state.compactionPartIds.clear()
-    state.compactionCard = null
-  })
+    );
+    state.compactionPartIds.clear();
+    state.compactionCard = null;
+  });
 
-const finalizeLiveCards = (
-  state: ProgressState,
-  workdir: string,
-  reason: RunFinalizationReason,
-) =>
+const finalizeLiveCards = (state: ProgressState, workdir: string, reason: RunFinalizationReason) =>
   Effect.gen(function* () {
     if (reason === "shutdown") {
       yield* Effect.forEach(
         state.activeToolParts.entries(),
         ([callId, part]) => {
-          const card = state.toolCards.get(callId)
+          const card = state.toolCards.get(callId);
           if (!card) {
-            return Effect.void
+            return Effect.void;
           }
 
           return Effect.promise(() =>
@@ -244,79 +239,81 @@ const finalizeLiveCards = (
               workdir,
               terminalState: "shutdown",
             }),
-          ).pipe(Effect.ignore)
+          ).pipe(Effect.ignore);
         },
         { concurrency: "unbounded", discard: true },
-      )
+      );
     }
 
-    state.activeToolParts.clear()
-    state.compactionPartIds.clear()
+    state.activeToolParts.clear();
+    state.compactionPartIds.clear();
 
     if (!state.compactionCard) {
-      return
+      return;
     }
 
-    const compactionState = reason === "interrupted" ? "interrupted" : "stopped"
-    const { title, body } = compactionCardContent(compactionState)
-    yield* Effect.promise(() => editInfoCard(state.compactionCard!, title, body)).pipe(Effect.ignore)
-    state.compactionCard = null
-  })
+    const compactionState = reason === "interrupted" ? "interrupted" : "stopped";
+    const { title, body } = compactionCardContent(compactionState);
+    yield* Effect.promise(() => editInfoCard(state.compactionCard!, title, body)).pipe(
+      Effect.ignore,
+    );
+    state.compactionCard = null;
+  });
 
 export const collectProgressEvents = (event: Event): ReadonlyArray<RunProgressEvent> => {
-  const progressEvents: RunProgressEvent[] = []
+  const progressEvents: RunProgressEvent[] = [];
 
-  const toolPart = getToolPartUpdated(event)
+  const toolPart = getToolPartUpdated(event);
   if (toolPart) {
     progressEvents.push({
       type: "tool-updated",
       part: toolPart,
-    })
+    });
   }
 
-  const patchPart = getPatchPart(event)
+  const patchPart = getPatchPart(event);
   if (patchPart) {
     progressEvents.push({
       type: "patch-updated",
       part: patchPart,
-    })
+    });
   }
 
-  const sessionStatus = getSessionStatusUpdated(event)
+  const sessionStatus = getSessionStatusUpdated(event);
   if (sessionStatus) {
     progressEvents.push({
       type: "session-status",
       status: sessionStatus.status,
-    })
+    });
   }
 
-  const compactionPart = getCompactionPart(event)
+  const compactionPart = getCompactionPart(event);
   if (compactionPart) {
     progressEvents.push({
       type: "session-compacting",
       part: compactionPart,
-    })
+    });
   }
 
-  const compacted = getSessionCompacted(event)
+  const compacted = getSessionCompacted(event);
   if (compacted) {
     progressEvents.push({
       type: "session-compacted",
       compacted,
-    })
+    });
   }
 
-  const reasoningPart = getReasoningPart(event)
+  const reasoningPart = getReasoningPart(event);
   if (reasoningPart?.time.end) {
     progressEvents.push({
       type: "reasoning-completed",
       partId: reasoningPart.id,
       text: reasoningPart.text,
-    })
+    });
   }
 
-  return progressEvents
-}
+  return progressEvents;
+};
 
 export const runProgressWorker = (
   message: Message,
@@ -324,38 +321,38 @@ export const runProgressWorker = (
   queue: Queue.Queue<RunProgressEvent>,
 ): Effect.Effect<never, unknown> =>
   Effect.gen(function* () {
-    const state = createProgressState()
+    const state = createProgressState();
 
     while (true) {
-      const first = yield* Queue.take(queue)
-      const rest = yield* Queue.takeUpTo(queue, 64)
-      const batch = [first, ...Chunk.toReadonlyArray(rest)]
+      const first = yield* Queue.take(queue);
+      const rest = yield* Queue.takeUpTo(queue, 64);
+      const batch = [first, ...Chunk.toReadonlyArray(rest)];
 
       for (const event of batch) {
         if (event.type === "run-finalizing") {
-          progressUpdateForEvent(event, state)
+          progressUpdateForEvent(event, state);
           if (event.reason) {
-            yield* finalizeLiveCards(state, workdir, event.reason)
+            yield* finalizeLiveCards(state, workdir, event.reason);
           }
-          yield* Deferred.succeed(event.ack, undefined).pipe(Effect.ignore)
-          continue
+          yield* Deferred.succeed(event.ack, undefined).pipe(Effect.ignore);
+          continue;
         }
 
         if (event.type === "tool-updated") {
-          yield* handleToolCard(state, message, workdir, event)
-          continue
+          yield* handleToolCard(state, message, workdir, event);
+          continue;
         }
 
         if (event.type === "session-compacting" || event.type === "session-compacted") {
-          yield* handleCompactionCard(state, message, event)
-          continue
+          yield* handleCompactionCard(state, message, event);
+          continue;
         }
 
-        const update = progressUpdateForEvent(event, state)
+        const update = progressUpdateForEvent(event, state);
         if (!update) {
-          continue
+          continue;
         }
-        yield* Effect.promise(() => sendProgressUpdate({ message, text: update }))
+        yield* Effect.promise(() => sendProgressUpdate({ message, text: update }));
       }
     }
-  })
+  });

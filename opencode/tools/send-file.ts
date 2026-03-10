@@ -1,5 +1,5 @@
-import { tool } from "@opencode-ai/plugin"
-import { sendBridgeRequest } from "./lib/bridge.ts"
+import { tool } from "@opencode-ai/plugin";
+import { sendBridgeRequest } from "./lib/bridge.ts";
 
 export default tool({
   description: "Send a file from the current session workdir to Discord.",
@@ -12,6 +12,6 @@ export default tool({
       sessionID: context.sessionID,
       path: args.path,
       caption: args.caption,
-    })
+    });
   },
-})
+});

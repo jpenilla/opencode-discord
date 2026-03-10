@@ -1,84 +1,89 @@
-import type { ActiveRun, QuestionOutcome } from "@/sessions/session.ts"
+import type { ActiveRun, QuestionOutcome } from "@/sessions/session.ts";
 
-export type CommandRejection = { type: "reject"; message: string }
+export type CommandRejection = { type: "reject"; message: string };
 
 export const decideCompactEntry = (input: {
-  inGuildTextChannel: boolean
-  hasSession: boolean
-  hasActiveRun: boolean
+  inGuildTextChannel: boolean;
+  hasSession: boolean;
+  hasActiveRun: boolean;
 }): CommandRejection | { type: "defer-and-check-health" } => {
   if (!input.inGuildTextChannel) {
-    return { type: "reject", message: "This command only works in standard guild text channels." }
+    return { type: "reject", message: "This command only works in standard guild text channels." };
   }
   if (!input.hasSession) {
-    return { type: "reject", message: "No OpenCode session exists in this channel yet." }
+    return { type: "reject", message: "No OpenCode session exists in this channel yet." };
   }
   if (input.hasActiveRun) {
     return {
       type: "reject",
-      message: "OpenCode is busy in this channel right now. Use /interrupt first or wait for the current run to finish.",
-    }
+      message:
+        "OpenCode is busy in this channel right now. Use /interrupt first or wait for the current run to finish.",
+    };
   }
-  return { type: "defer-and-check-health" }
-}
+  return { type: "defer-and-check-health" };
+};
 
-export const decideCompactAfterHealthCheck = (healthy: boolean):
-  | { type: "reject-after-defer"; message: string }
-  | { type: "start-compaction" } =>
+export const decideCompactAfterHealthCheck = (
+  healthy: boolean,
+): { type: "reject-after-defer"; message: string } | { type: "start-compaction" } =>
   healthy
     ? { type: "start-compaction" }
     : {
         type: "reject-after-defer",
-        message: "This channel session is unavailable right now. Send a normal message to recreate it.",
-      }
+        message:
+          "This channel session is unavailable right now. Send a normal message to recreate it.",
+      };
 
 export const decideInterruptEntry = (input: {
-  inGuildTextChannel: boolean
-  hasSession: boolean
-  hasActiveRun: boolean
-  hasIdleCompaction: boolean
+  inGuildTextChannel: boolean;
+  hasSession: boolean;
+  hasActiveRun: boolean;
+  hasIdleCompaction: boolean;
 }): CommandRejection | { type: "defer-and-interrupt"; target: "run" | "compaction" } => {
   if (!input.inGuildTextChannel) {
-    return { type: "reject", message: "This command only works in standard guild text channels." }
+    return { type: "reject", message: "This command only works in standard guild text channels." };
   }
   if (!input.hasSession) {
-    return { type: "reject", message: "No OpenCode session exists in this channel yet." }
+    return { type: "reject", message: "No OpenCode session exists in this channel yet." };
   }
   if (input.hasActiveRun) {
-    return { type: "defer-and-interrupt", target: "run" }
+    return { type: "defer-and-interrupt", target: "run" };
   }
   if (input.hasIdleCompaction) {
-    return { type: "defer-and-interrupt", target: "compaction" }
+    return { type: "defer-and-interrupt", target: "compaction" };
   }
-  return { type: "reject", message: "No active OpenCode run or compaction is running in this channel." }
-}
+  return {
+    type: "reject",
+    message: "No active OpenCode run or compaction is running in this channel.",
+  };
+};
 
 export const beginInterruptRequest = (run: Pick<ActiveRun, "interruptRequested">) => {
-  run.interruptRequested = true
+  run.interruptRequested = true;
   return () => {
-    run.interruptRequested = false
-  }
-}
+    run.interruptRequested = false;
+  };
+};
 
 export const decideRunCompletion = (input: {
-  transcript: string
-  questionOutcome: QuestionOutcome
-  interruptRequested: boolean
+  transcript: string;
+  questionOutcome: QuestionOutcome;
+  interruptRequested: boolean;
 }):
   | { type: "send-final-response" }
   | { type: "send-question-ui-failure"; message: string }
   | { type: "suppress-response" } => {
   if (input.transcript.trim()) {
-    return { type: "send-final-response" }
+    return { type: "send-final-response" };
   }
   if (input.questionOutcome._tag === "ui-failure" && !input.questionOutcome.notified) {
     return {
       type: "send-question-ui-failure",
       message: input.questionOutcome.message,
-    }
+    };
   }
   if (input.interruptRequested || input.questionOutcome._tag === "user-rejected") {
-    return { type: "suppress-response" }
+    return { type: "suppress-response" };
   }
-  return { type: "send-final-response" }
-}
+  return { type: "send-final-response" };
+};

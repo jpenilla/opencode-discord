@@ -1,5 +1,5 @@
-import { tool } from "@opencode-ai/plugin"
-import { sendBridgeRequest } from "./lib/bridge.ts"
+import { tool } from "@opencode-ai/plugin";
+import { sendBridgeRequest } from "./lib/bridge.ts";
 
 export default tool({
   description: "Send a sticker that is available in the current Discord context by sticker ID.",
@@ -12,6 +12,6 @@ export default tool({
       sessionID: context.sessionID,
       stickerID: args.stickerId,
       caption: args.caption,
-    })
+    });
   },
-})
+});

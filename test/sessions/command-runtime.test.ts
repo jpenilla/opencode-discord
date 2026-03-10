@@ -1,39 +1,45 @@
-import { describe, expect, test } from "bun:test"
-import { ChannelType, type Interaction, type Message, type MessageEditOptions, type SendableChannels } from "discord.js"
-import { Deferred, Effect, Ref } from "effect"
+import { describe, expect, test } from "bun:test";
+import { ChannelType, type Interaction, type Message, type SendableChannels } from "discord.js";
+import { Deferred, Effect, Ref } from "effect";
 
-import { formatErrorResponse } from "@/discord/formatting.ts"
-import { createCommandRuntime } from "@/sessions/command-runtime.ts"
-import { createPromptState } from "@/sessions/prompt-state.ts"
-import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts"
-import { unsafeStub } from "../support/stub.ts"
+import { formatErrorResponse } from "@/discord/formatting.ts";
+import { createCommandRuntime } from "@/sessions/command-runtime.ts";
+import { createPromptState } from "@/sessions/prompt-state.ts";
+import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
+import { unsafeStub } from "../support/stub.ts";
 
-const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref))
+const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
 
 const makeHarness = async (options?: {
-  sessionHealthy?: boolean
-  interruptResult?: "success" | "failure"
-  hasActiveRun?: boolean
+  sessionHealthy?: boolean;
+  interruptResult?: "success" | "failure";
+  hasActiveRun?: boolean;
 }) => {
-  const replies = await Effect.runPromise(Ref.make<string[]>([]))
-  const defers = await Effect.runPromise(Ref.make(0))
-  const edits = await Effect.runPromise(Ref.make<string[]>([]))
-  const compactionUpdates = await Effect.runPromise(Ref.make<Array<{ title: string; body: string }>>([]))
-  const sentInfoCards = await Effect.runPromise(Ref.make<Array<{ title: string; body: string }>>([]))
-  const upsertedInfoCards = await Effect.runPromise(Ref.make<Array<{ title: string; body: string }>>([]))
-  const loggedWarnings = await Effect.runPromise(Ref.make<string[]>([]))
-  const typingStopCount = await Effect.runPromise(Ref.make(0))
-  const idleCardRef = await Effect.runPromise(Ref.make<Message | null>(null))
-  const idleCompactionActive = await Effect.runPromise(Ref.make(false))
-  const idleInterruptRequested = await Effect.runPromise(Ref.make(false))
-  const compactStarted = await Effect.runPromise(Deferred.make<void, never>())
-  const compactFinish = await Effect.runPromise(Deferred.make<void, never>())
-  const compactUpdated = await Effect.runPromise(Deferred.make<void, never>())
-  const promptState = await Effect.runPromise(createPromptState())
+  const replies = await Effect.runPromise(Ref.make<string[]>([]));
+  const defers = await Effect.runPromise(Ref.make(0));
+  const edits = await Effect.runPromise(Ref.make<string[]>([]));
+  const compactionUpdates = await Effect.runPromise(
+    Ref.make<Array<{ title: string; body: string }>>([]),
+  );
+  const sentInfoCards = await Effect.runPromise(
+    Ref.make<Array<{ title: string; body: string }>>([]),
+  );
+  const upsertedInfoCards = await Effect.runPromise(
+    Ref.make<Array<{ title: string; body: string }>>([]),
+  );
+  const loggedWarnings = await Effect.runPromise(Ref.make<string[]>([]));
+  const typingStopCount = await Effect.runPromise(Ref.make(0));
+  const idleCardRef = await Effect.runPromise(Ref.make<Message | null>(null));
+  const idleCompactionActive = await Effect.runPromise(Ref.make(false));
+  const idleInterruptRequested = await Effect.runPromise(Ref.make(false));
+  const compactStarted = await Effect.runPromise(Deferred.make<void, never>());
+  const compactFinish = await Effect.runPromise(Deferred.make<void, never>());
+  const compactUpdated = await Effect.runPromise(Deferred.make<void, never>());
+  const promptState = await Effect.runPromise(createPromptState());
 
   const compactionCard = unsafeStub<Message>({
     id: "compaction-card",
-  })
+  });
 
   const activeRun: ActiveRun = {
     discordMessage: unsafeStub<Message>({
@@ -56,7 +62,7 @@ const makeHarness = async (options?: {
     finalizeProgress: () => Effect.void,
     questionOutcome: noQuestionOutcome(),
     interruptRequested: false,
-  }
+  };
 
   const session: ChannelSession = {
     channelId: "channel-1",
@@ -75,14 +81,16 @@ const makeHarness = async (options?: {
     progressMentionContext: null,
     emittedCompactionSummaryMessageIds: new Set<string>(),
     queue: {} as ChannelSession["queue"],
-    activeRun: options?.hasActiveRun ?? false ? activeRun : null,
-  }
+    activeRun: (options?.hasActiveRun ?? false) ? activeRun : null,
+  };
 
-  const interaction = unsafeStub<Interaction & {
-    replied: boolean
-    deferred: boolean
-    commandName: string
-  }>({
+  const interaction = unsafeStub<
+    Interaction & {
+      replied: boolean;
+      deferred: boolean;
+      commandName: string;
+    }
+  >({
     commandName: "compact",
     channelId: "channel-1",
     channel: unsafeStub<SendableChannels>({ type: ChannelType.GuildText, id: "channel-1" }),
@@ -91,16 +99,16 @@ const makeHarness = async (options?: {
     inGuild: () => true,
     isChatInputCommand: () => true,
     reply: ({ content }: { content?: string }) => {
-      interaction.replied = true
-      return Effect.runPromise(Ref.update(replies, (current) => [...current, content ?? ""]))
+      interaction.replied = true;
+      return Effect.runPromise(Ref.update(replies, (current) => [...current, content ?? ""]));
     },
     deferReply: () => {
-      interaction.deferred = true
-      return Effect.runPromise(Ref.update(defers, (count) => count + 1))
+      interaction.deferred = true;
+      return Effect.runPromise(Ref.update(defers, (count) => count + 1));
     },
     editReply: ({ content }: { content?: string }) =>
       Effect.runPromise(Ref.update(edits, (current) => [...current, content ?? ""])),
-  })
+  });
 
   const runtime = createCommandRuntime({
     getSession: (channelId) => Effect.succeed(channelId === session.channelId ? session : null),
@@ -114,13 +122,16 @@ const makeHarness = async (options?: {
       Ref.set(idleCardRef, card).pipe(
         Effect.zipRight(Ref.set(idleCompactionActive, card !== null)),
       ),
-    setIdleCompactionInterruptRequested: (_sessionId, interruptRequested) => Ref.set(idleInterruptRequested, interruptRequested),
+    setIdleCompactionInterruptRequested: (_sessionId, interruptRequested) =>
+      Ref.set(idleInterruptRequested, interruptRequested),
     getIdleCompactionInterruptRequested: (_sessionId) => Ref.get(idleInterruptRequested),
     updateIdleCompactionCard: (_sessionId, title, body) =>
       Ref.get(idleCardRef).pipe(
         Effect.flatMap((card) =>
           card
-            ? Ref.update(compactionUpdates, (current) => [...current, { title, body }]).pipe(Effect.asVoid)
+            ? Ref.update(compactionUpdates, (current) => [...current, { title, body }]).pipe(
+                Effect.asVoid,
+              )
             : Effect.void,
         ),
       ),
@@ -140,14 +151,20 @@ const makeHarness = async (options?: {
         ? Effect.fail(new Error("interrupt failed"))
         : Effect.void,
     upsertInfoCard: async ({ title, body }) => {
-      await Effect.runPromise(Ref.update(upsertedInfoCards, (current) => [...current, { title, body }]))
-      return compactionCard
+      await Effect.runPromise(
+        Ref.update(upsertedInfoCards, (current) => [...current, { title, body }]),
+      );
+      return compactionCard;
     },
     editInfoCard: async (_message, title, body) => {
-      await Effect.runPromise(Ref.update(compactionUpdates, (current) => [...current, { title, body }]))
+      await Effect.runPromise(
+        Ref.update(compactionUpdates, (current) => [...current, { title, body }]),
+      );
     },
     sendInfoCard: async (_channel, title, body) => {
-      await Effect.runPromise(Ref.update(sentInfoCards, (current) => [...current, { title, body }]))
+      await Effect.runPromise(
+        Ref.update(sentInfoCards, (current) => [...current, { title, body }]),
+      );
     },
     logger: {
       info: () => Effect.void,
@@ -155,7 +172,7 @@ const makeHarness = async (options?: {
       error: () => Effect.void,
     },
     formatError: (error: unknown) => (error instanceof Error ? error.message : String(error)),
-  })
+  });
 
   return {
     runtime,
@@ -174,112 +191,112 @@ const makeHarness = async (options?: {
     compactStarted,
     compactFinish,
     compactUpdated,
-  }
-}
+  };
+};
 
 describe("createCommandRuntime", () => {
   test("rejects unhealthy compact requests after deferring", async () => {
     const harness = await makeHarness({
       sessionHealthy: false,
-    })
+    });
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction))
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
 
-    expect(handled).toBe(true)
-    expect(await getRef(harness.defers)).toBe(1)
+    expect(handled).toBe(true);
+    expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.edits)).toEqual([
       "This channel session is unavailable right now. Send a normal message to recreate it.",
-    ])
-    expect(await getRef(harness.upsertedInfoCards)).toEqual([])
-  })
+    ]);
+    expect(await getRef(harness.upsertedInfoCards)).toEqual([]);
+  });
 
   test("starts compaction, posts the idle card, and clears it after completion", async () => {
-    const harness = await makeHarness()
+    const harness = await makeHarness();
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction))
-    expect(handled).toBe(true)
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    expect(handled).toBe(true);
 
-    await Effect.runPromise(Deferred.await(harness.compactStarted))
-    expect(await getRef(harness.defers)).toBe(1)
+    await Effect.runPromise(Deferred.await(harness.compactStarted));
+    expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.upsertedInfoCards)).toEqual([
       {
         title: "🗜️ Compacting session",
         body: "OpenCode is summarizing earlier context for this session.",
       },
-    ])
-    expect((await getRef(harness.idleCardRef))?.id).toBe("compaction-card")
+    ]);
+    expect((await getRef(harness.idleCardRef))?.id).toBe("compaction-card");
     expect(await getRef(harness.edits)).toEqual([
       "Started session compaction. I'll post updates in this channel.",
-    ])
+    ]);
 
-    await Effect.runPromise(Deferred.succeed(harness.compactFinish, undefined))
-    await Effect.runPromise(Deferred.await(harness.compactUpdated))
+    await Effect.runPromise(Deferred.succeed(harness.compactFinish, undefined));
+    await Effect.runPromise(Deferred.await(harness.compactUpdated));
 
     expect(await getRef(harness.compactionUpdates)).toContainEqual({
       title: "🗜️ Session compacted",
       body: "OpenCode summarized earlier context for this session.",
-    })
-    expect(await getRef(harness.idleCardRef)).toBeNull()
-  })
+    });
+    expect(await getRef(harness.idleCardRef)).toBeNull();
+  });
 
   test("rolls back interruptRequested when interrupting fails", async () => {
     const harness = await makeHarness({
       interruptResult: "failure",
       hasActiveRun: true,
-    })
-    harness.interaction.commandName = "interrupt"
+    });
+    harness.interaction.commandName = "interrupt";
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction))
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
 
-    expect(handled).toBe(true)
-    expect(harness.activeRun.interruptRequested).toBe(false)
+    expect(handled).toBe(true);
+    expect(harness.activeRun.interruptRequested).toBe(false);
     expect(await getRef(harness.edits)).toEqual([
       formatErrorResponse("## ❌ Failed to interrupt run", "interrupt failed"),
-    ])
-    expect(await getRef(harness.sentInfoCards)).toEqual([])
-  })
+    ]);
+    expect(await getRef(harness.sentInfoCards)).toEqual([]);
+  });
 
   test("interrupts the active run, stops typing, and posts a visible info card", async () => {
     const harness = await makeHarness({
       hasActiveRun: true,
-    })
-    harness.interaction.commandName = "interrupt"
+    });
+    harness.interaction.commandName = "interrupt";
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction))
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
 
-    expect(handled).toBe(true)
-    expect(harness.activeRun.interruptRequested).toBe(true)
-    expect(await getRef(harness.typingStopCount)).toBe(1)
+    expect(handled).toBe(true);
+    expect(harness.activeRun.interruptRequested).toBe(true);
+    expect(await getRef(harness.typingStopCount)).toBe(1);
     expect(await getRef(harness.sentInfoCards)).toEqual([
       {
         title: "‼️ Run interrupted",
         body: "OpenCode stopped the active run in this channel.",
       },
-    ])
-    expect(await getRef(harness.edits)).toEqual([
-      "Interrupted the active OpenCode run.",
-    ])
-  })
+    ]);
+    expect(await getRef(harness.edits)).toEqual(["Interrupted the active OpenCode run."]);
+  });
 
   test("interrupts an active compaction card without posting a run card", async () => {
-    const harness = await makeHarness()
-    harness.interaction.commandName = "interrupt"
-    await Effect.runPromise(Ref.set(harness.idleCardRef, unsafeStub<Message>({ id: "compaction-card" })))
+    const harness = await makeHarness();
+    harness.interaction.commandName = "interrupt";
+    await Effect.runPromise(
+      Ref.set(harness.idleCardRef, unsafeStub<Message>({ id: "compaction-card" })),
+    );
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction))
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
 
-    expect(handled).toBe(true)
-    expect(await getRef(harness.typingStopCount)).toBe(0)
-    expect(await getRef(harness.sentInfoCards)).toEqual([])
+    expect(handled).toBe(true);
+    expect(await getRef(harness.typingStopCount)).toBe(0);
+    expect(await getRef(harness.sentInfoCards)).toEqual([]);
     expect(await getRef(harness.compactionUpdates)).toEqual([
       {
         title: "‼️ Interrupting compaction",
         body: "OpenCode is stopping session compaction.",
       },
-    ])
-    expect((await getRef(harness.idleCardRef))?.id).toBe("compaction-card")
+    ]);
+    expect((await getRef(harness.idleCardRef))?.id).toBe("compaction-card");
     expect(await getRef(harness.edits)).toEqual([
       "Requested interruption of the active OpenCode compaction.",
-    ])
-  })
-})
+    ]);
+  });
+});

@@ -1,47 +1,69 @@
-import { ChannelType, MessageFlags, type Interaction, type Message, type SendableChannels } from "discord.js"
-import { Effect } from "effect"
+import {
+  ChannelType,
+  MessageFlags,
+  type Interaction,
+  type Message,
+  type SendableChannels,
+} from "discord.js";
+import { Effect } from "effect";
 
-import { compactionCardContent } from "@/discord/compaction-card.ts"
-import { formatErrorResponse } from "@/discord/formatting.ts"
-import { beginInterruptRequest, decideCompactAfterHealthCheck, decideCompactEntry, decideInterruptEntry } from "@/sessions/command-lifecycle.ts"
-import type { ChannelSession } from "@/sessions/session.ts"
-import type { LoggerShape } from "@/util/logging.ts"
+import { compactionCardContent } from "@/discord/compaction-card.ts";
+import { formatErrorResponse } from "@/discord/formatting.ts";
+import {
+  beginInterruptRequest,
+  decideCompactAfterHealthCheck,
+  decideCompactEntry,
+  decideInterruptEntry,
+} from "@/sessions/command-lifecycle.ts";
+import type { ChannelSession } from "@/sessions/session.ts";
+import type { LoggerShape } from "@/util/logging.ts";
 
 export type CommandRuntime = {
-  handleInteraction: (interaction: Interaction) => Effect.Effect<boolean, unknown>
-}
+  handleInteraction: (interaction: Interaction) => Effect.Effect<boolean, unknown>;
+};
 
 type CommandRuntimeDeps = {
-  getSession: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>
-  hasIdleCompaction: (sessionId: string) => Effect.Effect<boolean, unknown>
-  getIdleCompactionCard: (sessionId: string) => Effect.Effect<Message | null, unknown>
-  beginIdleCompaction: (sessionId: string) => Effect.Effect<void, unknown>
-  setIdleCompactionCard: (sessionId: string, card: Message | null) => Effect.Effect<void, unknown>
-  setIdleCompactionInterruptRequested: (sessionId: string, interruptRequested: boolean) => Effect.Effect<void, unknown>
-  getIdleCompactionInterruptRequested: (sessionId: string) => Effect.Effect<boolean, unknown>
-  updateIdleCompactionCard: (sessionId: string, title: string, body: string) => Effect.Effect<void, unknown>
-  finalizeIdleCompactionCard: (sessionId: string, title: string, body: string) => Effect.Effect<void, unknown>
-  isSessionHealthy: (session: ChannelSession["opencode"]) => Effect.Effect<boolean, unknown>
-  compactSession: (session: ChannelSession["opencode"]) => Effect.Effect<void, unknown>
-  interruptSession: (session: ChannelSession["opencode"]) => Effect.Effect<void, unknown>
+  getSession: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
+  hasIdleCompaction: (sessionId: string) => Effect.Effect<boolean, unknown>;
+  getIdleCompactionCard: (sessionId: string) => Effect.Effect<Message | null, unknown>;
+  beginIdleCompaction: (sessionId: string) => Effect.Effect<void, unknown>;
+  setIdleCompactionCard: (sessionId: string, card: Message | null) => Effect.Effect<void, unknown>;
+  setIdleCompactionInterruptRequested: (
+    sessionId: string,
+    interruptRequested: boolean,
+  ) => Effect.Effect<void, unknown>;
+  getIdleCompactionInterruptRequested: (sessionId: string) => Effect.Effect<boolean, unknown>;
+  updateIdleCompactionCard: (
+    sessionId: string,
+    title: string,
+    body: string,
+  ) => Effect.Effect<void, unknown>;
+  finalizeIdleCompactionCard: (
+    sessionId: string,
+    title: string,
+    body: string,
+  ) => Effect.Effect<void, unknown>;
+  isSessionHealthy: (session: ChannelSession["opencode"]) => Effect.Effect<boolean, unknown>;
+  compactSession: (session: ChannelSession["opencode"]) => Effect.Effect<void, unknown>;
+  interruptSession: (session: ChannelSession["opencode"]) => Effect.Effect<void, unknown>;
   upsertInfoCard: (input: {
-    channel: SendableChannels
-    existingCard: Message | null
-    title: string
-    body: string
-  }) => Promise<Message>
-  editInfoCard: (message: Message, title: string, body: string) => Promise<unknown>
-  sendInfoCard: (channel: SendableChannels, title: string, body: string) => Promise<unknown>
-  logger: LoggerShape
-  formatError: (error: unknown) => string
-}
+    channel: SendableChannels;
+    existingCard: Message | null;
+    title: string;
+    body: string;
+  }) => Promise<Message>;
+  editInfoCard: (message: Message, title: string, body: string) => Promise<unknown>;
+  sendInfoCard: (channel: SendableChannels, title: string, body: string) => Promise<unknown>;
+  logger: LoggerShape;
+  formatError: (error: unknown) => string;
+};
 
 const replyToCommandInteraction = (interaction: Interaction, message: string) => {
   if (!interaction.isChatInputCommand()) {
-    return Effect.void
+    return Effect.void;
   }
   if (interaction.replied || interaction.deferred) {
-    return Effect.void
+    return Effect.void;
   }
   return Effect.promise(() =>
     interaction.reply({
@@ -49,49 +71,52 @@ const replyToCommandInteraction = (interaction: Interaction, message: string) =>
       flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     }),
-  ).pipe(Effect.ignore)
-}
+  ).pipe(Effect.ignore);
+};
 
 const deferCommandInteraction = (interaction: Interaction) => {
   if (!interaction.isChatInputCommand()) {
-    return Effect.void
+    return Effect.void;
   }
   if (interaction.replied || interaction.deferred) {
-    return Effect.void
+    return Effect.void;
   }
-  return Effect.promise(() => interaction.deferReply({ flags: MessageFlags.Ephemeral })).pipe(Effect.ignore)
-}
+  return Effect.promise(() => interaction.deferReply({ flags: MessageFlags.Ephemeral })).pipe(
+    Effect.ignore,
+  );
+};
 
 const editCommandInteraction = (interaction: Interaction, message: string) => {
   if (!interaction.isChatInputCommand()) {
-    return Effect.void
+    return Effect.void;
   }
   if (!interaction.replied && !interaction.deferred) {
-    return replyToCommandInteraction(interaction, message)
+    return replyToCommandInteraction(interaction, message);
   }
   return Effect.promise(() =>
     interaction.editReply({
       content: message,
       allowedMentions: { parse: [] },
     }),
-  ).pipe(Effect.ignore)
-}
+  ).pipe(Effect.ignore);
+};
 
 export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime => ({
   handleInteraction: (interaction) =>
     Effect.gen(function* () {
       if (!interaction.isChatInputCommand()) {
-        return false
+        return false;
       }
 
       if (interaction.commandName !== "compact" && interaction.commandName !== "interrupt") {
-        return false
+        return false;
       }
 
-      const inGuildTextChannel = interaction.inGuild() && interaction.channel?.type === ChannelType.GuildText
-      const session = inGuildTextChannel ? yield* deps.getSession(interaction.channelId) : null
+      const inGuildTextChannel =
+        interaction.inGuild() && interaction.channel?.type === ChannelType.GuildText;
+      const session = inGuildTextChannel ? yield* deps.getSession(interaction.channelId) : null;
       if (session && interaction.channel?.type === ChannelType.GuildText) {
-        session.progressChannel = interaction.channel as SendableChannels
+        session.progressChannel = interaction.channel as SendableChannels;
       }
 
       if (interaction.commandName === "compact") {
@@ -99,25 +124,27 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
           inGuildTextChannel,
           hasSession: !!session,
           hasActiveRun: !!session?.activeRun,
-        })
+        });
         if (compactEntry.type === "reject") {
-          yield* replyToCommandInteraction(interaction, compactEntry.message)
-          return true
+          yield* replyToCommandInteraction(interaction, compactEntry.message);
+          return true;
         }
 
-        yield* deferCommandInteraction(interaction)
+        yield* deferCommandInteraction(interaction);
 
-        const compactHealthDecision = decideCompactAfterHealthCheck(yield* deps.isSessionHealthy(session!.opencode))
+        const compactHealthDecision = decideCompactAfterHealthCheck(
+          yield* deps.isSessionHealthy(session!.opencode),
+        );
         if (compactHealthDecision.type === "reject-after-defer") {
-          yield* editCommandInteraction(interaction, compactHealthDecision.message)
-          return true
+          yield* editCommandInteraction(interaction, compactHealthDecision.message);
+          return true;
         }
 
-        const channel = interaction.channel as SendableChannels
-        yield* deps.beginIdleCompaction(session!.opencode.sessionId)
-        const existingCard = yield* deps.getIdleCompactionCard(session!.opencode.sessionId)
-        const compactingCard = compactionCardContent("compacting")
-        const compactedCard = compactionCardContent("compacted")
+        const channel = interaction.channel as SendableChannels;
+        yield* deps.beginIdleCompaction(session!.opencode.sessionId);
+        const existingCard = yield* deps.getIdleCompactionCard(session!.opencode.sessionId);
+        const compactingCard = compactionCardContent("compacting");
+        const compactedCard = compactionCardContent("compacted");
         const compactionCard = yield* Effect.promise(() =>
           deps.upsertInfoCard({
             channel,
@@ -128,13 +155,15 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
         ).pipe(
           Effect.tap((card) => deps.setIdleCompactionCard(session!.opencode.sessionId, card)),
           Effect.catchAll((error) =>
-            deps.logger.warn("failed to post idle compaction card", {
-              channelId: session!.channelId,
-              sessionId: session!.opencode.sessionId,
-              error: deps.formatError(error),
-            }).pipe(Effect.as(null)),
+            deps.logger
+              .warn("failed to post idle compaction card", {
+                channelId: session!.channelId,
+                sessionId: session!.opencode.sessionId,
+                error: deps.formatError(error),
+              })
+              .pipe(Effect.as(null)),
           ),
-        )
+        );
 
         yield* deps.compactSession(session!.opencode).pipe(
           Effect.tap(() =>
@@ -157,12 +186,12 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
                   Effect.flatMap((interruptRequested) =>
                     interruptRequested
                       ? (() => {
-                          const interruptedCard = compactionCardContent("interrupted")
+                          const interruptedCard = compactionCardContent("interrupted");
                           return deps.finalizeIdleCompactionCard(
                             session!.opencode.sessionId,
                             interruptedCard.title,
                             interruptedCard.body,
-                          )
+                          );
                         })()
                       : deps.finalizeIdleCompactionCard(
                           session!.opencode.sessionId,
@@ -174,68 +203,81 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
               : Effect.void,
           ),
           Effect.forkDaemon,
-        )
+        );
 
-        yield* editCommandInteraction(interaction, "Started session compaction. I'll post updates in this channel.")
-        return true
+        yield* editCommandInteraction(
+          interaction,
+          "Started session compaction. I'll post updates in this channel.",
+        );
+        return true;
       }
 
       const interruptEntry = decideInterruptEntry({
         inGuildTextChannel,
         hasSession: !!session,
         hasActiveRun: !!session?.activeRun,
-        hasIdleCompaction: session && !session.activeRun
-          ? yield* deps.hasIdleCompaction(session.opencode.sessionId)
-          : false,
-      })
+        hasIdleCompaction:
+          session && !session.activeRun
+            ? yield* deps.hasIdleCompaction(session.opencode.sessionId)
+            : false,
+      });
       if (interruptEntry.type === "reject") {
-        yield* replyToCommandInteraction(interaction, interruptEntry.message)
-        return true
+        yield* replyToCommandInteraction(interaction, interruptEntry.message);
+        return true;
       }
 
-      yield* deferCommandInteraction(interaction)
+      yield* deferCommandInteraction(interaction);
 
       if (interruptEntry.target === "compaction") {
-        yield* deps.setIdleCompactionInterruptRequested(session!.opencode.sessionId, true)
-        const interruptResult = yield* deps.interruptSession(session!.opencode).pipe(Effect.either)
+        yield* deps.setIdleCompactionInterruptRequested(session!.opencode.sessionId, true);
+        const interruptResult = yield* deps.interruptSession(session!.opencode).pipe(Effect.either);
         if (interruptResult._tag === "Left") {
-          yield* deps.setIdleCompactionInterruptRequested(session!.opencode.sessionId, false)
+          yield* deps.setIdleCompactionInterruptRequested(session!.opencode.sessionId, false);
           yield* editCommandInteraction(
             interaction,
-            formatErrorResponse("## ❌ Failed to interrupt compaction", deps.formatError(interruptResult.left)),
-          )
-          return true
+            formatErrorResponse(
+              "## ❌ Failed to interrupt compaction",
+              deps.formatError(interruptResult.left),
+            ),
+          );
+          return true;
         }
 
-        const interruptingCard = compactionCardContent("interrupting")
+        const interruptingCard = compactionCardContent("interrupting");
         yield* deps.updateIdleCompactionCard(
           session!.opencode.sessionId,
           interruptingCard.title,
           interruptingCard.body,
-        )
-        yield* editCommandInteraction(interaction, "Requested interruption of the active OpenCode compaction.")
-        return true
-      }
-
-      const activeRun = session!.activeRun!
-      const rollbackInterruptRequest = beginInterruptRequest(activeRun)
-      const interruptResult = yield* deps.interruptSession(session!.opencode).pipe(Effect.either)
-      if (interruptResult._tag === "Left") {
-        rollbackInterruptRequest()
+        );
         yield* editCommandInteraction(
           interaction,
-          formatErrorResponse("## ❌ Failed to interrupt run", deps.formatError(interruptResult.left)),
-        )
-        return true
+          "Requested interruption of the active OpenCode compaction.",
+        );
+        return true;
       }
 
-      yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
+      const activeRun = session!.activeRun!;
+      const rollbackInterruptRequest = beginInterruptRequest(activeRun);
+      const interruptResult = yield* deps.interruptSession(session!.opencode).pipe(Effect.either);
+      if (interruptResult._tag === "Left") {
+        rollbackInterruptRequest();
+        yield* editCommandInteraction(
+          interaction,
+          formatErrorResponse(
+            "## ❌ Failed to interrupt run",
+            deps.formatError(interruptResult.left),
+          ),
+        );
+        return true;
+      }
+
+      yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore);
       yield* Effect.promise(async () => {
         await deps.sendInfoCard(
           interaction.channel as SendableChannels,
           "‼️ Run interrupted",
           "OpenCode stopped the active run in this channel.",
-        )
+        );
       }).pipe(
         Effect.catchAll((error) =>
           deps.logger.warn("failed to post interrupt info card", {
@@ -245,8 +287,8 @@ export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime =
           }),
         ),
         Effect.ignore,
-      )
-      yield* editCommandInteraction(interaction, "Interrupted the active OpenCode run.")
-      return true
+      );
+      yield* editCommandInteraction(interaction, "Interrupted the active OpenCode run.");
+      return true;
     }),
-})
+});

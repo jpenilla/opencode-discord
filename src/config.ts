@@ -1,11 +1,4 @@
-import {
-  Config,
-  ConfigProvider,
-  Context,
-  Effect,
-  Layer,
-  Redacted,
-} from "effect";
+import { Config, ConfigProvider, Context, Effect, Layer, Redacted } from "effect";
 
 export type AppConfigShape = {
   discordToken: Redacted.Redacted<string>;
@@ -22,10 +15,7 @@ export type AppConfigShape = {
   sandboxEnvPassthrough: ReadonlyArray<string>;
 };
 
-export class AppConfig extends Context.Tag("AppConfig")<
-  AppConfig,
-  AppConfigShape
->() {}
+export class AppConfig extends Context.Tag("AppConfig")<AppConfig, AppConfigShape>() {}
 
 const defaultToolBridgeSocketPath = () =>
   `/tmp/opencode-discord-${process.pid}-${crypto.randomUUID().slice(0, 8)}/bridge.sock`;
@@ -44,22 +34,12 @@ const stringList = (name: string) =>
 
 const AppConfigSource: Config.Config<AppConfigShape> = Config.all({
   discordToken: Config.redacted(Config.nonEmptyString("discordToken")),
-  triggerPhrase: Config.withDefault(
-    Config.string("triggerPhrase"),
-    "hey opencode",
-  ),
-  sessionInstructions: Config.withDefault(
-    Config.string("sessionInstructions"),
-    "",
-  ),
+  triggerPhrase: Config.withDefault(Config.string("triggerPhrase"), "hey opencode"),
+  sessionInstructions: Config.withDefault(Config.string("sessionInstructions"), ""),
   stateDir: Config.withDefault(Config.string("stateDir"), "./storage"),
-  sessionIdleTimeoutMs: positiveInteger(
-    "sessionIdleTimeoutMs",
-    30 * 60 * 1_000,
-  ),
-  toolBridgeSocketPath: Config.orElse(
-    Config.string("discordToolBridgeSocket"),
-    () => Config.sync(defaultToolBridgeSocketPath),
+  sessionIdleTimeoutMs: positiveInteger("sessionIdleTimeoutMs", 30 * 60 * 1_000),
+  toolBridgeSocketPath: Config.orElse(Config.string("discordToolBridgeSocket"), () =>
+    Config.sync(defaultToolBridgeSocketPath),
   ),
   toolBridgeToken: Config.redacted(Config.sync(() => crypto.randomUUID())),
   sandboxBackend: Config.withDefault(
@@ -74,8 +54,5 @@ const AppConfigSource: Config.Config<AppConfigShape> = Config.all({
 
 export const AppConfigLive = Layer.effect(
   AppConfig,
-  Effect.withConfigProvider(
-    AppConfigSource,
-    ConfigProvider.constantCase(ConfigProvider.fromEnv()),
-  ),
+  Effect.withConfigProvider(AppConfigSource, ConfigProvider.constantCase(ConfigProvider.fromEnv())),
 );

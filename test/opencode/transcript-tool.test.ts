@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, test } from "bun:test";
 
-import { renderToolTranscriptPart } from "@/opencode/transcript-tool.ts"
+import { renderToolTranscriptPart } from "@/opencode/transcript-tool.ts";
 
 describe("renderToolTranscriptPart", () => {
   test("suppresses dismissed question errors", () => {
@@ -12,8 +12,8 @@ describe("renderToolTranscriptPart", () => {
           error: "Error: The user dismissed this question",
         },
       }),
-    ).toBe("")
-  })
+    ).toBe("");
+  });
 
   test("suppresses aborted tool errors", () => {
     expect(
@@ -25,8 +25,8 @@ describe("renderToolTranscriptPart", () => {
           error: "Tool execution aborted",
         },
       }),
-    ).toBe("")
-  })
+    ).toBe("");
+  });
 
   test("renders real tool failures", () => {
     expect(
@@ -38,6 +38,6 @@ describe("renderToolTranscriptPart", () => {
           error: "ENOENT: no such file or directory",
         },
       }),
-    ).toContain("## ❌ Tool: `bash`")
-  })
-})
+    ).toContain("## ❌ Tool: `bash`");
+  });
+});

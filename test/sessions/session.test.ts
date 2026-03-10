@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, test } from "bun:test";
 
-import { buildSessionCreateSpec } from "@/sessions/session.ts"
+import { buildSessionCreateSpec } from "@/sessions/session.ts";
 
 describe("buildSessionCreateSpec", () => {
   test("preserves the full appended system context", () => {
@@ -11,7 +11,7 @@ describe("buildSessionCreateSpec", () => {
       "Discord thread context:",
       "- Server: Guild (ID: g-1)",
       "- Channel: #general (ID: c-1)",
-    ].join("\n")
+    ].join("\n");
 
     expect(
       buildSessionCreateSpec({
@@ -23,6 +23,6 @@ describe("buildSessionCreateSpec", () => {
       workdir: "/tmp/workspace",
       title: "Discord #123",
       systemPromptAppend: appendix,
-    })
-  })
-})
+    });
+  });
+});

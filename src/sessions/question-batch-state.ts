@@ -1,17 +1,22 @@
-import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
+import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
 
-import type { QuestionBatchCardStatus, QuestionBatchStatus, QuestionDraft } from "@/discord/question-card.ts"
+import type {
+  QuestionBatchCardStatus,
+  QuestionBatchStatus,
+  QuestionDraft,
+} from "@/discord/question-card.ts";
 
 export type QuestionBatchState = {
-  request: QuestionRequest
-  page: number
-  optionPages: ReadonlyArray<number>
-  drafts: ReadonlyArray<QuestionDraft>
-  status: QuestionBatchCardStatus
-  resolvedAnswers?: ReadonlyArray<QuestionAnswer>
-}
+  request: QuestionRequest;
+  page: number;
+  optionPages: ReadonlyArray<number>;
+  drafts: ReadonlyArray<QuestionDraft>;
+  status: QuestionBatchCardStatus;
+  resolvedAnswers?: ReadonlyArray<QuestionAnswer>;
+};
 
-const emptyResolvedAnswers = (request: QuestionRequest): Array<QuestionAnswer> => request.questions.map(() => [])
+const emptyResolvedAnswers = (request: QuestionRequest): Array<QuestionAnswer> =>
+  request.questions.map(() => []);
 
 export const setQuestionBatchStatus = <T extends QuestionBatchState>(
   batch: T,
@@ -21,8 +26,9 @@ export const setQuestionBatchStatus = <T extends QuestionBatchState>(
   ({
     ...batch,
     status,
-    resolvedAnswers: resolvedAnswers ?? (status === "rejected" ? emptyResolvedAnswers(batch.request) : undefined),
-  }) as T
+    resolvedAnswers:
+      resolvedAnswers ?? (status === "rejected" ? emptyResolvedAnswers(batch.request) : undefined),
+  }) as T;
 
 export const terminateQuestionBatch = <T extends QuestionBatchState>(
   batch: T,
@@ -31,4 +37,4 @@ export const terminateQuestionBatch = <T extends QuestionBatchState>(
   ({
     ...batch,
     status,
-  }) as T
+  }) as T;

@@ -1,77 +1,99 @@
-import { createOpencodeClient, type GlobalEvent, type OpencodeClient, type QuestionAnswer } from "@opencode-ai/sdk/v2"
-import { Cause, Chunk, Context, Effect, Fiber, Layer } from "effect"
-import { fileURLToPath } from "node:url"
+import {
+  createOpencodeClient,
+  type GlobalEvent,
+  type OpencodeClient,
+  type QuestionAnswer,
+} from "@opencode-ai/sdk/v2";
+import { Cause, Chunk, Context, Effect, Fiber, Layer } from "effect";
+import { fileURLToPath } from "node:url";
 
-import { AppConfig } from "@/config.ts"
-import { OpencodeEventQueue, type OpencodeEventQueueShape } from "@/opencode/events.ts"
-import { renderTranscript } from "@/opencode/transcript.ts"
+import { AppConfig } from "@/config.ts";
+import { OpencodeEventQueue, type OpencodeEventQueueShape } from "@/opencode/events.ts";
+import { renderTranscript } from "@/opencode/transcript.ts";
 import {
   describeSandboxBackend,
   launchSandboxedServer,
   probeSandboxExecutables,
   stageSandboxConfigDirectory,
   type ResolvedSandboxBackend,
-} from "@/sandbox/backend.ts"
-import { SANDBOX_WORKSPACE_DIR } from "@/sandbox/session-paths.ts"
-import { Logger, type LoggerShape } from "@/util/logging.ts"
+} from "@/sandbox/backend.ts";
+import { SANDBOX_WORKSPACE_DIR } from "@/sandbox/session-paths.ts";
+import { Logger, type LoggerShape } from "@/util/logging.ts";
 
 export type SessionHandle = {
-  sessionId: string
-  client: OpencodeClient
-  workdir: string
-  backend: ResolvedSandboxBackend
-  close: () => Effect.Effect<void>
-}
+  sessionId: string;
+  client: OpencodeClient;
+  workdir: string;
+  backend: ResolvedSandboxBackend;
+  close: () => Effect.Effect<void>;
+};
 
 export type PromptResult = {
-  messageId: string
-  transcript: string
-}
+  messageId: string;
+  transcript: string;
+};
 
 type SessionModel = {
-  providerID: string
-  modelID: string
-}
+  providerID: string;
+  modelID: string;
+};
 
 export type OpencodeServiceShape = {
-  createSession: (workdir: string, title: string, systemPromptAppend?: string) => Effect.Effect<SessionHandle, unknown>
-  attachSession: (workdir: string, sessionId: string, systemPromptAppend?: string) => Effect.Effect<SessionHandle, unknown>
-  submitPrompt: (session: SessionHandle, prompt: string) => Effect.Effect<void, unknown>
-  readPromptResult: (session: SessionHandle, messageId: string) => Effect.Effect<PromptResult, unknown>
-  interruptSession: (session: SessionHandle) => Effect.Effect<void, unknown>
-  compactSession: (session: SessionHandle) => Effect.Effect<void, unknown>
-  replyToQuestion: (session: SessionHandle, requestID: string, answers: Array<QuestionAnswer>) => Effect.Effect<void, unknown>
-  rejectQuestion: (session: SessionHandle, requestID: string) => Effect.Effect<void, unknown>
-  isHealthy: (session: SessionHandle) => Effect.Effect<boolean, unknown>
-}
+  createSession: (
+    workdir: string,
+    title: string,
+    systemPromptAppend?: string,
+  ) => Effect.Effect<SessionHandle, unknown>;
+  attachSession: (
+    workdir: string,
+    sessionId: string,
+    systemPromptAppend?: string,
+  ) => Effect.Effect<SessionHandle, unknown>;
+  submitPrompt: (session: SessionHandle, prompt: string) => Effect.Effect<void, unknown>;
+  readPromptResult: (
+    session: SessionHandle,
+    messageId: string,
+  ) => Effect.Effect<PromptResult, unknown>;
+  interruptSession: (session: SessionHandle) => Effect.Effect<void, unknown>;
+  compactSession: (session: SessionHandle) => Effect.Effect<void, unknown>;
+  replyToQuestion: (
+    session: SessionHandle,
+    requestID: string,
+    answers: Array<QuestionAnswer>,
+  ) => Effect.Effect<void, unknown>;
+  rejectQuestion: (session: SessionHandle, requestID: string) => Effect.Effect<void, unknown>;
+  isHealthy: (session: SessionHandle) => Effect.Effect<boolean, unknown>;
+};
 
-export class OpencodeService extends Context.Tag("OpencodeService")<OpencodeService, OpencodeServiceShape>() {}
+export class OpencodeService extends Context.Tag("OpencodeService")<
+  OpencodeService,
+  OpencodeServiceShape
+>() {}
 
-const LOCALHOST = "127.0.0.1"
-const OPENCODE_CONFIG_DIR = fileURLToPath(new URL("../../opencode", import.meta.url))
+const OPENCODE_CONFIG_DIR = fileURLToPath(new URL("../../opencode", import.meta.url));
 
 const formatValue = (value: unknown) => {
   if (value === undefined || value === null) {
-    return ""
+    return "";
   }
   if (typeof value === "string") {
-    return value
+    return value;
   }
   if (value instanceof Error) {
-    return value.stack ?? value.message
+    return value.stack ?? value.message;
   }
   try {
-    return JSON.stringify(value)
+    return JSON.stringify(value);
   } catch {
-    return String(value)
+    return String(value);
   }
-}
+};
 
 const consumeEvents = (input: {
-  client: OpencodeClient
-  eventQueue: OpencodeEventQueueShape
-  logger: LoggerShape
-  signal: AbortSignal
+  client: OpencodeClient;
+  eventQueue: OpencodeEventQueueShape;
+  logger: LoggerShape;
+  signal: AbortSignal;
 }) =>
   Effect.tryPromise(async () => {
     const events = await input.client.global.event({
@@ -81,16 +103,16 @@ const consumeEvents = (input: {
           input.logger.warn("opencode event stream error", {
             error: String(error),
           }),
-        )
+        );
       },
-    })
+    });
 
     for await (const wrapped of events.stream) {
       if (!wrapped || typeof wrapped !== "object" || !("payload" in wrapped)) {
-        continue
+        continue;
       }
 
-      const event = wrapped as GlobalEvent
+      const event = wrapped as GlobalEvent;
 
       if (
         event.payload.type === "session.status" ||
@@ -104,14 +126,14 @@ const consumeEvents = (input: {
             type: event.payload.type,
             properties: event.payload.properties,
           }),
-        )
+        );
       }
 
       if (event.payload.type === "permission.asked") {
         const reply = await input.client.permission.reply({
           requestID: event.payload.properties.id,
           reply: "always",
-        })
+        });
         if (reply.error || reply.data !== true) {
           await Effect.runPromise(
             input.logger.warn("failed to auto-reply to opencode permission request", {
@@ -119,28 +141,29 @@ const consumeEvents = (input: {
               permission: event.payload.properties.permission,
               error: formatValue(reply.error),
             }),
-          )
+          );
         }
       }
 
-      await Effect.runPromise(input.eventQueue.publish(event))
+      await Effect.runPromise(input.eventQueue.publish(event));
     }
-  })
+  });
 
 const isExpectedAbort = (cause: Cause.Cause<unknown>, signal: AbortSignal) =>
   signal.aborted ||
   Cause.isInterruptedOnly(cause) ||
   Chunk.toReadonlyArray(Cause.failures(cause)).some(
-    (error: unknown) => error instanceof DOMException || (error instanceof Error && error.name === "AbortError"),
-  )
+    (error: unknown) =>
+      error instanceof DOMException || (error instanceof Error && error.name === "AbortError"),
+  );
 
 const forkEventStream = (input: {
-  client: OpencodeClient
-  eventQueue: OpencodeEventQueueShape
-  logger: LoggerShape
-  signal: AbortSignal
-  backend: ResolvedSandboxBackend
-  workdir: string
+  client: OpencodeClient;
+  eventQueue: OpencodeEventQueueShape;
+  logger: LoggerShape;
+  signal: AbortSignal;
+  backend: ResolvedSandboxBackend;
+  workdir: string;
 }) =>
   consumeEvents(input).pipe(
     Effect.tapErrorCause((cause) =>
@@ -154,30 +177,32 @@ const forkEventStream = (input: {
     ),
     Effect.ignore,
     Effect.fork,
-  )
+  );
 
-const makeSessionCloser = (input: {
-  abortController: AbortController
-  eventFiber: Fiber.RuntimeFiber<void, never>
-  closeServer: () => void
-}) => () =>
-  Effect.gen(function* () {
-    input.abortController.abort()
-    yield* Fiber.interrupt(input.eventFiber)
-    yield* Effect.sync(() => {
-      input.closeServer()
-    })
-  })
+const makeSessionCloser =
+  (input: {
+    abortController: AbortController;
+    eventFiber: Fiber.RuntimeFiber<void, never>;
+    closeServer: () => void;
+  }) =>
+  () =>
+    Effect.gen(function* () {
+      input.abortController.abort();
+      yield* Fiber.interrupt(input.eventFiber);
+      yield* Effect.sync(() => {
+        input.closeServer();
+      });
+    });
 
 type SessionBootstrap = {
   server: {
-    url: string
-    backend: ResolvedSandboxBackend
-    close: () => void
-  }
-  client: OpencodeClient
-  close: () => Effect.Effect<void>
-}
+    url: string;
+    backend: ResolvedSandboxBackend;
+    close: () => void;
+  };
+  client: OpencodeClient;
+  close: () => Effect.Effect<void>;
+};
 
 const resolveSessionModel = (session: SessionHandle) =>
   Effect.gen(function* () {
@@ -185,38 +210,40 @@ const resolveSessionModel = (session: SessionHandle) =>
       session.client.session.messages({
         sessionID: session.sessionId,
       }),
-    )
+    );
 
     if (result.error || !result.data) {
-      throw new Error(`Failed to load opencode session messages: ${formatValue(result.error)}`)
+      throw new Error(`Failed to load opencode session messages: ${formatValue(result.error)}`);
     }
 
-    let assistantModel: SessionModel | null = null
+    let assistantModel: SessionModel | null = null;
     for (let i = result.data.length - 1; i >= 0; i--) {
-      const info = result.data[i]?.info
+      const info = result.data[i]?.info;
       if (!info) {
-        continue
+        continue;
       }
       if (info.role === "user") {
         return {
           providerID: info.model.providerID,
           modelID: info.model.modelID,
-        } satisfies SessionModel
+        } satisfies SessionModel;
       }
       if (info.role === "assistant" && !assistantModel) {
         assistantModel = {
           providerID: info.providerID,
           modelID: info.modelID,
-        } satisfies SessionModel
+        } satisfies SessionModel;
       }
     }
 
     if (assistantModel) {
-      return assistantModel
+      return assistantModel;
     }
 
-    throw new Error("Failed to compact opencode session: no model metadata is available for this session")
-  })
+    throw new Error(
+      "Failed to compact opencode session: no model metadata is available for this session",
+    );
+  });
 
 const loadSessionMessage = (session: SessionHandle, messageId: string) =>
   Effect.promise(() =>
@@ -227,28 +254,33 @@ const loadSessionMessage = (session: SessionHandle, messageId: string) =>
   ).pipe(
     Effect.map((result) => {
       if (result.error || !result.data) {
-        throw new Error(`Failed to load opencode message ${messageId}: ${formatValue(result.error)}`)
+        throw new Error(
+          `Failed to load opencode message ${messageId}: ${formatValue(result.error)}`,
+        );
       }
 
-      return result.data
+      return result.data;
     }),
-  )
+  );
 
 const loadPromptResult = (session: SessionHandle, messageId: string) =>
   loadSessionMessage(session, messageId).pipe(
-    Effect.map((message) => ({
-      messageId,
-      transcript: renderTranscript(message.parts),
-    }) satisfies PromptResult),
-  )
+    Effect.map(
+      (message) =>
+        ({
+          messageId,
+          transcript: renderTranscript(message.parts),
+        }) satisfies PromptResult,
+    ),
+  );
 
 export const OpencodeServiceLive = Layer.scoped(
   OpencodeService,
   Effect.gen(function* () {
-    const config = yield* AppConfig
-    const eventQueue = yield* OpencodeEventQueue
-    const logger = yield* Logger
-    const resolvedBackend = describeSandboxBackend(config.sandboxBackend)
+    const config = yield* AppConfig;
+    const eventQueue = yield* OpencodeEventQueue;
+    const logger = yield* Logger;
+    const resolvedBackend = describeSandboxBackend(config.sandboxBackend);
     const executableProbe = yield* Effect.try({
       try: () => probeSandboxExecutables(config),
       catch: (error) => error,
@@ -260,8 +292,8 @@ export const OpencodeServiceLive = Layer.scoped(
           error: formatValue(error),
         }),
       ),
-    )
-    const sandboxConfig = yield* (resolvedBackend === "bwrap"
+    );
+    const sandboxConfig = yield* resolvedBackend === "bwrap"
       ? Effect.acquireRelease(
           Effect.promise(() => stageSandboxConfigDirectory(OPENCODE_CONFIG_DIR)).pipe(
             Effect.tapError((error) =>
@@ -275,7 +307,7 @@ export const OpencodeServiceLive = Layer.scoped(
         )
       : Effect.succeed({
           configDir: OPENCODE_CONFIG_DIR,
-        }))
+        });
     const launchServer = (workdir: string, systemPromptAppend?: string) =>
       Effect.promise(() =>
         launchSandboxedServer({
@@ -293,17 +325,20 @@ export const OpencodeServiceLive = Layer.scoped(
             error: formatValue(error),
           }),
         ),
-      )
+      );
 
-    const bootstrapSession = (workdir: string, systemPromptAppend?: string): Effect.Effect<SessionBootstrap, unknown> =>
+    const bootstrapSession = (
+      workdir: string,
+      systemPromptAppend?: string,
+    ): Effect.Effect<SessionBootstrap, unknown> =>
       Effect.gen(function* () {
-        const server = yield* launchServer(workdir, systemPromptAppend)
-        const clientDirectory = server.backend === "bwrap" ? SANDBOX_WORKSPACE_DIR : workdir
+        const server = yield* launchServer(workdir, systemPromptAppend);
+        const clientDirectory = server.backend === "bwrap" ? SANDBOX_WORKSPACE_DIR : workdir;
         const client = createOpencodeClient({
           baseUrl: server.url,
           directory: clientDirectory,
-        })
-        const abortController = new AbortController()
+        });
+        const abortController = new AbortController();
         const eventFiber = yield* forkEventStream({
           client,
           eventQueue,
@@ -311,42 +346,42 @@ export const OpencodeServiceLive = Layer.scoped(
           signal: abortController.signal,
           backend: server.backend,
           workdir,
-        })
+        });
         const close = makeSessionCloser({
           abortController,
           eventFiber,
           closeServer: server.close,
-        })
+        });
 
         return {
           server,
           client,
           close,
-        } satisfies SessionBootstrap
-      })
+        } satisfies SessionBootstrap;
+      });
 
     yield* logger.info("configured opencode sandbox backend", {
       backend: resolvedBackend,
       configDir: sandboxConfig.configDir,
       opencodeBin: executableProbe.opencodeBin,
       bwrapBin: executableProbe.bwrapBin,
-    })
+    });
 
     if (resolvedBackend === "unsafe-dev") {
       yield* logger.warn("opencode sandbox backend is running in unsafe development mode", {
         platform: process.platform,
-      })
+      });
     }
 
     return {
       createSession: (workdir, title, systemPromptAppend) =>
         Effect.gen(function* () {
-          const bootstrap = yield* bootstrapSession(workdir, systemPromptAppend)
+          const bootstrap = yield* bootstrapSession(workdir, systemPromptAppend);
 
           try {
-            const result = yield* Effect.promise(() => bootstrap.client.session.create({ title }))
+            const result = yield* Effect.promise(() => bootstrap.client.session.create({ title }));
             if (result.error || !result.data) {
-              throw new Error(`Failed to create opencode session: ${formatValue(result.error)}`)
+              throw new Error(`Failed to create opencode session: ${formatValue(result.error)}`);
             }
 
             yield* logger.info("created opencode session", {
@@ -354,7 +389,7 @@ export const OpencodeServiceLive = Layer.scoped(
               backend: bootstrap.server.backend,
               serverUrl: bootstrap.server.url,
               workdir,
-            })
+            });
 
             return {
               sessionId: result.data.id,
@@ -362,25 +397,25 @@ export const OpencodeServiceLive = Layer.scoped(
               workdir,
               backend: bootstrap.server.backend,
               close: bootstrap.close,
-            } satisfies SessionHandle
+            } satisfies SessionHandle;
           } catch (error) {
-            yield* bootstrap.close().pipe(Effect.ignore)
-            throw error
+            yield* bootstrap.close().pipe(Effect.ignore);
+            throw error;
           }
         }),
       attachSession: (workdir, sessionId, systemPromptAppend) =>
         Effect.gen(function* () {
-          const bootstrap = yield* bootstrapSession(workdir, systemPromptAppend)
+          const bootstrap = yield* bootstrapSession(workdir, systemPromptAppend);
 
           try {
             const result = yield* Effect.promise(() =>
               bootstrap.client.session.get({
                 sessionID: sessionId,
               }),
-            )
+            );
 
             if (result.error || !result.data) {
-              throw new Error(`Failed to attach opencode session: ${formatValue(result.error)}`)
+              throw new Error(`Failed to attach opencode session: ${formatValue(result.error)}`);
             }
 
             yield* logger.info("attached opencode session", {
@@ -388,7 +423,7 @@ export const OpencodeServiceLive = Layer.scoped(
               backend: bootstrap.server.backend,
               serverUrl: bootstrap.server.url,
               workdir,
-            })
+            });
 
             return {
               sessionId,
@@ -396,10 +431,10 @@ export const OpencodeServiceLive = Layer.scoped(
               workdir,
               backend: bootstrap.server.backend,
               close: bootstrap.close,
-            } satisfies SessionHandle
+            } satisfies SessionHandle;
           } catch (error) {
-            yield* bootstrap.close().pipe(Effect.ignore)
-            throw error
+            yield* bootstrap.close().pipe(Effect.ignore);
+            throw error;
           }
         }),
       submitPrompt: (session, prompt) =>
@@ -410,10 +445,10 @@ export const OpencodeServiceLive = Layer.scoped(
               noReply: false,
               parts: [{ type: "text", text: prompt }],
             }),
-          )
+          );
 
           if (result.error) {
-            throw new Error(`Failed to prompt opencode: ${formatValue(result.error)}`)
+            throw new Error(`Failed to prompt opencode: ${formatValue(result.error)}`);
           }
         }),
       readPromptResult: (session, messageId) => loadPromptResult(session, messageId),
@@ -423,25 +458,25 @@ export const OpencodeServiceLive = Layer.scoped(
             session.client.session.abort({
               sessionID: session.sessionId,
             }),
-          )
+          );
 
           if (result.error || result.data !== true) {
-            throw new Error(`Failed to interrupt opencode session: ${formatValue(result.error)}`)
+            throw new Error(`Failed to interrupt opencode session: ${formatValue(result.error)}`);
           }
         }),
       compactSession: (session) =>
         Effect.gen(function* () {
-          const model = yield* resolveSessionModel(session)
+          const model = yield* resolveSessionModel(session);
           const result = yield* Effect.promise(() =>
             session.client.session.summarize({
               sessionID: session.sessionId,
               providerID: model.providerID,
               modelID: model.modelID,
             }),
-          )
+          );
 
           if (result.error || result.data !== true) {
-            throw new Error(`Failed to compact opencode session: ${formatValue(result.error)}`)
+            throw new Error(`Failed to compact opencode session: ${formatValue(result.error)}`);
           }
         }),
       replyToQuestion: (session, requestID, answers) =>
@@ -451,10 +486,10 @@ export const OpencodeServiceLive = Layer.scoped(
               requestID,
               answers,
             }),
-          )
+          );
 
           if (result.error || result.data !== true) {
-            throw new Error(`Failed to reply to opencode question: ${formatValue(result.error)}`)
+            throw new Error(`Failed to reply to opencode question: ${formatValue(result.error)}`);
           }
         }),
       rejectQuestion: (session, requestID) =>
@@ -463,10 +498,10 @@ export const OpencodeServiceLive = Layer.scoped(
             session.client.question.reject({
               requestID,
             }),
-          )
+          );
 
           if (result.error || result.data !== true) {
-            throw new Error(`Failed to reject opencode question: ${formatValue(result.error)}`)
+            throw new Error(`Failed to reject opencode question: ${formatValue(result.error)}`);
           }
         }),
       isHealthy: (session) =>
@@ -474,6 +509,6 @@ export const OpencodeServiceLive = Layer.scoped(
           Effect.map((result) => !result.error && result.data?.healthy === true),
           Effect.orElseSucceed(() => false),
         ),
-    } satisfies OpencodeServiceShape
+    } satisfies OpencodeServiceShape;
   }),
-)
+);

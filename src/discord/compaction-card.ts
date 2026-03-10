@@ -1,31 +1,38 @@
-export type CompactionCardState = "compacting" | "interrupting" | "compacted" | "interrupted" | "stopped"
+export type CompactionCardState =
+  | "compacting"
+  | "interrupting"
+  | "compacted"
+  | "interrupted"
+  | "stopped";
 
-export const compactionCardContent = (state: CompactionCardState): { title: string; body: string } => {
+export const compactionCardContent = (
+  state: CompactionCardState,
+): { title: string; body: string } => {
   switch (state) {
     case "compacting":
       return {
         title: "🗜️ Compacting session",
         body: "OpenCode is summarizing earlier context for this session.",
-      }
+      };
     case "interrupting":
       return {
         title: "‼️ Interrupting compaction",
         body: "OpenCode is stopping session compaction.",
-      }
+      };
     case "compacted":
       return {
         title: "🗜️ Session compacted",
         body: "OpenCode summarized earlier context for this session.",
-      }
+      };
     case "interrupted":
       return {
         title: "‼️ Compaction interrupted",
         body: "OpenCode stopped compacting this session because the run was interrupted.",
-      }
+      };
     case "stopped":
       return {
         title: "🛑 Compaction stopped",
         body: "OpenCode stopped compacting this session because the bot shut down.",
-      }
+      };
   }
-}
+};

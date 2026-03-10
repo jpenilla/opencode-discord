@@ -1,56 +1,56 @@
-import type { Client, Message } from "discord.js"
+import type { Client, Message } from "discord.js";
 
 export type Invocation = {
-  prompt: string
-}
+  prompt: string;
+};
 
 const cleanMentionText = (content: string, botId: string) =>
-  content.replace(new RegExp(`<@!?${botId}>`, "g"), "").trim()
+  content.replace(new RegExp(`<@!?${botId}>`, "g"), "").trim();
 
 const parsePrompt = (content: string, botId: string, triggerPhrase: string): string | null => {
-  const mentionPattern = new RegExp(`<@!?${botId}>`, "i")
+  const mentionPattern = new RegExp(`<@!?${botId}>`, "i");
   if (mentionPattern.test(content)) {
-    return cleanMentionText(content, botId)
+    return cleanMentionText(content, botId);
   }
 
-  const lowered = content.toLowerCase()
-  const loweredTrigger = triggerPhrase.toLowerCase()
+  const lowered = content.toLowerCase();
+  const loweredTrigger = triggerPhrase.toLowerCase();
   if (!lowered.startsWith(loweredTrigger)) {
-    return null
+    return null;
   }
-  return content.slice(triggerPhrase.length).trim()
-}
+  return content.slice(triggerPhrase.length).trim();
+};
 
 export const detectInvocation = async (input: {
-  client: Client
-  message: Message
-  triggerPhrase: string
+  client: Client;
+  message: Message;
+  triggerPhrase: string;
 }): Promise<Invocation | null> => {
-  const { client, message, triggerPhrase } = input
-  const botUser = client.user
+  const { client, message, triggerPhrase } = input;
+  const botUser = client.user;
   if (!botUser) {
-    return null
+    return null;
   }
 
   if (message.reference?.messageId) {
     try {
-      const referenced = await message.fetchReference()
+      const referenced = await message.fetchReference();
       if (message.mentions.repliedUser?.id === botUser.id && referenced.author.id === botUser.id) {
         return {
           prompt: message.content.trim(),
-        }
+        };
       }
     } catch {
       // ignore unavailable references
     }
   }
 
-  const prompt = parsePrompt(message.content, botUser.id, triggerPhrase)
+  const prompt = parsePrompt(message.content, botUser.id, triggerPhrase);
   if (prompt !== null) {
     return {
       prompt,
-    }
+    };
   }
 
-  return null
-}
+  return null;
+};
