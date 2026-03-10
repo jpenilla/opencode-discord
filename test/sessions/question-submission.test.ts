@@ -24,6 +24,7 @@ const makeRequest = (id = "req-1") =>
 
 const makeBatch = (): TestBatch => ({
   request: makeRequest(),
+  version: 0,
   page: 0,
   optionPages: [0],
   drafts: [{ selectedOptions: ["Yes"], customAnswer: null }],
@@ -49,9 +50,41 @@ const makeRuntime = async (options?: {
     currentBatch,
     calls,
     runtime: {
-      persistBatch: (requestId: string, update: (batch: TestBatch) => TestBatch | null) =>
+      tryPersistBatch: (
+        requestId: string,
+        expectedVersion: number,
+        actorId: string,
+        update: (batch: TestBatch) => TestBatch,
+      ) =>
         Effect.gen(function* () {
-          yield* record(`persist:${requestId}`);
+          yield* record(`try-persist:${requestId}:${expectedVersion}:${actorId}`);
+          return yield* Ref.modify(
+            currentBatch,
+            (
+              batch,
+            ): readonly [
+              (
+                | { type: "updated"; batch: TestBatch }
+                | { type: "missing" }
+                | { type: "conflict"; batch: TestBatch }
+              ),
+              TestBatch | null,
+            ] => {
+              if (!batch) {
+                return [{ type: "missing" }, null];
+              }
+              if (batch.version !== expectedVersion) {
+                return [{ type: "conflict", batch }, batch];
+              }
+              const nextBase = update(batch);
+              const next = nextBase === batch ? batch : { ...nextBase, version: batch.version + 1 };
+              return [{ type: "updated", batch: next }, next];
+            },
+          );
+        }),
+      restoreBatch: (requestId: string, update: (batch: TestBatch) => TestBatch | null) =>
+        Effect.gen(function* () {
+          yield* record(`restore:${requestId}`);
           return yield* Ref.modify(
             currentBatch,
             (batch): readonly [TestBatch | null, TestBatch | null] => {
@@ -77,6 +110,8 @@ const makeRuntime = async (options?: {
             : `finalize:${requestId}:${status}`,
         ),
       replyExpired: () => record("reply-expired"),
+      replyConflict: (_interaction: TestInteraction, batch: TestBatch) =>
+        record(`reply-conflict:${batch.version}`),
       followUpFailure: (_interaction: TestInteraction, message: string) =>
         record(`follow-up:${message}`),
       submitToOpencode: (
@@ -108,12 +143,17 @@ describe("submitQuestionBatch", () => {
       submitQuestionBatch(runtime)({
         interaction: { id: "interaction-1" },
         requestId: "req-1",
+        expectedVersion: 0,
+        actorId: "owner",
         answers: [["Yes"]],
       }),
     );
 
     expect(handled).toBe(true);
-    expect(await Effect.runPromise(Ref.get(calls))).toEqual(["persist:req-1", "reply-expired"]);
+    expect(await Effect.runPromise(Ref.get(calls))).toEqual([
+      "try-persist:req-1:0:owner",
+      "reply-expired",
+    ]);
   });
 
   test("updates the question card, submits answers, and finalizes on success", async () => {
@@ -123,13 +163,15 @@ describe("submitQuestionBatch", () => {
       submitQuestionBatch(runtime)({
         interaction: { id: "interaction-1" },
         requestId: "req-1",
+        expectedVersion: 0,
+        actorId: "owner",
         answers: [["Yes"]],
       }),
     );
 
     expect(handled).toBe(true);
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
-      "persist:req-1",
+      "try-persist:req-1:0:owner",
       "update:submitting",
       'submit:req-1:[["Yes"]]',
       'finalize:req-1:answered:[["Yes"]]',
@@ -143,18 +185,41 @@ describe("submitQuestionBatch", () => {
       submitQuestionBatch(runtime)({
         interaction: { id: "interaction-1" },
         requestId: "req-1",
+        expectedVersion: 0,
+        actorId: "owner",
         answers: [["Yes"]],
       }),
     );
 
     expect(handled).toBe(true);
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
-      "persist:req-1",
+      "try-persist:req-1:0:owner",
       "update:submitting",
       'submit:req-1:[["Yes"]]',
-      "persist:req-1",
+      "restore:req-1",
       "edit:active",
       "follow-up:Failed to submit answers: submit failed",
+    ]);
+    expect((await Effect.runPromise(Ref.get(currentBatch)))?.status).toBe("active");
+  });
+
+  test("replies with a conflict when another action already updated the batch", async () => {
+    const { runtime, calls, currentBatch } = await makeRuntime();
+
+    const handled = await Effect.runPromise(
+      submitQuestionBatch(runtime)({
+        interaction: { id: "interaction-1" },
+        requestId: "req-1",
+        expectedVersion: 1,
+        actorId: "intruder",
+        answers: [["Yes"]],
+      }),
+    );
+
+    expect(handled).toBe(true);
+    expect(await Effect.runPromise(Ref.get(calls))).toEqual([
+      "try-persist:req-1:1:intruder",
+      "reply-conflict:0",
     ]);
     expect((await Effect.runPromise(Ref.get(currentBatch)))?.status).toBe("active");
   });
@@ -168,12 +233,14 @@ describe("rejectQuestionBatch", () => {
       rejectQuestionBatch(runtime)({
         interaction: { id: "interaction-1" },
         requestId: "req-1",
+        expectedVersion: 0,
+        actorId: "owner",
       }),
     );
 
     expect(handled).toBe(true);
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
-      "persist:req-1",
+      "try-persist:req-1:0:owner",
       "update:submitting",
       "reject:req-1",
       "finalize:req-1:rejected",
@@ -192,15 +259,17 @@ describe("rejectQuestionBatch", () => {
       rejectQuestionBatch(runtime)({
         interaction: { id: "interaction-1" },
         requestId: "req-1",
+        expectedVersion: 0,
+        actorId: "owner",
       }),
     );
 
     expect(handled).toBe(true);
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
-      "persist:req-1",
+      "try-persist:req-1:0:owner",
       "update:submitting",
       "reject:req-1",
-      "persist:req-1",
+      "restore:req-1",
       "edit:active",
       "follow-up:Failed to reject questions: reject failed",
     ]);

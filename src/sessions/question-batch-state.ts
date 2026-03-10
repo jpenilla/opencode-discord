@@ -8,6 +8,7 @@ import type {
 
 export type QuestionBatchState = {
   request: QuestionRequest;
+  version: number;
   page: number;
   optionPages: ReadonlyArray<number>;
   drafts: ReadonlyArray<QuestionDraft>;

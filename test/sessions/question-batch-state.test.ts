@@ -45,6 +45,7 @@ const request: QuestionRequest = {
 
 const makeBatch = (): QuestionBatchState => ({
   request,
+  version: 0,
   page: 0,
   optionPages: [0, 0],
   drafts: questionDrafts(request),

@@ -153,6 +153,52 @@ const makeHarness = async (options?: {
       deferUpdate: () => Promise.resolve(),
     });
 
+  const makeSelectInteraction = (input: {
+    customId: string;
+    values: string[];
+    userId?: string;
+    messageId?: string;
+  }) =>
+    unsafeStub<Interaction>({
+      customId: input.customId,
+      values: input.values,
+      user: { id: input.userId ?? "owner" },
+      message: { id: input.messageId ?? questionMessage.id },
+      replied: false,
+      deferred: false,
+      isButton: () => false,
+      isStringSelectMenu: () => true,
+      isModalSubmit: () => false,
+      isChatInputCommand: () => false,
+      reply: (payload: { content?: string | null }) =>
+        Effect.runPromise(Ref.update(interactionReplies, (current) => [...current, payload])),
+      update: (_payload: MessageEditOptions) => Promise.resolve(questionMessage),
+      followUp: (_payload: unknown) => Promise.resolve(questionMessage),
+      showModal: (_modal: unknown) => Promise.resolve(),
+      deferUpdate: () => Promise.resolve(),
+    });
+
+  const makeModalInteraction = (input: { customId: string; value: string; userId?: string }) =>
+    unsafeStub<Interaction>({
+      customId: input.customId,
+      user: { id: input.userId ?? "owner" },
+      replied: false,
+      deferred: false,
+      isButton: () => false,
+      isStringSelectMenu: () => false,
+      isModalSubmit: () => true,
+      isChatInputCommand: () => false,
+      reply: (payload: { content?: string | null }) =>
+        Effect.runPromise(Ref.update(interactionReplies, (current) => [...current, payload])),
+      update: (_payload: MessageEditOptions) => Promise.resolve(questionMessage),
+      followUp: (_payload: unknown) => Promise.resolve(questionMessage),
+      showModal: (_modal: unknown) => Promise.resolve(),
+      deferUpdate: () => Promise.resolve(),
+      fields: {
+        getTextInputValue: () => input.value,
+      },
+    });
+
   return {
     runtime,
     session,
@@ -169,6 +215,8 @@ const makeHarness = async (options?: {
     typingResumeCount,
     typingStopCount,
     makeButtonInteraction,
+    makeSelectInteraction,
+    makeModalInteraction,
   };
 };
 
@@ -245,7 +293,7 @@ describe("createQuestionRuntime", () => {
     const handled = await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
-          customId: `ocq:${harness.request.id}:submit`,
+          customId: `ocq:${harness.request.id}:0:submit`,
           userId: "intruder",
         }),
       ),
@@ -275,7 +323,7 @@ describe("createQuestionRuntime", () => {
     const handled = await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
-          customId: `ocq:${harness.request.id}:submit`,
+          customId: `ocq:${harness.request.id}:0:submit`,
         }),
       ),
     );
@@ -305,5 +353,73 @@ describe("createQuestionRuntime", () => {
     const edits = await getRef(harness.editedPayloads);
     expect(edits).toHaveLength(1);
     expect(JSON.stringify(edits[0])).toContain("‼️ Questions interrupted");
+  });
+
+  test("replies with a stale-state error after a newer page action wins", async () => {
+    const harness = await makeHarness();
+
+    await Effect.runPromise(
+      harness.runtime.handleEvent({
+        type: "asked",
+        sessionId: harness.session.opencode.sessionId,
+        request: harness.request,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.runtime.handleInteraction(
+        harness.makeButtonInteraction({
+          customId: `ocq:${harness.request.id}:0:question-next`,
+        }),
+      ),
+    );
+
+    const handled = await Effect.runPromise(
+      harness.runtime.handleInteraction(
+        harness.makeButtonInteraction({
+          customId: `ocq:${harness.request.id}:0:question-prev`,
+        }),
+      ),
+    );
+
+    expect(handled).toBe(true);
+    expect((await getRef(harness.interactionReplies)).at(-1)?.content).toBe(
+      "This question prompt changed before your action was applied. Review the latest card and try again.",
+    );
+  });
+
+  test("replies with a stale-state error for modal submissions from an old version", async () => {
+    const harness = await makeHarness();
+
+    await Effect.runPromise(
+      harness.runtime.handleEvent({
+        type: "asked",
+        sessionId: harness.session.opencode.sessionId,
+        request: harness.request,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.runtime.handleInteraction(
+        harness.makeSelectInteraction({
+          customId: `ocq:${harness.request.id}:0:select:0`,
+          values: ["Yes"],
+        }),
+      ),
+    );
+
+    const handled = await Effect.runPromise(
+      harness.runtime.handleInteraction(
+        harness.makeModalInteraction({
+          customId: `ocq:${harness.request.id}:0:modal:0`,
+          value: "Other",
+        }),
+      ),
+    );
+
+    expect(handled).toBe(true);
+    expect((await getRef(harness.interactionReplies)).at(-1)?.content).toBe(
+      "This question prompt changed before your action was applied. Review the latest card and try again.",
+    );
   });
 });

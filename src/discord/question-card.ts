@@ -37,6 +37,7 @@ export type QuestionBatchCardStatus = QuestionBatchStatus | "interrupted" | "exp
 
 export type PendingQuestionBatchView = {
   request: QuestionRequest;
+  version: number;
   page: number;
   optionPages: ReadonlyArray<number>;
   drafts: ReadonlyArray<QuestionDraft>;
@@ -45,16 +46,16 @@ export type PendingQuestionBatchView = {
 };
 
 type QuestionAction =
-  | { kind: "question-prev"; requestID: string }
-  | { kind: "question-next"; requestID: string }
-  | { kind: "option-prev"; requestID: string; questionIndex: number }
-  | { kind: "option-next"; requestID: string; questionIndex: number }
-  | { kind: "clear"; requestID: string; questionIndex: number }
-  | { kind: "select"; requestID: string; questionIndex: number }
-  | { kind: "custom"; requestID: string; questionIndex: number }
-  | { kind: "submit"; requestID: string }
-  | { kind: "reject"; requestID: string }
-  | { kind: "modal"; requestID: string; questionIndex: number };
+  | { kind: "question-prev"; requestID: string; version: number }
+  | { kind: "question-next"; requestID: string; version: number }
+  | { kind: "option-prev"; requestID: string; version: number; questionIndex: number }
+  | { kind: "option-next"; requestID: string; version: number; questionIndex: number }
+  | { kind: "clear"; requestID: string; version: number; questionIndex: number }
+  | { kind: "select"; requestID: string; version: number; questionIndex: number }
+  | { kind: "custom"; requestID: string; version: number; questionIndex: number }
+  | { kind: "submit"; requestID: string; version: number }
+  | { kind: "reject"; requestID: string; version: number }
+  | { kind: "modal"; requestID: string; version: number; questionIndex: number };
 
 const compact = (value: string, maxLength: number) => {
   if (value.length <= maxLength) {
@@ -143,34 +144,48 @@ const setQuestionActionId = (action: QuestionAction) => {
     case "question-next":
     case "submit":
     case "reject":
-      return [CUSTOM_ID_PREFIX, action.requestID, action.kind].join(":");
+      return [CUSTOM_ID_PREFIX, action.requestID, String(action.version), action.kind].join(":");
     case "clear":
     case "select":
     case "custom":
     case "option-prev":
     case "option-next":
     case "modal":
-      return [CUSTOM_ID_PREFIX, action.requestID, action.kind, String(action.questionIndex)].join(
-        ":",
-      );
+      return [
+        CUSTOM_ID_PREFIX,
+        action.requestID,
+        String(action.version),
+        action.kind,
+        String(action.questionIndex),
+      ].join(":");
   }
 };
 
 export const parseQuestionActionId = (customId: string): QuestionAction | null => {
-  const [prefix, requestID, kind, questionIndex] = customId.split(":");
-  if (prefix !== CUSTOM_ID_PREFIX || !requestID || !kind) {
+  const parts = customId.split(":");
+  const [prefix, requestID, versionRaw, kind, questionIndex] = parts;
+  if (prefix !== CUSTOM_ID_PREFIX || !requestID || !versionRaw || !kind) {
+    return null;
+  }
+
+  const version = Number(versionRaw);
+  if (!Number.isSafeInteger(version) || version < 0) {
+    return null;
+  }
+
+  if (parts.length !== 4 && parts.length !== 5) {
     return null;
   }
 
   switch (kind) {
     case "question-prev":
-      return { kind, requestID };
+      return { kind, requestID, version };
     case "question-next":
-      return { kind, requestID };
+      return { kind, requestID, version };
     case "submit":
-      return { kind, requestID };
+      return { kind, requestID, version };
     case "reject":
-      return { kind, requestID };
+      return { kind, requestID, version };
     case "clear":
     case "select":
     case "custom":
@@ -181,7 +196,7 @@ export const parseQuestionActionId = (customId: string): QuestionAction | null =
       if (!Number.isInteger(parsedIndex) || parsedIndex < 0) {
         return null;
       }
-      return { kind, requestID, questionIndex: parsedIndex };
+      return { kind, requestID, version, questionIndex: parsedIndex };
     }
     default:
       return null;
@@ -333,6 +348,7 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
         setQuestionActionId({
           kind: "select",
           requestID: input.request.id,
+          version: input.version,
           questionIndex: input.page,
         }),
       )
@@ -362,12 +378,24 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
 
   const questionButtons = [
     new ButtonBuilder()
-      .setCustomId(setQuestionActionId({ kind: "question-prev", requestID: input.request.id }))
+      .setCustomId(
+        setQuestionActionId({
+          kind: "question-prev",
+          requestID: input.request.id,
+          version: input.version,
+        }),
+      )
       .setLabel("Prev")
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(input.page === 0),
     new ButtonBuilder()
-      .setCustomId(setQuestionActionId({ kind: "question-next", requestID: input.request.id }))
+      .setCustomId(
+        setQuestionActionId({
+          kind: "question-next",
+          requestID: input.request.id,
+          version: input.version,
+        }),
+      )
       .setLabel("Next")
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(input.page === input.request.questions.length - 1),
@@ -376,6 +404,7 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
         setQuestionActionId({
           kind: "clear",
           requestID: input.request.id,
+          version: input.version,
           questionIndex: input.page,
         }),
       )
@@ -391,6 +420,7 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
           setQuestionActionId({
             kind: "custom",
             requestID: input.request.id,
+            version: input.version,
             questionIndex: input.page,
           }),
         )
@@ -409,6 +439,7 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
             setQuestionActionId({
               kind: "option-prev",
               requestID: input.request.id,
+              version: input.version,
               questionIndex: input.page,
             }),
           )
@@ -420,6 +451,7 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
             setQuestionActionId({
               kind: "option-next",
               requestID: input.request.id,
+              version: input.version,
               questionIndex: input.page,
             }),
           )
@@ -433,14 +465,26 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
   container.addActionRowComponents((row) =>
     row.addComponents(
       new ButtonBuilder()
-        .setCustomId(setQuestionActionId({ kind: "submit", requestID: input.request.id }))
+        .setCustomId(
+          setQuestionActionId({
+            kind: "submit",
+            requestID: input.request.id,
+            version: input.version,
+          }),
+        )
         .setLabel(
           `Submit ${answerCount(input.request, input.drafts)}/${input.request.questions.length}`,
         )
         .setStyle(ButtonStyle.Success)
         .setDisabled(!allAnswered),
       new ButtonBuilder()
-        .setCustomId(setQuestionActionId({ kind: "reject", requestID: input.request.id }))
+        .setCustomId(
+          setQuestionActionId({
+            kind: "reject",
+            requestID: input.request.id,
+            version: input.version,
+          }),
+        )
         .setLabel("Reject")
         .setStyle(ButtonStyle.Danger),
     ),
@@ -517,6 +561,7 @@ export const clearQuestionDraft = (): QuestionDraft => emptyQuestionDraft();
 
 export const buildQuestionModal = (input: {
   requestID: string;
+  version: number;
   questionIndex: number;
   question: QuestionInfo;
   draft: QuestionDraft;
@@ -526,6 +571,7 @@ export const buildQuestionModal = (input: {
       setQuestionActionId({
         kind: "modal",
         requestID: input.requestID,
+        version: input.version,
         questionIndex: input.questionIndex,
       }),
     )

@@ -34,6 +34,8 @@ type PendingQuestionBatch = {
   request: QuestionRequest;
   session: ChannelSession;
   ownerId: string;
+  version: number;
+  lastModifiedBy: string | null;
   message: Message | null;
   page: number;
   optionPages: number[];
@@ -87,6 +89,7 @@ type QuestionRuntimeDeps = {
 
 const questionBatchView = (batch: PendingQuestionBatch) => ({
   request: batch.request,
+  version: batch.version,
   page: batch.page,
   optionPages: batch.optionPages,
   drafts: batch.drafts,
@@ -97,6 +100,11 @@ const questionBatchView = (batch: PendingQuestionBatch) => ({
 export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<QuestionRuntime> =>
   Effect.gen(function* () {
     const batchesRef = yield* Ref.make(new Map<string, PendingQuestionBatch>());
+
+    type PersistQuestionBatchResult =
+      | { type: "updated"; batch: PendingQuestionBatch }
+      | { type: "missing" }
+      | { type: "conflict"; batch: PendingQuestionBatch };
 
     const getQuestionBatch = (requestId: string) =>
       Ref.get(batchesRef).pipe(Effect.map((batches) => batches.get(requestId) ?? null));
@@ -128,6 +136,38 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
             batches.delete(requestId);
           }
           return [nextBatch, batches];
+        },
+      );
+
+    const tryPersistQuestionBatch = (
+      requestId: string,
+      expectedVersion: number,
+      actorId: string,
+      update: (batch: PendingQuestionBatch) => PendingQuestionBatch,
+    ) =>
+      Ref.modify(
+        batchesRef,
+        (current): readonly [PersistQuestionBatchResult, Map<string, PendingQuestionBatch>] => {
+          const existing = current.get(requestId);
+          if (!existing) {
+            return [{ type: "missing" }, current];
+          }
+          if (existing.version !== expectedVersion) {
+            return [{ type: "conflict", batch: existing }, current];
+          }
+
+          const updated = update(existing);
+          const nextBatch =
+            updated === existing
+              ? existing
+              : {
+                  ...updated,
+                  version: existing.version + 1,
+                  lastModifiedBy: actorId,
+                };
+          const batches = new Map(current);
+          batches.set(requestId, nextBatch);
+          return [{ type: "updated", batch: nextBatch }, batches];
         },
       );
 
@@ -219,6 +259,14 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
       );
     };
 
+    const replyToQuestionConflict = (interaction: Interaction, batch: PendingQuestionBatch) =>
+      replyToQuestionInteraction(
+        interaction,
+        batch.lastModifiedBy && batch.lastModifiedBy !== interaction.user.id
+          ? "Another user updated this question prompt before your action was applied. Review the latest card and try again."
+          : "This question prompt changed before your action was applied. Review the latest card and try again.",
+      );
+
     const handleQuestionAsked = (
       session: ChannelSession,
       activeRun: ActiveRun,
@@ -234,6 +282,8 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
           request,
           session,
           ownerId: activeRun.discordMessage.author.id,
+          version: 0,
+          lastModifiedBy: null,
           message: null,
           page: 0,
           optionPages: request.questions.map(() => 0),
@@ -333,11 +383,6 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
         yield* syncTypingForSession(batch.session.opencode.sessionId);
       });
 
-    const persistQuestionBatch = (
-      requestId: string,
-      update: (batch: PendingQuestionBatch) => PendingQuestionBatch | null,
-    ) => updateQuestionBatch(requestId, update);
-
     const updateInteraction = (interaction: Interaction, batch: PendingQuestionBatch) => {
       if (!interaction.isButton()) {
         return Effect.void;
@@ -348,12 +393,14 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
     };
 
     const questionSubmissionRuntime = {
-      persistBatch: persistQuestionBatch,
+      tryPersistBatch: tryPersistQuestionBatch,
+      restoreBatch: updateQuestionBatch,
       updateInteraction,
       editBatch: editQuestionMessage,
       finalizeBatch: finalizeQuestionBatch,
       replyExpired: (interaction: Interaction) =>
         replyToQuestionInteraction(interaction, "This question prompt has expired."),
+      replyConflict: replyToQuestionConflict,
       followUpFailure: (interaction: Interaction, message: string) => {
         if (!interaction.isButton()) {
           return Effect.void;
@@ -371,24 +418,34 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
     const applyQuestionUpdate = (
       interaction: Interaction,
       requestId: string,
-      update: (batch: PendingQuestionBatch) => PendingQuestionBatch | null,
+      expectedVersion: number,
+      update: (batch: PendingQuestionBatch) => PendingQuestionBatch,
     ) =>
       Effect.gen(function* () {
         if (!interaction.isButton() && !interaction.isStringSelectMenu()) {
           return false;
         }
 
-        const batch = yield* persistQuestionBatch(requestId, update);
-        if (!batch) {
+        const persisted = yield* tryPersistQuestionBatch(
+          requestId,
+          expectedVersion,
+          interaction.user.id,
+          update,
+        );
+        if (persisted.type === "missing") {
           yield* replyToQuestionInteraction(
             interaction,
             "This question prompt is no longer active.",
           );
           return true;
         }
+        if (persisted.type === "conflict") {
+          yield* replyToQuestionConflict(interaction, persisted.batch);
+          return true;
+        }
 
         yield* Effect.promise(() =>
-          interaction.update(createQuestionMessageEdit(questionBatchView(batch))),
+          interaction.update(createQuestionMessageEdit(questionBatchView(persisted.batch))),
         );
         return true;
       });
@@ -439,89 +496,124 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
           return true;
         }
 
+        if (batch.version !== action.version) {
+          yield* replyToQuestionConflict(interaction, batch);
+          return true;
+        }
+
         switch (action.kind) {
           case "question-prev":
-            return yield* applyQuestionUpdate(interaction, action.requestID, (current) => ({
-              ...current,
-              page: Math.max(0, current.page - 1),
-            }));
+            return yield* applyQuestionUpdate(
+              interaction,
+              action.requestID,
+              action.version,
+              (current) => ({
+                ...current,
+                page: Math.max(0, current.page - 1),
+              }),
+            );
           case "question-next":
-            return yield* applyQuestionUpdate(interaction, action.requestID, (current) => ({
-              ...current,
-              page: Math.min(current.request.questions.length - 1, current.page + 1),
-            }));
+            return yield* applyQuestionUpdate(
+              interaction,
+              action.requestID,
+              action.version,
+              (current) => ({
+                ...current,
+                page: Math.min(current.request.questions.length - 1, current.page + 1),
+              }),
+            );
           case "option-prev":
-            return yield* applyQuestionUpdate(interaction, action.requestID, (current) => {
-              const optionPages = [...current.optionPages];
-              optionPages[action.questionIndex] = Math.max(
-                0,
-                (optionPages[action.questionIndex] ?? 0) - 1,
-              );
-              return {
-                ...current,
-                page: action.questionIndex,
-                optionPages,
-              };
-            });
+            return yield* applyQuestionUpdate(
+              interaction,
+              action.requestID,
+              action.version,
+              (current) => {
+                const optionPages = [...current.optionPages];
+                optionPages[action.questionIndex] = Math.max(
+                  0,
+                  (optionPages[action.questionIndex] ?? 0) - 1,
+                );
+                return {
+                  ...current,
+                  page: action.questionIndex,
+                  optionPages,
+                };
+              },
+            );
           case "option-next":
-            return yield* applyQuestionUpdate(interaction, action.requestID, (current) => {
-              const question = current.request.questions[action.questionIndex];
-              if (!question) {
-                return current;
-              }
-              const maxOptionPage = Math.max(0, questionOptionPageCount(question) - 1);
-              const optionPages = [...current.optionPages];
-              optionPages[action.questionIndex] = Math.min(
-                maxOptionPage,
-                (optionPages[action.questionIndex] ?? 0) + 1,
-              );
-              return {
-                ...current,
-                page: action.questionIndex,
-                optionPages,
-              };
-            });
+            return yield* applyQuestionUpdate(
+              interaction,
+              action.requestID,
+              action.version,
+              (current) => {
+                const question = current.request.questions[action.questionIndex];
+                if (!question) {
+                  return current;
+                }
+                const maxOptionPage = Math.max(0, questionOptionPageCount(question) - 1);
+                const optionPages = [...current.optionPages];
+                optionPages[action.questionIndex] = Math.min(
+                  maxOptionPage,
+                  (optionPages[action.questionIndex] ?? 0) + 1,
+                );
+                return {
+                  ...current,
+                  page: action.questionIndex,
+                  optionPages,
+                };
+              },
+            );
           case "clear":
-            return yield* applyQuestionUpdate(interaction, action.requestID, (current) => {
-              const drafts = [...current.drafts];
-              drafts[action.questionIndex] = clearQuestionDraft();
-              return {
-                ...current,
-                page: action.questionIndex,
-                drafts,
-              };
-            });
+            return yield* applyQuestionUpdate(
+              interaction,
+              action.requestID,
+              action.version,
+              (current) => {
+                const drafts = [...current.drafts];
+                drafts[action.questionIndex] = clearQuestionDraft();
+                return {
+                  ...current,
+                  page: action.questionIndex,
+                  drafts,
+                };
+              },
+            );
           case "select":
             if (!interaction.isStringSelectMenu()) {
               return false;
             }
 
-            return yield* applyQuestionUpdate(interaction, action.requestID, (current) => {
-              const question = current.request.questions[action.questionIndex];
-              if (!question) {
-                return current;
-              }
+            return yield* applyQuestionUpdate(
+              interaction,
+              action.requestID,
+              action.version,
+              (current) => {
+                const question = current.request.questions[action.questionIndex];
+                if (!question) {
+                  return current;
+                }
 
-              const page = current.optionPages[action.questionIndex] ?? 0;
-              const visibleOptions = question.options
-                .slice(
-                  page * QUESTION_OPTIONS_PER_PAGE,
-                  page * QUESTION_OPTIONS_PER_PAGE + QUESTION_OPTIONS_PER_PAGE,
-                )
-                .map((option) => option.label);
-              const drafts = [...current.drafts];
-              drafts[action.questionIndex] = setQuestionOptionSelection({
-                question,
-                draft: currentQuestionDraft(current, action.questionIndex),
-                visibleOptions,
-                selectedOptions: interaction.values,
-              });
-              return {
-                ...current,
-                page: action.questionIndex,
-                drafts,
-              };
-            });
+                const page = current.optionPages[action.questionIndex] ?? 0;
+                const visibleOptions = question.options
+                  .slice(
+                    page * QUESTION_OPTIONS_PER_PAGE,
+                    page * QUESTION_OPTIONS_PER_PAGE + QUESTION_OPTIONS_PER_PAGE,
+                  )
+                  .map((option) => option.label);
+                const drafts = [...current.drafts];
+                drafts[action.questionIndex] = setQuestionOptionSelection({
+                  question,
+                  draft: currentQuestionDraft(current, action.questionIndex),
+                  visibleOptions,
+                  selectedOptions: interaction.values,
+                });
+                return {
+                  ...current,
+                  page: action.questionIndex,
+                  drafts,
+                };
+              },
+            );
           case "custom":
             if (!interaction.isButton()) {
               return false;
@@ -541,6 +633,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
                 interaction.showModal(
                   buildQuestionModal({
                     requestID: action.requestID,
+                    version: action.version,
                     questionIndex: action.questionIndex,
                     question,
                     draft: currentQuestionDraft(batch, action.questionIndex),
@@ -572,30 +665,39 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
                 return true;
               }
 
-              const updated = yield* persistQuestionBatch(action.requestID, (current) => {
-                const drafts = [...current.drafts];
-                drafts[action.questionIndex] = setQuestionCustomAnswer(
-                  question,
-                  currentQuestionDraft(current, action.questionIndex),
-                  customAnswer,
-                );
-                return {
-                  ...current,
-                  page: action.questionIndex,
-                  drafts,
-                };
-              });
-              if (!updated) {
+              const updated = yield* tryPersistQuestionBatch(
+                action.requestID,
+                action.version,
+                interaction.user.id,
+                (current) => {
+                  const drafts = [...current.drafts];
+                  drafts[action.questionIndex] = setQuestionCustomAnswer(
+                    question,
+                    currentQuestionDraft(current, action.questionIndex),
+                    customAnswer,
+                  );
+                  return {
+                    ...current,
+                    page: action.questionIndex,
+                    drafts,
+                  };
+                },
+              );
+              if (updated.type === "missing") {
                 yield* replyToQuestionInteraction(interaction, "This question prompt has expired.");
                 return true;
               }
+              if (updated.type === "conflict") {
+                yield* replyToQuestionConflict(interaction, updated.batch);
+                return true;
+              }
 
-              yield* editQuestionMessage(updated).pipe(
+              yield* editQuestionMessage(updated.batch).pipe(
                 Effect.catchAll((error) =>
                   deps.logger.warn("failed to edit question batch after modal submit", {
-                    channelId: updated.session.channelId,
-                    sessionId: updated.session.opencode.sessionId,
-                    requestId: updated.request.id,
+                    channelId: updated.batch.session.channelId,
+                    sessionId: updated.batch.session.opencode.sessionId,
+                    requestId: updated.batch.request.id,
                     error: deps.formatError(error),
                   }),
                 ),
@@ -611,6 +713,8 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
             return yield* submitQuestionBatch(questionSubmissionRuntime)({
               interaction,
               requestId: action.requestID,
+              expectedVersion: action.version,
+              actorId: interaction.user.id,
               answers: buildQuestionAnswers(batch.request, batch.drafts),
             });
           case "reject":
@@ -621,6 +725,8 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
             return yield* rejectQuestionBatch(questionSubmissionRuntime)({
               interaction,
               requestId: action.requestID,
+              expectedVersion: action.version,
+              actorId: interaction.user.id,
             });
         }
       });

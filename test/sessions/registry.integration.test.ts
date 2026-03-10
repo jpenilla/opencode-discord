@@ -440,7 +440,7 @@ const makeHarness = async (options: {
     const interactionEdits = Ref.unsafeMake<unknown[]>([]);
 
     const interaction = unsafeStub<Interaction & { replied: boolean; deferred: boolean }>({
-      customId: "ocq:req-1:submit",
+      customId: "ocq:req-1:0:submit",
       user: { id: input?.userId ?? "intruder" },
       message: { id: input?.messageId ?? "reply-message-1" },
       replied: false,
