@@ -19,6 +19,7 @@ import {
   sessionHomeDir,
 } from "@/sandbox/session-paths.ts";
 import { ChannelSessions } from "@/sessions/registry.ts";
+import { classifyToolBridgeFailure } from "@/tools/bridge-error.ts";
 import { getRunMessageById, resolveReactionTargetMessage } from "@/tools/run-message.ts";
 import { Logger } from "@/util/logging.ts";
 
@@ -134,6 +135,8 @@ export const ToolBridgeLive = Layer.scoped(
     yield* Effect.promise(() => rm(config.toolBridgeSocketPath, { force: true }));
 
     const server = createServer(async (request, response) => {
+      const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+      let operation = "tool bridge request";
       try {
         if (
           request.headers["x-opencode-discord-token"] !== Redacted.value(config.toolBridgeToken)
@@ -163,9 +166,8 @@ export const ToolBridgeLive = Layer.scoped(
           return;
         }
 
-        const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
-
         if (request.method === "POST" && pathname === "/tool/send-file") {
+          operation = "file upload";
           if (!payload.path) {
             sendJson(response, { error: "missing path" }, 400);
             return;
@@ -196,6 +198,7 @@ export const ToolBridgeLive = Layer.scoped(
         }
 
         if (request.method === "POST" && pathname === "/tool/send-image") {
+          operation = "image upload";
           if (!payload.path) {
             sendJson(response, { error: "missing path" }, 400);
             return;
@@ -242,6 +245,7 @@ export const ToolBridgeLive = Layer.scoped(
         }
 
         if (request.method === "POST" && pathname === "/tool/send-sticker") {
+          operation = "sticker send";
           if (!payload.stickerID) {
             sendJson(response, { error: "missing stickerID" }, 400);
             return;
@@ -274,6 +278,7 @@ export const ToolBridgeLive = Layer.scoped(
         }
 
         if (request.method === "POST" && pathname === "/tool/react") {
+          operation = "reaction";
           if (!payload.messageId) {
             sendJson(response, { error: "missing messageId" }, 400);
             return;
@@ -307,6 +312,7 @@ export const ToolBridgeLive = Layer.scoped(
         }
 
         if (request.method === "POST" && pathname === "/tool/download-attachments") {
+          operation = "attachment download";
           if (!payload.messageId) {
             sendJson(response, { error: "missing messageId" }, 400);
             return;
@@ -387,12 +393,24 @@ export const ToolBridgeLive = Layer.scoped(
 
         sendJson(response, { error: "not found" }, 404);
       } catch (error) {
+        const failure = classifyToolBridgeFailure(operation, error);
         await Effect.runPromise(
           logger.error("tool bridge request failed", {
-            error: String(error),
+            pathname,
+            operation,
+            kind: failure.kind,
+            error: failure.error,
+            cause: String(error),
           }),
         );
-        sendJson(response, { error: "internal error" }, 500);
+        sendJson(
+          response,
+          {
+            error: failure.error,
+            kind: failure.kind,
+          },
+          failure.status,
+        );
       }
     });
 
