@@ -1,3 +1,4 @@
+import { Redacted } from "effect"
 import { spawn } from "node:child_process"
 import { existsSync, realpathSync } from "node:fs"
 import { cp, lstat, mkdir, mkdtemp, readdir, realpath, rm, symlink } from "node:fs/promises"
@@ -428,7 +429,7 @@ const baseServerEnvironment = (
   XDG_STATE_HOME: xdg.state,
   XDG_CACHE_HOME: xdg.cache,
   OPENCODE_DISCORD_BRIDGE_SOCKET: bridgeSocketPath,
-  OPENCODE_DISCORD_BRIDGE_TOKEN: input.config.toolBridgeToken,
+  OPENCODE_DISCORD_BRIDGE_TOKEN: Redacted.value(input.config.toolBridgeToken),
   ...(input.systemPromptAppend?.trim() ? { OPENCODE_DISCORD_SYSTEM_APPEND: input.systemPromptAppend } : {}),
   OPENCODE_CONFIG_DIR: input.configDir,
   TMPDIR: "/tmp",

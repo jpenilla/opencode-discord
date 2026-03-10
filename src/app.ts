@@ -1,5 +1,5 @@
 import { ActivityType, ChannelType, Client, Events, GatewayIntentBits, MessageFlags, type Guild } from "discord.js"
-import { Context, Effect, Layer, Runtime } from "effect"
+import { Context, Effect, Layer, Redacted, Runtime } from "effect"
 
 import { AppConfig } from "@/config.ts"
 import { syncGuildCommands } from "@/discord/commands.ts"
@@ -149,7 +149,7 @@ export const DiscordBotLive = Layer.scoped(
       )
     })
 
-    yield* Effect.promise(() => client.login(config.discordToken))
+    yield* Effect.promise(() => client.login(Redacted.value(config.discordToken)))
 
     yield* Effect.addFinalizer(() =>
       Effect.promise(async () => {

@@ -1,76 +1,81 @@
-import { Context, Effect, Layer } from "effect"
+import {
+  Config,
+  ConfigProvider,
+  Context,
+  Effect,
+  Layer,
+  Redacted,
+} from "effect";
 
 export type AppConfigShape = {
-  discordToken: string
-  triggerPhrase: string
-  sessionInstructions: string
-  stateDir: string
-  sessionIdleTimeoutMs: number
-  toolBridgeSocketPath: string
-  toolBridgeToken: string
-  sandboxBackend: "auto" | "unsafe-dev" | "bwrap"
-  opencodeBin: string
-  bwrapBin: string
-  sandboxReadOnlyPaths: ReadonlyArray<string>
-  sandboxEnvPassthrough: ReadonlyArray<string>
-}
+  discordToken: Redacted.Redacted<string>;
+  triggerPhrase: string;
+  sessionInstructions: string;
+  stateDir: string;
+  sessionIdleTimeoutMs: number;
+  toolBridgeSocketPath: string;
+  toolBridgeToken: Redacted.Redacted<string>;
+  sandboxBackend: "auto" | "unsafe-dev" | "bwrap";
+  opencodeBin: string;
+  bwrapBin: string;
+  sandboxReadOnlyPaths: ReadonlyArray<string>;
+  sandboxEnvPassthrough: ReadonlyArray<string>;
+};
 
-export class AppConfig extends Context.Tag("AppConfig")<AppConfig, AppConfigShape>() {}
+export class AppConfig extends Context.Tag("AppConfig")<
+  AppConfig,
+  AppConfigShape
+>() {}
 
-const parseSandboxBackend = (value: string | undefined): AppConfigShape["sandboxBackend"] => {
-  switch (value?.trim().toLowerCase() ?? "auto") {
-    case "auto":
-      return "auto"
-    case "unsafe-dev":
-      return "unsafe-dev"
-    case "bwrap":
-      return "bwrap"
-    default:
-      throw new Error(`Invalid SANDBOX_BACKEND: ${value}`)
-  }
-}
+const defaultToolBridgeSocketPath = () =>
+  `/tmp/opencode-discord-${process.pid}-${crypto.randomUUID().slice(0, 8)}/bridge.sock`;
 
-const parsePathList = (value: string | undefined) =>
-  (value ?? "")
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0)
+const positiveInteger = (name: string, fallback: number) =>
+  Config.withDefault(
+    Config.validate(Config.integer(name), {
+      message: `${name} must be a positive integer`,
+      validation: (value) => value > 0,
+    }),
+    fallback,
+  );
 
-const parsePositiveInteger = (value: string | undefined, fallback: number, name: string) => {
-  if (!value) {
-    return fallback
-  }
+const stringList = (name: string) =>
+  Config.withDefault(Config.array(Config.string(), name), [] as Array<string>);
 
-  const parsed = Number.parseInt(value, 10)
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`Invalid ${name}: ${value}`)
-  }
-  return parsed
-}
+const AppConfigSource: Config.Config<AppConfigShape> = Config.all({
+  discordToken: Config.redacted(Config.nonEmptyString("discordToken")),
+  triggerPhrase: Config.withDefault(
+    Config.string("triggerPhrase"),
+    "hey opencode",
+  ),
+  sessionInstructions: Config.withDefault(
+    Config.string("sessionInstructions"),
+    "",
+  ),
+  stateDir: Config.withDefault(Config.string("stateDir"), "./storage"),
+  sessionIdleTimeoutMs: positiveInteger(
+    "sessionIdleTimeoutMs",
+    30 * 60 * 1_000,
+  ),
+  toolBridgeSocketPath: Config.orElse(
+    Config.string("discordToolBridgeSocket"),
+    () => Config.sync(defaultToolBridgeSocketPath),
+  ),
+  toolBridgeToken: Config.redacted(Config.sync(() => crypto.randomUUID())),
+  sandboxBackend: Config.withDefault(
+    Config.literal("auto", "unsafe-dev", "bwrap")("sandboxBackend"),
+    "auto",
+  ),
+  opencodeBin: Config.withDefault(Config.string("opencodeBin"), "opencode"),
+  bwrapBin: Config.withDefault(Config.string("bwrapBin"), "bwrap"),
+  sandboxReadOnlyPaths: stringList("sandboxReadOnlyPaths"),
+  sandboxEnvPassthrough: stringList("sandboxEnvPassthrough"),
+});
 
 export const AppConfigLive = Layer.effect(
   AppConfig,
-  Effect.sync(() => {
-    const discordToken = Bun.env.DISCORD_TOKEN
-    if (!discordToken) {
-      throw new Error("Missing DISCORD_TOKEN")
-    }
-    const toolBridgeSocketPath = Bun.env.DISCORD_TOOL_BRIDGE_SOCKET
-      ?? `/tmp/opencode-discord-${process.pid}-${crypto.randomUUID().slice(0, 8)}/bridge.sock`
-
-    return {
-      discordToken,
-      triggerPhrase: Bun.env.TRIGGER_PHRASE ?? "hey opencode",
-      sessionInstructions: Bun.env.SESSION_INSTRUCTIONS ?? "",
-      stateDir: Bun.env.STATE_DIR ?? "./storage",
-      sessionIdleTimeoutMs: parsePositiveInteger(Bun.env.SESSION_IDLE_TIMEOUT_MS, 30 * 60 * 1_000, "SESSION_IDLE_TIMEOUT_MS"),
-      toolBridgeSocketPath,
-      toolBridgeToken: crypto.randomUUID(),
-      sandboxBackend: parseSandboxBackend(Bun.env.SANDBOX_BACKEND),
-      opencodeBin: Bun.env.OPENCODE_BIN ?? "opencode",
-      bwrapBin: Bun.env.BWRAP_BIN ?? "bwrap",
-      sandboxReadOnlyPaths: parsePathList(Bun.env.SANDBOX_READ_ONLY_PATHS),
-      sandboxEnvPassthrough: parsePathList(Bun.env.SANDBOX_ENV_PASSTHROUGH),
-    } satisfies AppConfigShape
-  }),
-)
+  Effect.withConfigProvider(
+    AppConfigSource,
+    ConfigProvider.constantCase(ConfigProvider.fromEnv()),
+  ),
+);

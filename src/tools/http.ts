@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { basename, dirname, isAbsolute, resolve } from "node:path"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 
-import { Context, Effect, Layer } from "effect"
+import { Context, Effect, Layer, Redacted } from "effect"
 import type { Message as DiscordMessage } from "discord.js"
 
 import { AppConfig } from "@/config.ts"
@@ -124,7 +124,7 @@ export const ToolBridgeLive = Layer.scoped(
 
     const server = createServer(async (request, response) => {
       try {
-        if (request.headers["x-opencode-discord-token"] !== config.toolBridgeToken) {
+        if (request.headers["x-opencode-discord-token"] !== Redacted.value(config.toolBridgeToken)) {
           sendJson(response, { error: "unauthorized" }, 401)
           return
         }

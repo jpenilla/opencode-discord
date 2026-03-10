@@ -3,7 +3,7 @@ import { rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ChannelType, type Interaction, type Message, type MessageCreateOptions, type MessageEditOptions, type SendableChannels } from "discord.js"
-import { Deferred, Effect, Layer, Queue, Ref } from "effect"
+import { Deferred, Effect, Layer, Queue, Redacted, Ref } from "effect"
 
 import { AppConfig, type AppConfigShape } from "@/config.ts"
 import { buildOpencodePrompt, buildQueuedFollowUpPrompt, promptMessageContext } from "@/discord/messages.ts"
@@ -18,13 +18,13 @@ import { unsafeEffect, unsafeStub } from "../support/stub.ts"
 const TEST_STATE_DIR = join(tmpdir(), `.opencode-discord-test-storage-${process.pid}`)
 
 const makeConfig = (): AppConfigShape => ({
-  discordToken: "discord-token",
+  discordToken: Redacted.make("discord-token"),
   triggerPhrase: "hey opencode",
   sessionInstructions: "",
   stateDir: TEST_STATE_DIR,
   sessionIdleTimeoutMs: 30 * 60 * 1_000,
   toolBridgeSocketPath: "/tmp/bridge.sock",
-  toolBridgeToken: "bridge-token",
+  toolBridgeToken: Redacted.make("bridge-token"),
   sandboxBackend: "bwrap",
   opencodeBin: "opencode",
   bwrapBin: "bwrap",
