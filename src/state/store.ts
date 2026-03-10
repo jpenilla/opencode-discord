@@ -4,6 +4,7 @@ import { Database } from "bun:sqlite";
 import { Context, Effect, Layer } from "effect";
 
 import { AppConfig } from "@/config.ts";
+import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import { resolveStatePaths } from "@/state/paths.ts";
 
 export type PersistedChannelSession = {
@@ -20,6 +21,8 @@ export type SessionStoreShape = {
   upsertSession: (session: PersistedChannelSession) => Effect.Effect<void>;
   touchSession: (channelId: string, lastActivityAt: number) => Effect.Effect<void>;
   deleteSession: (channelId: string) => Effect.Effect<void>;
+  getChannelSettings: (channelId: string) => Effect.Effect<PersistedChannelSettings | null>;
+  upsertChannelSettings: (settings: PersistedChannelSettings) => Effect.Effect<void>;
 };
 
 export class SessionStore extends Context.Tag("SessionStore")<SessionStore, SessionStoreShape>() {}
@@ -31,6 +34,12 @@ type PersistedChannelSessionRow = {
   system_prompt_append: string | null;
   created_at: number;
   last_activity_at: number;
+};
+
+type PersistedChannelSettingsRow = {
+  channel_id: string;
+  show_thinking: 0 | 1 | null;
+  show_compaction_summaries: 0 | 1 | null;
 };
 
 const bootstrapSchema = (db: Database) => {
@@ -51,6 +60,12 @@ const bootstrapSchema = (db: Database) => {
 
     CREATE INDEX IF NOT EXISTS idx_channel_sessions_last_activity_at
       ON channel_sessions (last_activity_at);
+
+    CREATE TABLE IF NOT EXISTS channel_settings (
+      channel_id TEXT PRIMARY KEY NOT NULL,
+      show_thinking INTEGER,
+      show_compaction_summaries INTEGER
+    );
   `);
 };
 
@@ -61,6 +76,13 @@ const fromRow = (row: PersistedChannelSessionRow): PersistedChannelSession => ({
   systemPromptAppend: row.system_prompt_append ?? undefined,
   createdAt: row.created_at,
   lastActivityAt: row.last_activity_at,
+});
+
+const fromChannelSettingsRow = (row: PersistedChannelSettingsRow): PersistedChannelSettings => ({
+  channelId: row.channel_id,
+  showThinking: row.show_thinking === null ? undefined : row.show_thinking === 1,
+  showCompactionSummaries:
+    row.show_compaction_summaries === null ? undefined : row.show_compaction_summaries === 1,
 });
 
 export const SessionStoreLive = Layer.scoped(
@@ -124,6 +146,26 @@ export const SessionStoreLive = Layer.scoped(
       WHERE channel_id = ?1
     `);
 
+    const getChannelSettingsStatement = db.query<PersistedChannelSettingsRow, [string]>(`
+      SELECT
+        channel_id,
+        show_thinking,
+        show_compaction_summaries
+      FROM channel_settings
+      WHERE channel_id = ?1
+    `);
+
+    const upsertChannelSettingsStatement = db.query(`
+      INSERT INTO channel_settings (
+        channel_id,
+        show_thinking,
+        show_compaction_summaries
+      ) VALUES (?1, ?2, ?3)
+      ON CONFLICT(channel_id) DO UPDATE SET
+        show_thinking = excluded.show_thinking,
+        show_compaction_summaries = excluded.show_compaction_summaries
+    `);
+
     return {
       getSession: (channelId) =>
         Effect.sync(() => {
@@ -148,6 +190,21 @@ export const SessionStoreLive = Layer.scoped(
       deleteSession: (channelId) =>
         Effect.sync(() => {
           deleteSessionStatement.run(channelId);
+        }),
+      getChannelSettings: (channelId) =>
+        Effect.sync(() => {
+          const row = getChannelSettingsStatement.get(channelId);
+          return row ? fromChannelSettingsRow(row) : null;
+        }),
+      upsertChannelSettings: (settings) =>
+        Effect.sync(() => {
+          upsertChannelSettingsStatement.run(
+            settings.channelId,
+            settings.showThinking === undefined ? null : Number(settings.showThinking),
+            settings.showCompactionSummaries === undefined
+              ? null
+              : Number(settings.showCompactionSummaries),
+          );
         }),
     } satisfies SessionStoreShape;
   }),

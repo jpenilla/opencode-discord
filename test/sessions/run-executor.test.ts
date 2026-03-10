@@ -33,6 +33,10 @@ const makeSession = (): ChannelSession =>
     workdir: "/home/opencode/workspace",
     createdAt: Date.now(),
     lastActivityAt: Date.now(),
+    channelSettings: {
+      showThinking: true,
+      showCompactionSummaries: true,
+    },
     queue: {},
     activeRun: null,
   });
@@ -69,6 +73,7 @@ const makeRuntime = async (options?: {
           return options?.promptResult ?? { messageId: "msg-1", transcript: "final transcript" };
         }),
       runProgressWorker: (
+        _session: ChannelSession,
         _message: Message,
         _workdir: string,
         queue: Queue.Queue<RunProgressEvent>,

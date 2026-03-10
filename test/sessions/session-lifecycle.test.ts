@@ -8,6 +8,7 @@ import {
   type SessionLifecycleState,
 } from "@/sessions/session-lifecycle.ts";
 import type { ActiveRun } from "@/sessions/session.ts";
+import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import type { PersistedChannelSession } from "@/state/store.ts";
 import { unsafeStub } from "../support/stub.ts";
 
@@ -73,6 +74,9 @@ const makeHarness = async (options?: {
   const nextSession = await Effect.runPromise(Ref.make(0));
   const persisted = await Effect.runPromise(
     Ref.make<Map<string, PersistedChannelSession>>(new Map()),
+  );
+  const persistedSettings = await Effect.runPromise(
+    Ref.make<Map<string, PersistedChannelSettings>>(new Map()),
   );
 
   const createSessionPaths = (_channelId: string) =>
@@ -140,6 +144,8 @@ const makeHarness = async (options?: {
         next.set(session.channelId, session);
         return next;
       }),
+    getPersistedChannelSettings: (channelId) =>
+      Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(channelId) ?? null)),
     touchPersistedSession: (channelId, lastActivityAt) =>
       Ref.update(persisted, (current) => {
         const next = new Map(current);
@@ -161,6 +167,10 @@ const makeHarness = async (options?: {
     logger,
     sessionInstructions: "",
     triggerPhrase: "hey opencode",
+    channelSettingsDefaults: {
+      showThinking: true,
+      showCompactionSummaries: true,
+    },
     idleTimeoutMs: 30 * 60 * 1_000,
     sessionsRootDir: "/tmp/sessions",
     createSessionPaths,

@@ -6,6 +6,7 @@ import { formatErrorResponse } from "@/discord/formatting.ts";
 import { createCommandRuntime } from "@/sessions/command-runtime.ts";
 import { createPromptState } from "@/sessions/prompt-state.ts";
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
+import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
@@ -14,6 +15,8 @@ const makeHarness = async (options?: {
   sessionHealthy?: boolean;
   interruptResult?: "success" | "failure";
   hasActiveRun?: boolean;
+  hasSession?: boolean;
+  initialChannelSettings?: PersistedChannelSettings | null;
 }) => {
   const replies = await Effect.runPromise(Ref.make<string[]>([]));
   const defers = await Effect.runPromise(Ref.make(0));
@@ -32,10 +35,26 @@ const makeHarness = async (options?: {
   const idleCardRef = await Effect.runPromise(Ref.make<Message | null>(null));
   const idleCompactionActive = await Effect.runPromise(Ref.make(false));
   const idleInterruptRequested = await Effect.runPromise(Ref.make(false));
+  const persistedSettings = await Effect.runPromise(
+    Ref.make<Map<string, PersistedChannelSettings>>(new Map()),
+  );
   const compactStarted = await Effect.runPromise(Deferred.make<void, never>());
   const compactFinish = await Effect.runPromise(Deferred.make<void, never>());
   const compactUpdated = await Effect.runPromise(Deferred.make<void, never>());
   const promptState = await Effect.runPromise(createPromptState());
+  const channelSettingsDefaults = {
+    showThinking: true,
+    showCompactionSummaries: true,
+  } as const;
+
+  if (options?.initialChannelSettings) {
+    await Effect.runPromise(
+      Ref.set(
+        persistedSettings,
+        new Map([[options.initialChannelSettings.channelId, options.initialChannelSettings]]),
+      ),
+    );
+  }
 
   const compactionCard = unsafeStub<Message>({
     id: "compaction-card",
@@ -77,6 +96,13 @@ const makeHarness = async (options?: {
     workdir: "/home/opencode/workspace",
     createdAt: Date.now(),
     lastActivityAt: Date.now(),
+    channelSettings: {
+      showThinking:
+        options?.initialChannelSettings?.showThinking ?? channelSettingsDefaults.showThinking,
+      showCompactionSummaries:
+        options?.initialChannelSettings?.showCompactionSummaries ??
+        channelSettingsDefaults.showCompactionSummaries,
+    },
     progressChannel: null,
     progressMentionContext: null,
     emittedCompactionSummaryMessageIds: new Set<string>(),
@@ -111,7 +137,23 @@ const makeHarness = async (options?: {
   });
 
   const runtime = createCommandRuntime({
-    getSession: (channelId) => Effect.succeed(channelId === session.channelId ? session : null),
+    getSession: (channelId) =>
+      Effect.succeed(
+        (options?.hasSession ?? true) && channelId === session.channelId ? session : null,
+      ),
+    getLiveSession: (channelId) =>
+      Effect.succeed(
+        (options?.hasSession ?? true) && channelId === session.channelId ? session : null,
+      ),
+    getChannelSettings: (channelId) =>
+      Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(channelId) ?? null)),
+    upsertChannelSettings: (settings) =>
+      Ref.update(persistedSettings, (current) => {
+        const next = new Map(current);
+        next.set(settings.channelId, settings);
+        return next;
+      }),
+    channelSettingsDefaults,
     hasIdleCompaction: () =>
       Effect.all([Ref.get(idleCompactionActive), Ref.get(idleCardRef)]).pipe(
         Effect.map(([active, card]) => active || card !== null),
@@ -188,6 +230,7 @@ const makeHarness = async (options?: {
     loggedWarnings,
     typingStopCount,
     idleCardRef,
+    persistedSettings,
     compactStarted,
     compactFinish,
     compactUpdated,
@@ -298,5 +341,47 @@ describe("createCommandRuntime", () => {
     expect(await getRef(harness.edits)).toEqual([
       "Requested interruption of the active OpenCode compaction.",
     ]);
+  });
+
+  test("toggles thinking visibility for a channel without requiring a session", async () => {
+    const harness = await makeHarness({
+      hasSession: false,
+    });
+    harness.interaction.commandName = "toggle-thinking";
+
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+
+    expect(handled).toBe(true);
+    expect(await getRef(harness.replies)).toEqual([
+      "Thinking messages are now disabled in this channel.",
+    ]);
+    expect(await getRef(harness.persistedSettings)).toEqual(
+      new Map([
+        [
+          "channel-1",
+          {
+            channelId: "channel-1",
+            showThinking: false,
+            showCompactionSummaries: undefined,
+          },
+        ],
+      ]),
+    );
+  });
+
+  test("toggles compaction summary visibility and updates the live session", async () => {
+    const harness = await makeHarness();
+    harness.interaction.commandName = "toggle-compaction-summaries";
+
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+
+    expect(handled).toBe(true);
+    expect(await getRef(harness.replies)).toEqual([
+      "Compaction summaries are now disabled in this channel.",
+    ]);
+    expect(harness.session.channelSettings).toEqual({
+      showThinking: true,
+      showCompactionSummaries: false,
+    });
   });
 });

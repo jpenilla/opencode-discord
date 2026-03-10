@@ -27,6 +27,7 @@ import {
   type SessionHandle,
 } from "@/opencode/service.ts";
 import { ChannelSessions, ChannelSessionsLive } from "@/sessions/registry.ts";
+import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import {
   SessionStore,
   type PersistedChannelSession,
@@ -42,6 +43,8 @@ const makeConfig = (): AppConfigShape => ({
   triggerPhrase: "hey opencode",
   sessionInstructions: "",
   stateDir: TEST_STATE_DIR,
+  showThinkingByDefault: true,
+  showCompactionSummariesByDefault: true,
   sessionIdleTimeoutMs: 30 * 60 * 1_000,
   toolBridgeSocketPath: "/tmp/bridge.sock",
   toolBridgeToken: Redacted.make("bridge-token"),
@@ -293,6 +296,9 @@ const makeHarness = async (options: {
   const persistedSessions = await Effect.runPromise(
     Ref.make<Map<string, PersistedChannelSession>>(new Map()),
   );
+  const persistedSettings = await Effect.runPromise(
+    Ref.make<Map<string, PersistedChannelSettings>>(new Map()),
+  );
 
   const makePostedMessage = (id: string): Message =>
     unsafeStub<Message>({
@@ -387,7 +393,9 @@ const makeHarness = async (options: {
         ),
     });
 
-  const makeCommandInteraction = (commandName: "compact" | "interrupt") => {
+  const makeCommandInteraction = (
+    commandName: "compact" | "interrupt" | "toggle-thinking" | "toggle-compaction-summaries",
+  ) => {
     const interactionReplies = Ref.unsafeMake<unknown[]>([]);
     const interactionEdits = Ref.unsafeMake<unknown[]>([]);
     const interactionDefers = Ref.unsafeMake(0);
@@ -564,6 +572,14 @@ const makeHarness = async (options: {
       Ref.update(persistedSessions, (sessions) => {
         const next = new Map(sessions);
         next.delete(channelId);
+        return next;
+      }),
+    getChannelSettings: (channelId) =>
+      Ref.get(persistedSettings).pipe(Effect.map((settings) => settings.get(channelId) ?? null)),
+    upsertChannelSettings: (settings) =>
+      Ref.update(persistedSettings, (current) => {
+        const next = new Map(current);
+        next.set(settings.channelId, settings);
         return next;
       }),
   };

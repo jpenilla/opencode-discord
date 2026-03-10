@@ -93,6 +93,10 @@ const makeHarness = async (options?: {
     workdir: "/home/opencode/workspace",
     createdAt: Date.now(),
     lastActivityAt: Date.now(),
+    channelSettings: {
+      showThinking: true,
+      showCompactionSummaries: true,
+    },
     progressChannel: null,
     progressMentionContext: null,
     emittedCompactionSummaryMessageIds: new Set<string>(),

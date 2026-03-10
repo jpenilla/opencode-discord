@@ -12,6 +12,11 @@ import {
   type ChannelSession,
   type RunRequest,
 } from "@/sessions/session.ts";
+import {
+  resolveChannelSettings,
+  type ChannelSettings,
+  type PersistedChannelSettings,
+} from "@/state/channel-settings.ts";
 import { sessionRootDir, sessionWorkdirFromRoot } from "@/state/paths.ts";
 import type { PersistedChannelSession } from "@/state/store.ts";
 import type { LoggerShape } from "@/util/logging.ts";
@@ -63,6 +68,9 @@ type SessionLifecycleRuntime<State extends SessionLifecycleState> = {
     channelId: string,
   ) => Effect.Effect<PersistedChannelSession | null, unknown>;
   upsertPersistedSession: (session: PersistedChannelSession) => Effect.Effect<void, unknown>;
+  getPersistedChannelSettings: (
+    channelId: string,
+  ) => Effect.Effect<PersistedChannelSettings | null, unknown>;
   touchPersistedSession: (
     channelId: string,
     lastActivityAt: number,
@@ -73,6 +81,7 @@ type SessionLifecycleRuntime<State extends SessionLifecycleState> = {
   logger: LoggerShape;
   sessionInstructions: string;
   triggerPhrase: string;
+  channelSettingsDefaults: ChannelSettings;
   idleTimeoutMs?: number;
   sessionsRootDir: string;
   createSessionPaths?: (channelId: string) => Effect.Effect<SessionPaths, unknown>;
@@ -100,6 +109,16 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     runtime.createSessionPaths ??
     ((channelId: string) => defaultCreateSessionPaths(runtime.sessionsRootDir, channelId));
   const deleteSessionRoot = runtime.deleteSessionRoot ?? defaultDeleteSessionRoot;
+  const loadChannelSettings = (channelId: string) =>
+    runtime
+      .getPersistedChannelSettings(channelId)
+      .pipe(
+        Effect.map((persisted) =>
+          persisted
+            ? resolveChannelSettings(runtime.channelSettingsDefaults, persisted)
+            : { ...runtime.channelSettingsDefaults },
+        ),
+      );
 
   const getSession = (channelId: string) =>
     Ref.get(runtime.stateRef).pipe(Effect.map((state) => state.sessionsByChannelId.get(channelId)));
@@ -417,6 +436,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     rootDir: string;
     workdir: string;
     systemPromptAppend?: string;
+    channelSettings: ChannelSettings;
     createdAt: number;
     lastActivityAt: number;
     logReason?: string;
@@ -445,6 +465,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
         workdir: input.workdir,
         createdAt: input.createdAt,
         lastActivityAt: input.lastActivityAt,
+        channelSettings: input.channelSettings,
         progressChannel: null,
         progressMentionContext: null,
         emittedCompactionSummaryMessageIds: new Set<string>(),
@@ -481,6 +502,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
         additionalInstructions: runtime.sessionInstructions,
       });
       const { rootDir, workdir } = yield* createSessionPaths(message.channelId);
+      const channelSettings = yield* loadChannelSettings(message.channelId);
       const now = Date.now();
 
       return yield* createSessionAt({
@@ -488,6 +510,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
         rootDir,
         systemPromptAppend,
         workdir,
+        channelSettings,
         createdAt: now,
         lastActivityAt: now,
         removePersistedOnActivationFailure: true,
@@ -502,6 +525,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
   ): Effect.Effect<ChannelSession, unknown> =>
     Effect.gen(function* () {
       const workdir = sessionWorkdirFromRoot(persisted.rootDir);
+      const channelSettings = yield* loadChannelSettings(channelId);
 
       const opencodeSession = yield* runtime.attachOpencodeSession(
         workdir,
@@ -517,6 +541,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
         workdir,
         createdAt: persisted.createdAt,
         lastActivityAt,
+        channelSettings,
         progressChannel: null,
         progressMentionContext: null,
         emittedCompactionSummaryMessageIds: new Set<string>(),
@@ -561,6 +586,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
         rootDir: persisted.rootDir,
         workdir: sessionWorkdirFromRoot(persisted.rootDir),
         systemPromptAppend: persisted.systemPromptAppend,
+        channelSettings: yield* loadChannelSettings(message.channelId),
         createdAt: persisted.createdAt,
         lastActivityAt: now,
         logReason: "attach failed; created replacement session",

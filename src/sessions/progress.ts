@@ -19,7 +19,11 @@ import {
   getSessionStatusUpdated,
   getToolPartUpdated,
 } from "@/opencode/events.ts";
-import type { RunFinalizationReason, RunProgressEvent } from "@/sessions/session.ts";
+import type {
+  ChannelSession,
+  RunFinalizationReason,
+  RunProgressEvent,
+} from "@/sessions/session.ts";
 
 const SKIPPED_TOOL_CARD_NAMES = new Set([
   "send-file",
@@ -86,7 +90,11 @@ const shouldSkipToolUpdate = (
   return false;
 };
 
-const progressUpdateForEvent = (event: RunProgressEvent, state: ProgressState) => {
+const progressUpdateForEvent = (
+  event: RunProgressEvent,
+  state: ProgressState,
+  session: Pick<ChannelSession, "channelSettings">,
+) => {
   switch (event.type) {
     case "run-finalizing":
       return null;
@@ -94,11 +102,14 @@ const progressUpdateForEvent = (event: RunProgressEvent, state: ProgressState) =
       if (state.completedReasoningPartIds.has(event.partId)) {
         return null;
       }
+      state.completedReasoningPartIds.add(event.partId);
+      if (!session.channelSettings.showThinking) {
+        return null;
+      }
       const thinkingText = event.text.trim();
       if (thinkingText.length === 0) {
         return null;
       }
-      state.completedReasoningPartIds.add(event.partId);
       return formatThinkingCompleted(thinkingText);
     }
     case "patch-updated": {
@@ -316,6 +327,7 @@ export const collectProgressEvents = (event: Event): ReadonlyArray<RunProgressEv
 };
 
 export const runProgressWorker = (
+  session: Pick<ChannelSession, "channelSettings">,
   message: Message,
   workdir: string,
   queue: Queue.Queue<RunProgressEvent>,
@@ -330,7 +342,7 @@ export const runProgressWorker = (
 
       for (const event of batch) {
         if (event.type === "run-finalizing") {
-          progressUpdateForEvent(event, state);
+          progressUpdateForEvent(event, state, session);
           if (event.reason) {
             yield* finalizeLiveCards(state, workdir, event.reason);
           }
@@ -348,7 +360,7 @@ export const runProgressWorker = (
           continue;
         }
 
-        const update = progressUpdateForEvent(event, state);
+        const update = progressUpdateForEvent(event, state, session);
         if (!update) {
           continue;
         }

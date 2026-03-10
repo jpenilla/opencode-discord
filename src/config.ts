@@ -5,6 +5,8 @@ export type AppConfigShape = {
   triggerPhrase: string;
   sessionInstructions: string;
   stateDir: string;
+  showThinkingByDefault: boolean;
+  showCompactionSummariesByDefault: boolean;
   sessionIdleTimeoutMs: number;
   toolBridgeSocketPath: string;
   toolBridgeToken: Redacted.Redacted<string>;
@@ -37,6 +39,11 @@ const AppConfigSource: Config.Config<AppConfigShape> = Config.all({
   triggerPhrase: Config.withDefault(Config.string("triggerPhrase"), "hey opencode"),
   sessionInstructions: Config.withDefault(Config.string("sessionInstructions"), ""),
   stateDir: Config.withDefault(Config.string("stateDir"), "./storage"),
+  showThinkingByDefault: Config.withDefault(Config.boolean("showThinkingByDefault"), true),
+  showCompactionSummariesByDefault: Config.withDefault(
+    Config.boolean("showCompactionSummariesByDefault"),
+    true,
+  ),
   sessionIdleTimeoutMs: positiveInteger("sessionIdleTimeoutMs", 30 * 60 * 1_000),
   toolBridgeSocketPath: Config.orElse(Config.string("discordToolBridgeSocket"), () =>
     Config.sync(defaultToolBridgeSocketPath),

@@ -13,6 +13,7 @@ import type { Ref } from "effect/Ref";
 
 import type { TypingLoop } from "@/discord/messages.ts";
 import type { SessionHandle } from "@/opencode/service.ts";
+import type { ChannelSettings } from "@/state/channel-settings.ts";
 import type { PendingPrompt } from "@/sessions/prompt-state.ts";
 
 export type SessionCreateSpec = {
@@ -72,6 +73,7 @@ export type ChannelSession = {
   workdir: string;
   createdAt: number;
   lastActivityAt: number;
+  channelSettings: ChannelSettings;
   progressChannel: SendableChannels | null;
   progressMentionContext: Message | null;
   emittedCompactionSummaryMessageIds: Set<string>;

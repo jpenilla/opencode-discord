@@ -4,7 +4,7 @@ import type { CompactionPart, ToolPart } from "@opencode-ai/sdk/v2";
 import { Deferred, Effect, Fiber, Queue, Ref } from "effect";
 
 import { runProgressWorker } from "@/sessions/progress.ts";
-import type { RunProgressEvent } from "@/sessions/session.ts";
+import type { ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const cardText = (payload: MessageCreateOptions | MessageEditOptions) =>
@@ -13,7 +13,7 @@ const cardText = (payload: MessageCreateOptions | MessageEditOptions) =>
       .components?.[0]?.components?.[0]?.data?.content ?? "",
   );
 
-const makeHarness = async () => {
+const makeHarness = async (showThinking = true) => {
   const sentPayloads = await Effect.runPromise(
     Ref.make<Array<MessageCreateOptions | MessageEditOptions>>([]),
   );
@@ -51,6 +51,12 @@ const makeHarness = async () => {
   });
 
   return {
+    session: unsafeStub<ChannelSession>({
+      channelSettings: {
+        showThinking,
+        showCompactionSummaries: true,
+      },
+    }),
     sourceMessage,
     sentPayloads,
     editedPayloads,
@@ -93,7 +99,12 @@ const runFinalizationScenario = async (reason: "interrupted" | "shutdown") => {
       Effect.gen(function* () {
         const queue = yield* Queue.unbounded<RunProgressEvent>();
         const worker = yield* Effect.fork(
-          runProgressWorker(harness.sourceMessage, "/home/opencode/workspace", queue),
+          runProgressWorker(
+            harness.session,
+            harness.sourceMessage,
+            "/home/opencode/workspace",
+            queue,
+          ),
         );
 
         const ack = yield* Deferred.make<void>();
@@ -133,7 +144,12 @@ describe("runProgressWorker", () => {
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<RunProgressEvent>();
           const worker = yield* Effect.fork(
-            runProgressWorker(harness.sourceMessage, "/home/opencode/workspace", queue),
+            runProgressWorker(
+              harness.session,
+              harness.sourceMessage,
+              "/home/opencode/workspace",
+              queue,
+            ),
           );
 
           const ack = yield* Deferred.make<void>();
@@ -184,7 +200,12 @@ describe("runProgressWorker", () => {
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<RunProgressEvent>();
           const worker = yield* Effect.fork(
-            runProgressWorker(harness.sourceMessage, "/home/opencode/workspace", queue),
+            runProgressWorker(
+              harness.session,
+              harness.sourceMessage,
+              "/home/opencode/workspace",
+              queue,
+            ),
           );
 
           const firstAck = yield* Deferred.make<void>();
@@ -237,5 +258,79 @@ describe("runProgressWorker", () => {
     expect(result.edited.map(cardText)).toContain(
       "**🛑 Compaction stopped**\nOpenCode stopped compacting this session because the bot shut down.",
     );
+  });
+
+  test("sends completed thinking messages when enabled for the channel", async () => {
+    const harness = await makeHarness(true);
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const queue = yield* Queue.unbounded<RunProgressEvent>();
+          const worker = yield* Effect.fork(
+            runProgressWorker(
+              harness.session,
+              harness.sourceMessage,
+              "/home/opencode/workspace",
+              queue,
+            ),
+          );
+
+          const ack = yield* Deferred.make<void>();
+          yield* Queue.offer(queue, {
+            type: "reasoning-completed",
+            partId: "reasoning-1",
+            text: "planning the change",
+          });
+          yield* Queue.offer(queue, {
+            type: "run-finalizing",
+            ack,
+          });
+          yield* Deferred.await(ack);
+          yield* Fiber.interrupt(worker);
+
+          return yield* Ref.get(harness.sentPayloads);
+        }),
+      ),
+    );
+
+    expect(result.map((payload) => payload.content)).toContain("*🧠 planning the change*");
+  });
+
+  test("suppresses completed thinking messages when disabled for the channel", async () => {
+    const harness = await makeHarness(false);
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const queue = yield* Queue.unbounded<RunProgressEvent>();
+          const worker = yield* Effect.fork(
+            runProgressWorker(
+              harness.session,
+              harness.sourceMessage,
+              "/home/opencode/workspace",
+              queue,
+            ),
+          );
+
+          const ack = yield* Deferred.make<void>();
+          yield* Queue.offer(queue, {
+            type: "reasoning-completed",
+            partId: "reasoning-1",
+            text: "planning the change",
+          });
+          yield* Queue.offer(queue, {
+            type: "run-finalizing",
+            ack,
+          });
+          yield* Deferred.await(ack);
+          yield* Fiber.interrupt(worker);
+
+          return yield* Ref.get(harness.sentPayloads);
+        }),
+      ),
+    );
+
+    expect(result.map((payload) => payload.content)).not.toContain("*🧠 planning the change*");
   });
 });

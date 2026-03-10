@@ -26,6 +26,7 @@ type RunExecutorPromptInput = {
 type RunExecutorRuntime = {
   runPrompts: (input: RunExecutorPromptInput) => Effect.Effect<PromptResult, unknown>;
   runProgressWorker: (
+    session: ChannelSession,
     message: Message,
     workdir: string,
     queue: Queue.Queue<RunProgressEvent>,
@@ -94,7 +95,7 @@ export const executeRunBatch =
       const acceptFollowUps = yield* Ref.make(true);
       const responseMessage = initialRequests[0]!.message;
       const progressFiber = yield* runtime
-        .runProgressWorker(responseMessage, session.workdir, progressQueue)
+        .runProgressWorker(session, responseMessage, session.workdir, progressQueue)
         .pipe(Effect.fork);
       const finalizeProgress = (reason?: RunFinalizationReason) =>
         finishProgressWorker(runtime, session, progressQueue, progressFiber, reason);

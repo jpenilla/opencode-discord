@@ -21,7 +21,7 @@ import { unsafeStub } from "../support/stub.ts";
 
 const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
 
-const makeSession = async (withActiveRun: boolean) => {
+const makeSession = async (withActiveRun: boolean, showCompactionSummaries = true) => {
   const progressQueue = await Effect.runPromise(Queue.unbounded<RunProgressEvent>());
   const promptState = await Effect.runPromise(createPromptState());
   const activeRun = withActiveRun
@@ -61,6 +61,10 @@ const makeSession = async (withActiveRun: boolean) => {
     workdir: "/home/opencode/workspace",
     createdAt: Date.now(),
     lastActivityAt: Date.now(),
+    channelSettings: {
+      showThinking: true,
+      showCompactionSummaries,
+    },
     progressChannel: null,
     progressMentionContext: null,
     emittedCompactionSummaryMessageIds: new Set<string>(),
@@ -440,6 +444,52 @@ describe("createEventRuntime", () => {
 
     expect(await getRef(readPromptCalls)).toEqual(["summary-1"]);
     expect(await getRef(sentSummaries)).toEqual(["summary text"]);
+  });
+
+  test("suppresses compaction summaries when the channel has them disabled", async () => {
+    const { session } = await makeSession(false, false);
+    const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]));
+    const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]));
+
+    const runtime = createEventRuntime({
+      getSessionContext: (sessionId) =>
+        Effect.succeed(
+          sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
+        ),
+      handleQuestionEvent: () => Effect.void,
+      finalizeIdleCompactionCard: () => Effect.void,
+      sendCompactionSummary: (_session, text) =>
+        Ref.update(sentSummaries, (current) => [...current, text]),
+      readPromptResult: (_session, messageId) =>
+        Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
+          Effect.as({
+            messageId,
+            transcript: "summary text",
+          }),
+        ),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
+    });
+
+    await Effect.runPromise(
+      runtime.handleEvent(
+        makeAssistantMessageUpdatedEvent({
+          id: "summary-1",
+          parentId: "synthetic-1",
+          summary: true,
+          mode: "compaction",
+          completed: true,
+        }),
+      ),
+    );
+
+    expect(await getRef(readPromptCalls)).toEqual([]);
+    expect(await getRef(sentSummaries)).toEqual([]);
+    expect(session.emittedCompactionSummaryMessageIds.has("summary-1")).toBe(true);
   });
 
   test("keeps waiting for the follow-up assistant after an auto-compaction summary on the original user message", async () => {

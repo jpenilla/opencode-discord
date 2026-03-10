@@ -20,6 +20,7 @@ Current scope:
 - Supported: standard guild text channels.
 - Ignored: DMs, threads, forum posts, announcement channels, and bot-authored messages.
 - Channel session metadata is persisted in SQLite.
+- Channel-level visibility preferences for thinking messages and compaction summaries are persisted in SQLite.
 - Per-channel session homes/workspaces are stored under `./storage` by default.
 - In-flight runs, queued follow-ups, typing state, and question UI are not restored after restart.
 
@@ -82,12 +83,17 @@ The bot syncs these guild commands on startup and when it joins a new guild:
   Compact the current channel session when no run is active.
 - `/interrupt`
   Interrupt the active run in the current channel.
+- `/toggle-thinking`
+  Toggle whether thinking progress messages are shown in the current channel.
+- `/toggle-compaction-summaries`
+  Toggle whether compaction summaries are shown in the current channel.
 
 Command behavior:
 
-- Both commands acknowledge privately to the caller.
+- All commands acknowledge privately to the caller.
 - `/compact` also posts in-channel compaction status.
 - `/interrupt` also posts an in-channel interruption card.
+- The visibility toggle commands persist per Discord channel, not per OpenCode session.
 - Both commands are restricted to standard guild text channels.
 
 ## Discord Tools Exposed To OpenCode
@@ -157,6 +163,10 @@ Main variables:
   Optional extra instructions appended to OpenCode's system prompt for each Discord channel session
 - `STATE_DIR`
   Persistent storage root. Default: `./storage`
+- `SHOW_THINKING_BY_DEFAULT`
+  Whether thinking progress messages are shown by default in channels without an override yet. Default: `true`
+- `SHOW_COMPACTION_SUMMARIES_BY_DEFAULT`
+  Whether compaction summaries are shown by default in channels without an override yet. Default: `true`
 - `SESSION_IDLE_TIMEOUT_MS`
   Idle timeout in milliseconds before an unused per-channel OpenCode worker is closed. Default: `1800000`
 - `SANDBOX_BACKEND`

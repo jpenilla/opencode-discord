@@ -7,6 +7,12 @@ const GUILD_COMMANDS = [
   new SlashCommandBuilder()
     .setName("interrupt")
     .setDescription("Interrupt the active OpenCode run in this channel"),
+  new SlashCommandBuilder()
+    .setName("toggle-thinking")
+    .setDescription("Toggle thinking progress messages in this channel"),
+  new SlashCommandBuilder()
+    .setName("toggle-compaction-summaries")
+    .setDescription("Toggle compaction summaries in this channel"),
 ].map((command) => command.toJSON());
 
 export const syncGuildCommands = async (guild: Guild) => {

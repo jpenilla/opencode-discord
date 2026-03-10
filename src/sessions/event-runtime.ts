@@ -105,25 +105,29 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
       const emitCompactionSummary = (targetSession: ChannelSession, messageId: string) =>
         targetSession.emittedCompactionSummaryMessageIds.has(messageId)
           ? Effect.void
-          : deps.readPromptResult(targetSession.opencode, messageId).pipe(
-              Effect.flatMap((result) => {
-                const text = result.transcript.trim();
-                if (!text) {
-                  return Effect.void;
-                }
-
+          : !targetSession.channelSettings.showCompactionSummaries
+            ? Effect.sync(() => {
                 targetSession.emittedCompactionSummaryMessageIds.add(messageId);
-                return deps.sendCompactionSummary(targetSession, text);
-              }),
-              Effect.catchAll((error) =>
-                deps.logger.warn("failed to load compaction summary transcript", {
-                  channelId: targetSession.channelId,
-                  sessionId,
-                  messageId,
-                  error: deps.formatError(error),
+              })
+            : deps.readPromptResult(targetSession.opencode, messageId).pipe(
+                Effect.flatMap((result) => {
+                  const text = result.transcript.trim();
+                  if (!text) {
+                    return Effect.void;
+                  }
+
+                  targetSession.emittedCompactionSummaryMessageIds.add(messageId);
+                  return deps.sendCompactionSummary(targetSession, text);
                 }),
-              ),
-            );
+                Effect.catchAll((error) =>
+                  deps.logger.warn("failed to load compaction summary transcript", {
+                    channelId: targetSession.channelId,
+                    sessionId,
+                    messageId,
+                    error: deps.formatError(error),
+                  }),
+                ),
+              );
 
       if (
         assistantMessage &&

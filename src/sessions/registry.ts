@@ -29,6 +29,7 @@ import {
   type SessionLifecycleState,
 } from "@/sessions/session-lifecycle.ts";
 import { type ActiveRun, type ChannelSession, type RunRequest } from "@/sessions/session.ts";
+import { defaultChannelSettings } from "@/state/channel-settings.ts";
 import { Logger } from "@/util/logging.ts";
 import { resolveStatePaths } from "@/state/paths.ts";
 import { SessionStore } from "@/state/store.ts";
@@ -73,6 +74,7 @@ export const ChannelSessionsLive = Layer.scoped(
     const stateRef = yield* Ref.make(createSessionRuntimeState());
     const fiberSet = yield* FiberSet.make();
     const statePaths = resolveStatePaths(config.stateDir);
+    const channelSettingsDefaults = defaultChannelSettings(config);
 
     const sendErrorReply = (message: Message, title: string, error: unknown) =>
       Effect.promise(() =>
@@ -94,6 +96,7 @@ export const ChannelSessionsLive = Layer.scoped(
       attachOpencodeSession: opencode.attachSession,
       getPersistedSession: sessionStore.getSession,
       upsertPersistedSession: sessionStore.upsertSession,
+      getPersistedChannelSettings: sessionStore.getChannelSettings,
       touchPersistedSession: sessionStore.touchSession,
       deletePersistedSession: sessionStore.deleteSession,
       isSessionHealthy: opencode.isHealthy,
@@ -101,6 +104,7 @@ export const ChannelSessionsLive = Layer.scoped(
       logger,
       sessionInstructions: config.sessionInstructions,
       triggerPhrase: config.triggerPhrase,
+      channelSettingsDefaults,
       idleTimeoutMs: config.sessionIdleTimeoutMs,
       sessionsRootDir: statePaths.sessionsRootDir,
     });
@@ -167,6 +171,9 @@ export const ChannelSessionsLive = Layer.scoped(
       );
 
     const sendCompactionSummary = (session: ChannelSession, text: string) => {
+      if (!session.channelSettings.showCompactionSummaries) {
+        return Effect.void;
+      }
       const channel = session.progressChannel;
       const formatted = formatCompactionSummary(text);
       if (!channel) {
@@ -291,6 +298,11 @@ export const ChannelSessionsLive = Layer.scoped(
 
     const commandRuntime = createCommandRuntime({
       getSession: getOrRestoreSession,
+      getLiveSession: (channelId) =>
+        sessionLifecycle.getSession(channelId).pipe(Effect.map((session) => session ?? null)),
+      getChannelSettings: sessionStore.getChannelSettings,
+      upsertChannelSettings: sessionStore.upsertChannelSettings,
+      channelSettingsDefaults,
       hasIdleCompaction,
       getIdleCompactionCard,
       beginIdleCompaction,
