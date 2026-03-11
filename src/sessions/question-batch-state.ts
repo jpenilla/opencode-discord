@@ -33,7 +33,7 @@ export const setQuestionBatchStatus = <T extends QuestionBatchState>(
 
 export const terminateQuestionBatch = <T extends QuestionBatchState>(
   batch: T,
-  status: Extract<QuestionBatchCardStatus, "interrupted" | "expired">,
+  status: "expired",
 ): T =>
   ({
     ...batch,

@@ -324,9 +324,7 @@ describe("createQuestionRuntime", () => {
       }),
     );
 
-    await Effect.runPromise(
-      harness.runtime.terminateForSession(harness.session.opencode.sessionId, "expired"),
-    );
+    await Effect.runPromise(harness.runtime.terminateForSession(harness.session.opencode.sessionId));
 
     const handled = await Effect.runPromise(
       harness.runtime.handleInteraction(
@@ -343,8 +341,9 @@ describe("createQuestionRuntime", () => {
     );
   });
 
-  test("interrupts question batches for a session", async () => {
+  test("shows a late question card and clears interruptRequested once the question wins the race", async () => {
     const harness = await makeHarness();
+    harness.activeRun.interruptRequested = true;
 
     await Effect.runPromise(
       harness.runtime.handleEvent({
@@ -354,13 +353,10 @@ describe("createQuestionRuntime", () => {
       }),
     );
 
-    await Effect.runPromise(
-      harness.runtime.terminateForSession(harness.session.opencode.sessionId, "interrupted"),
-    );
-
-    const edits = await getRef(harness.editedPayloads);
-    expect(edits).toHaveLength(1);
-    expect(JSON.stringify(edits[0])).toContain("‼️ Questions interrupted");
+    expect(harness.activeRun.interruptRequested).toBe(false);
+    expect(await getRef(harness.rejectCalls)).toEqual([]);
+    expect(await getRef(harness.postedPayloads)).toHaveLength(1);
+    expect(await getRef(harness.editedPayloads)).toHaveLength(0);
   });
 
   test("expires a question batch even when shutdown lands while the Discord card post is in flight", async () => {
@@ -378,7 +374,7 @@ describe("createQuestionRuntime", () => {
 
     await Effect.runPromise(Deferred.await(harness.questionPostStarted));
     await Effect.runPromise(
-      harness.runtime.terminateForSession(harness.session.opencode.sessionId, "expired"),
+      harness.runtime.terminateForSession(harness.session.opencode.sessionId),
     );
     await Effect.runPromise(Deferred.succeed(harness.allowQuestionPost, undefined).pipe(Effect.ignore));
     await asked;
@@ -392,7 +388,7 @@ describe("createQuestionRuntime", () => {
   test("ignores new question cards after shutdown begins", async () => {
     const harness = await makeHarness();
 
-    await Effect.runPromise(harness.runtime.shutdown("expired"));
+    await Effect.runPromise(harness.runtime.shutdown());
     await Effect.runPromise(
       harness.runtime.handleEvent({
         type: "asked",

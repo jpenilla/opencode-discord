@@ -36,14 +36,12 @@ type RunExecutorRuntime = {
     session: ChannelSession,
     activeRun: ActiveRun | null,
   ) => Effect.Effect<void, unknown>;
-  terminateQuestionBatches: (
-    sessionId: string,
-    reason: Extract<RunFinalizationReason, "interrupted"> | "expired",
-  ) => Effect.Effect<void, unknown>;
+  terminateQuestionBatches: (sessionId: string) => Effect.Effect<void, unknown>;
   ensureSessionHealthAfterFailure: (
     session: ChannelSession,
     responseMessage: Message,
   ) => Effect.Effect<void, unknown>;
+  sendRunInterruptedInfo: (message: Message) => Effect.Effect<void, unknown>;
   sendFinalResponse: (message: Message, text: string) => Effect.Effect<void, unknown>;
   sendRunFailure: (message: Message, error: unknown) => Effect.Effect<void, unknown>;
   sendQuestionUiFailure: (message: Message, error: unknown) => Effect.Effect<void, unknown>;
@@ -125,6 +123,14 @@ export const executeRunBatch =
           initialRequests,
         });
 
+        if (activeRun.interruptRequested) {
+          activeRun.interruptRequested = false;
+          yield* runtime.logger.warn("interrupt request did not stop run", {
+            channelId: session.channelId,
+            sessionId: session.opencode.sessionId,
+          });
+        }
+
         const completion = decideRunCompletion({
           transcript: result.transcript,
           questionOutcome: activeRun.questionOutcome,
@@ -160,6 +166,7 @@ export const executeRunBatch =
           });
           yield* stopTyping;
           yield* finalizeProgress("interrupted");
+          yield* runtime.sendRunInterruptedInfo(responseMessage);
         } else {
           yield* runtime.logger.error("run failed", {
             channelId: session.channelId,
@@ -173,10 +180,7 @@ export const executeRunBatch =
       }
 
       yield* stopTyping;
-      yield* runtime.terminateQuestionBatches(
-        session.opencode.sessionId,
-        activeRun.interruptRequested ? "interrupted" : "expired",
-      );
+      yield* runtime.terminateQuestionBatches(session.opencode.sessionId);
       yield* runtime.setActiveRun(session, null);
       yield* Fiber.interrupt(progressFiber);
 

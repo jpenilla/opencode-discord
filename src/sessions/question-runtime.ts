@@ -26,7 +26,6 @@ import {
   questionUiFailureOutcome,
   type ActiveRun,
   type ChannelSession,
-  type RunFinalizationReason,
 } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
@@ -65,13 +64,8 @@ export type QuestionRuntime = {
   handleEvent: (event: QuestionRuntimeEvent) => Effect.Effect<void, unknown>;
   handleInteraction: (interaction: Interaction) => Effect.Effect<boolean, unknown>;
   hasPendingQuestionsForSession: (sessionId: string) => Effect.Effect<boolean>;
-  terminateForSession: (
-    sessionId: string,
-    reason: Extract<RunFinalizationReason, "interrupted"> | "expired",
-  ) => Effect.Effect<void, unknown>;
-  shutdown: (
-    reason: Extract<RunFinalizationReason, "interrupted"> | "expired",
-  ) => Effect.Effect<void, unknown>;
+  terminateForSession: (sessionId: string) => Effect.Effect<void, unknown>;
+  shutdown: () => Effect.Effect<void, unknown>;
 };
 
 type QuestionRuntimeDeps = {
@@ -327,6 +321,15 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
       Effect.gen(function* () {
         if (yield* Ref.get(shutdownStartedRef)) {
           return;
+        }
+
+        if (activeRun.interruptRequested) {
+          activeRun.interruptRequested = false;
+          yield* deps.logger.info("question prompt superseded interrupt request", {
+            channelId: session.channelId,
+            sessionId: session.opencode.sessionId,
+            requestId: request.id,
+          });
         }
 
         const batch = yield* Ref.modify(
@@ -824,7 +827,6 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
 
     const terminateMatchingBatches = (
       predicate: (batch: PendingQuestionBatch) => boolean,
-      reason: Extract<RunFinalizationReason, "interrupted"> | "expired",
     ) =>
       Effect.gen(function* () {
         const { terminated, sessionIds } = yield* Ref.modify(
@@ -844,7 +846,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
             }
 
             const batches = new Map(current);
-            const terminated = stale.map((batch) => terminateQuestionBatch(batch, reason));
+            const terminated = stale.map((batch) => terminateQuestionBatch(batch, "expired"));
             for (const batch of stale) {
               batches.delete(batch.request.id);
             }
@@ -875,7 +877,6 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
                       sessionId: batch.session.opencode.sessionId,
                       requestId: batch.request.id,
                       error: deps.formatError(error),
-                      reason,
                     }),
                   ),
                 )
@@ -891,7 +892,6 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
                 deps.logger.warn("failed to sync typing after question termination", {
                   sessionId,
                   error: deps.formatError(error),
-                  reason,
                 }),
               ),
             ),
@@ -899,18 +899,16 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
         ).pipe(Effect.asVoid);
       });
 
-    const terminateForSession = (
-      sessionId: string,
-      reason: Extract<RunFinalizationReason, "interrupted"> | "expired",
-    ) => terminateMatchingBatches((batch) => batch.session.opencode.sessionId === sessionId, reason);
+    const terminateForSession = (sessionId: string) =>
+      terminateMatchingBatches((batch) => batch.session.opencode.sessionId === sessionId);
 
-    const shutdown = (reason: Extract<RunFinalizationReason, "interrupted"> | "expired") =>
+    const shutdown = () =>
       Ref.modify(
         shutdownStartedRef,
         (started): readonly [Effect.Effect<void, unknown>, boolean] =>
           started
             ? [Effect.void, true]
-            : [terminateMatchingBatches(() => true, reason), true],
+            : [terminateMatchingBatches(() => true), true],
       ).pipe(Effect.flatten);
 
     return {

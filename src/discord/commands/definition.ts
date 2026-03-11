@@ -42,7 +42,6 @@ export type GuildCommandRuntimeDeps = {
     title: string;
     body: string;
   }) => Promise<Message>;
-  sendInfoCard: (channel: SendableChannels, title: string, body: string) => Promise<unknown>;
   logger: LoggerShape;
   formatError: (error: unknown) => string;
 };

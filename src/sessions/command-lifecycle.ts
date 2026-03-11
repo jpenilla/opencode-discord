@@ -1,4 +1,4 @@
-import type { ActiveRun, QuestionOutcome } from "@/sessions/session.ts";
+import type { QuestionOutcome } from "@/sessions/session.ts";
 
 export type CommandRejection = { type: "reject"; message: string };
 export const GUILD_TEXT_COMMAND_ONLY_MESSAGE =
@@ -66,13 +66,6 @@ export const decideInterruptEntry = (input: {
   return {
     type: "reject",
     message: "No active OpenCode run or compaction is running in this channel.",
-  };
-};
-
-export const beginInterruptRequest = (run: Pick<ActiveRun, "interruptRequested">) => {
-  run.interruptRequested = true;
-  return () => {
-    run.interruptRequested = false;
   };
 };
 

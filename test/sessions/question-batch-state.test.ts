@@ -118,12 +118,6 @@ describe("question batch state transitions", () => {
     expect(expired.status).toBe("expired");
   });
 
-  test("marks active batches as interrupted", () => {
-    const interrupted = terminateQuestionBatch(makeBatch(), "interrupted");
-
-    expect(interrupted.status).toBe("interrupted");
-  });
-
   test("clearQuestionDraft returns an empty draft", () => {
     expect(clearQuestionDraft()).toEqual({
       selectedOptions: [],

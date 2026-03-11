@@ -1,9 +1,11 @@
-import type { SendableChannels } from "discord.js";
 import { Effect } from "effect";
 
 import { compactionCardContent } from "@/discord/compaction-card.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
-import { beginInterruptRequest, decideInterruptEntry } from "@/sessions/command-lifecycle.ts";
+import {
+  QUESTION_PENDING_INTERRUPT_MESSAGE,
+  decideInterruptEntry,
+} from "@/sessions/command-lifecycle.ts";
 
 import { defineSessionCommand, type GuildCommand } from "./definition.ts";
 import {
@@ -67,12 +69,10 @@ const executeInterruptSession: GuildCommand["execute"] = (context) =>
     }
 
     const activeRun = session.activeRun!;
-    const rollbackInterruptRequest = beginInterruptRequest(activeRun);
     const interruptResult = yield* context.deps
       .interruptSession(session.opencode)
       .pipe(Effect.either);
     if (interruptResult._tag === "Left") {
-      rollbackInterruptRequest();
       yield* editCommandInteraction(
         context.interaction,
         formatErrorResponse(
@@ -83,24 +83,19 @@ const executeInterruptSession: GuildCommand["execute"] = (context) =>
       return true;
     }
 
-    yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore);
-    yield* Effect.promise(async () => {
-      await context.deps.sendInfoCard(
-        context.interaction.channel as SendableChannels,
-        "‼️ Run interrupted",
-        "OpenCode stopped the active run in this channel.",
-      );
-    }).pipe(
-      Effect.catchAll((error) =>
-        context.deps.logger.warn("failed to post interrupt info card", {
-          channelId: session.channelId,
-          sessionId: session.opencode.sessionId,
-          error: context.deps.formatError(error),
-        }),
-      ),
-      Effect.ignore,
+    const hasPendingQuestionsAfterInterrupt = yield* context.deps.hasPendingQuestions(
+      session.opencode.sessionId,
     );
-    yield* editCommandInteraction(context.interaction, "Interrupted the active OpenCode run.");
+    if (hasPendingQuestionsAfterInterrupt) {
+      yield* editCommandInteraction(context.interaction, QUESTION_PENDING_INTERRUPT_MESSAGE);
+      return true;
+    }
+
+    activeRun.interruptRequested = true;
+    yield* editCommandInteraction(
+      context.interaction,
+      "Requested interruption of the active OpenCode run.",
+    );
     return true;
   });
 

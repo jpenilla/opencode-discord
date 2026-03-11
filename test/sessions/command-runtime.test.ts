@@ -17,6 +17,7 @@ const makeHarness = async (options?: {
   interruptResult?: "success" | "failure";
   hasActiveRun?: boolean;
   hasPendingQuestions?: boolean;
+  hasPendingQuestionsSequence?: boolean[];
   hasSession?: boolean;
   initialChannelSettings?: PersistedChannelSettings | null;
 }) => {
@@ -24,9 +25,6 @@ const makeHarness = async (options?: {
   const defers = await Effect.runPromise(Ref.make(0));
   const edits = await Effect.runPromise(Ref.make<string[]>([]));
   const compactionUpdates = await Effect.runPromise(
-    Ref.make<Array<{ title: string; body: string }>>([]),
-  );
-  const sentInfoCards = await Effect.runPromise(
     Ref.make<Array<{ title: string; body: string }>>([]),
   );
   const upsertedInfoCards = await Effect.runPromise(
@@ -43,6 +41,7 @@ const makeHarness = async (options?: {
   const compactStarted = await Effect.runPromise(Deferred.make<void, never>());
   const compactFinish = await Effect.runPromise(Deferred.make<void, never>());
   const compactUpdated = await Effect.runPromise(Deferred.make<void, never>());
+  const pendingQuestionCheckCount = await Effect.runPromise(Ref.make(0));
   const promptState = await Effect.runPromise(createPromptState());
   const channelSettingsDefaults = {
     showThinking: true,
@@ -160,7 +159,16 @@ const makeHarness = async (options?: {
       Effect.all([Ref.get(idleCompactionActive), Ref.get(idleCardRef)]).pipe(
         Effect.map(([active, card]) => active || card !== null),
       ),
-    hasPendingQuestions: () => Effect.succeed(options?.hasPendingQuestions ?? false),
+    hasPendingQuestions: () =>
+      Ref.updateAndGet(pendingQuestionCheckCount, (count) => count + 1).pipe(
+        Effect.map((count) => {
+          const sequence = options?.hasPendingQuestionsSequence;
+          if (sequence && sequence.length > 0) {
+            return sequence[Math.min(count - 1, sequence.length - 1)] ?? false;
+          }
+          return options?.hasPendingQuestions ?? false;
+        }),
+      ),
     getIdleCompactionCard: (_sessionId) => Ref.get(idleCardRef),
     beginIdleCompaction: () => Ref.set(idleCompactionActive, true),
     setIdleCompactionCard: (_sessionId, card) =>
@@ -201,11 +209,6 @@ const makeHarness = async (options?: {
       );
       return compactionCard;
     },
-    sendInfoCard: async (_channel, title, body) => {
-      await Effect.runPromise(
-        Ref.update(sentInfoCards, (current) => [...current, { title, body }]),
-      );
-    },
     logger: {
       info: () => Effect.void,
       warn: (message) => Ref.update(loggedWarnings, (current) => [...current, message]),
@@ -223,7 +226,6 @@ const makeHarness = async (options?: {
     defers,
     edits,
     compactionUpdates,
-    sentInfoCards,
     upsertedInfoCards,
     loggedWarnings,
     typingStopCount,
@@ -294,10 +296,9 @@ describe("createCommandRuntime", () => {
     expect(await getRef(harness.edits)).toEqual([
       formatErrorResponse("## ❌ Failed to interrupt run", "interrupt failed"),
     ]);
-    expect(await getRef(harness.sentInfoCards)).toEqual([]);
   });
 
-  test("interrupts the active run, stops typing, and posts a visible info card", async () => {
+  test("requests interruption of the active run without claiming success yet", async () => {
     const harness = await makeHarness({
       hasActiveRun: true,
     });
@@ -307,14 +308,8 @@ describe("createCommandRuntime", () => {
 
     expect(handled).toBe(true);
     expect(harness.activeRun.interruptRequested).toBe(true);
-    expect(await getRef(harness.typingStopCount)).toBe(1);
-    expect(await getRef(harness.sentInfoCards)).toEqual([
-      {
-        title: "‼️ Run interrupted",
-        body: "OpenCode stopped the active run in this channel.",
-      },
-    ]);
-    expect(await getRef(harness.edits)).toEqual(["Interrupted the active OpenCode run."]);
+    expect(await getRef(harness.typingStopCount)).toBe(0);
+    expect(await getRef(harness.edits)).toEqual(["Requested interruption of the active OpenCode run."]);
   });
 
   test("rejects interrupt while a question prompt is pending", async () => {
@@ -332,7 +327,20 @@ describe("createCommandRuntime", () => {
     expect(await getRef(harness.replies)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
     expect(await getRef(harness.edits)).toEqual([]);
     expect(await getRef(harness.typingStopCount)).toBe(0);
-    expect(await getRef(harness.sentInfoCards)).toEqual([]);
+  });
+
+  test("reports a lost interrupt when questions become pending right after the interrupt request succeeds", async () => {
+    const harness = await makeHarness({
+      hasActiveRun: true,
+      hasPendingQuestionsSequence: [false, true],
+    });
+    harness.interaction.commandName = "interrupt";
+
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+
+    expect(handled).toBe(true);
+    expect(harness.activeRun.interruptRequested).toBe(false);
+    expect(await getRef(harness.edits)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
   });
 
   test("interrupts an active compaction card without posting a run card", async () => {
@@ -346,7 +354,6 @@ describe("createCommandRuntime", () => {
 
     expect(handled).toBe(true);
     expect(await getRef(harness.typingStopCount)).toBe(0);
-    expect(await getRef(harness.sentInfoCards)).toEqual([]);
     expect(await getRef(harness.compactionUpdates)).toEqual([
       {
         title: "‼️ Interrupting compaction",

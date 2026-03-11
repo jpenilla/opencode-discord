@@ -318,6 +318,22 @@ export const ChannelSessionsLive = Layer.scoped(
           "run failed with unhealthy opencode session",
           false,
         ),
+      sendRunInterruptedInfo: (message) =>
+        Effect.promise(() =>
+          sendInfoCard(
+            message.channel as SendableChannels,
+            "‼️ Run interrupted",
+            "OpenCode stopped the active run in this channel.",
+          ).then(() => undefined),
+        ).pipe(
+          Effect.catchAll((error) =>
+            logger.warn("failed to post interrupt info card", {
+              channelId: message.channelId,
+              error: formatError(error),
+            }),
+          ),
+          Effect.ignore,
+        ),
       sendFinalResponse: (message, text) =>
         Effect.promise(() => sendFinalResponse({ message, text })),
       sendRunFailure,
@@ -365,7 +381,6 @@ export const ChannelSessionsLive = Layer.scoped(
       compactSession: opencode.compactSession,
       interruptSession: opencode.interruptSession,
       upsertInfoCard,
-      sendInfoCard,
       logger,
       formatError,
     });
@@ -388,7 +403,7 @@ export const ChannelSessionsLive = Layer.scoped(
                   const idleCompactionIds = [...state.idleCompactionsBySessionId.keys()];
                   const stoppedCompactionCard = compactionCardContent("stopped");
 
-                  yield* questionRuntime.shutdown("expired").pipe(
+                  yield* questionRuntime.shutdown().pipe(
                     Effect.catchAll((error) =>
                       logger.warn("failed to shut down question runtime", {
                         error: formatError(error),

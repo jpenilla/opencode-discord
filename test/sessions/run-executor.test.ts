@@ -109,10 +109,11 @@ const makeRuntime = async (options?: {
         Effect.sync(() => {
           session.activeRun = activeRun;
         }).pipe(Effect.zipRight(record(`setActiveRun:${activeRun ? "active" : "null"}`))),
-      terminateQuestionBatches: (sessionId: string, reason: "expired" | "interrupted") =>
-        record(`terminateQuestionBatches:${sessionId}:${reason}`),
+      terminateQuestionBatches: (sessionId: string) =>
+        record(`terminateQuestionBatches:${sessionId}:expired`),
       ensureSessionHealthAfterFailure: (_session: ChannelSession, _responseMessage: Message) =>
         record("ensureSessionHealthAfterFailure"),
+      sendRunInterruptedInfo: (_message: Message) => record("sendRunInterruptedInfo"),
       sendFinalResponse: (message: Message, text: string) =>
         Ref.update(finalResponseMessageIds, (current) => [...current, message.id]).pipe(
           Effect.zipRight(record(`sendFinalResponse:${text}`)),
@@ -237,8 +238,36 @@ describe("executeRunBatch", () => {
       "info:interrupted run",
       "typing:stop",
       "progress:run-finalizing",
+      "sendRunInterruptedInfo",
       "typing:stop",
-      "terminateQuestionBatches:session-1:interrupted",
+      "terminateQuestionBatches:session-1:expired",
+      "setActiveRun:null",
+    ]);
+  });
+
+  test("clears a stale interrupt request when the run still completes successfully", async () => {
+    const session = makeSession();
+    const responseMessage = makeMessage("m-1");
+    const initialRequests = makeInitialRequests(responseMessage);
+    const { runtime, calls } = await makeRuntime({
+      configureActiveRun: (activeRun) => {
+        activeRun.interruptRequested = true;
+      },
+    });
+
+    await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
+
+    expect(await Effect.runPromise(Ref.get(calls))).toEqual([
+      "typing:start",
+      "setActiveRun:active",
+      "runPrompts",
+      "warn:interrupt request did not stop run",
+      "typing:stop",
+      "progress:run-finalizing",
+      "sendFinalResponse:final transcript",
+      "info:completed run",
+      "typing:stop",
+      "terminateQuestionBatches:session-1:expired",
       "setActiveRun:null",
     ]);
   });

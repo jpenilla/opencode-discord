@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  beginInterruptRequest,
   decideCompactAfterHealthCheck,
   decideCompactEntry,
   decideInterruptEntry,
@@ -158,17 +157,6 @@ describe("decideInterruptEntry", () => {
         hasIdleCompaction: true,
       }),
     ).toEqual({ type: "defer-and-interrupt", target: "compaction" });
-  });
-});
-
-describe("beginInterruptRequest", () => {
-  test("sets interruptRequested and rolls it back on demand", () => {
-    const run = { interruptRequested: false };
-    const rollback = beginInterruptRequest(run);
-
-    expect(run.interruptRequested).toBe(true);
-    rollback();
-    expect(run.interruptRequested).toBe(false);
   });
 });
 

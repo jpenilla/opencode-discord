@@ -965,7 +965,7 @@ describe("ChannelSessionsLive integration", () => {
     expect(await getRef(command.interactionDefers)).toBe(1);
     expect(await getRef(command.interactionEdits)).toEqual([
       {
-        content: "Interrupted the active OpenCode run.",
+        content: "Requested interruption of the active OpenCode run.",
         allowedMentions: { parse: [] },
       },
     ]);
@@ -973,6 +973,68 @@ describe("ChannelSessionsLive integration", () => {
     expect((await getRef(harness.sentPayloads)).map(cardText)).toContain(
       "**‼️ Run interrupted**\nOpenCode stopped the active run in this channel.",
     );
+  });
+
+  test("shows the question prompt when it wins the race after /interrupt is requested", async () => {
+    const promptStarted = await Effect.runPromise(Deferred.make<void>());
+    const interruptRequested = await Effect.runPromise(Deferred.make<void>());
+    const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>());
+    const promptFinished = await Effect.runPromise(Deferred.make<void>());
+    const harness = await makeHarness({
+      promptImpl: ({ publishEvent, completePrompt }) =>
+        unsafeEffect(
+          Effect.gen(function* () {
+            yield* Deferred.succeed(promptStarted, undefined);
+            yield* Deferred.await(interruptRequested);
+            yield* publishEvent(makeQuestionAskedEvent());
+            yield* Deferred.await(allowPromptToFinish);
+            return yield* completePrompt({
+              messageId: "assistant-1",
+              transcript: "done",
+            });
+          }).pipe(Effect.ensuring(Deferred.succeed(promptFinished, undefined).pipe(Effect.ignore))),
+        ),
+      interruptSessionImpl: () =>
+        Deferred.succeed(interruptRequested, undefined).pipe(Effect.asVoid),
+    });
+    const message = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    });
+    const command = harness.makeCommandInteraction("interrupt");
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions;
+          yield* sessions.submit(message, { prompt: "hello" });
+          yield* Deferred.await(promptStarted);
+          yield* sessions.handleInteraction(command.interaction);
+          yield* waitForReplyPayload(harness.replyPayloads, (payload) =>
+            cardText(payload).includes("❓ Questions need answers"),
+          );
+          yield* Effect.promise(() => harness.publishEvent(makeQuestionRepliedEvent()));
+          yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore);
+          yield* Deferred.await(promptFinished);
+          expect(yield* Queue.take(harness.replyEvents)).toBe("done");
+          yield* Effect.promise(() => Bun.sleep(0));
+        }).pipe(Effect.provide(harness.layer)),
+      ),
+    );
+
+    expect(await getRef(harness.interruptCalls)).toBe(1);
+    expect(await getRef(command.interactionDefers)).toBe(1);
+    expect(await getRef(command.interactionEdits)).toHaveLength(1);
+    expect(
+      (await getRef(harness.replyPayloads)).some((payload) =>
+        cardText(payload).includes("❓ Questions need answers"),
+      ),
+    ).toBe(true);
+    expect(
+      (await getRef(harness.sentPayloads)).some((payload) =>
+        cardText(payload).includes("‼️ Run interrupted"),
+      ),
+    ).toBe(false);
   });
 
   test("rejects /interrupt while a question prompt is awaiting input", async () => {

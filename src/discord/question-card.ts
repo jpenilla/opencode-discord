@@ -23,7 +23,6 @@ const QUESTION_STATUS_COLORS = {
   submitting: 0xf0b429,
   answered: 0x2bb673,
   rejected: 0xd64545,
-  interrupted: 0xc05621,
   expired: 0x6b7280,
 } as const;
 
@@ -33,7 +32,7 @@ export type QuestionDraft = {
 };
 
 export type QuestionBatchStatus = "active" | "submitting" | "answered" | "rejected";
-export type QuestionBatchCardStatus = QuestionBatchStatus | "interrupted" | "expired";
+export type QuestionBatchCardStatus = QuestionBatchStatus | "expired";
 
 export type PendingQuestionBatchView = {
   request: QuestionRequest;
@@ -82,8 +81,6 @@ const statusTitle = (status: PendingQuestionBatchView["status"]) => {
       return "✅ Questions answered";
     case "rejected":
       return "⛔ Questions rejected";
-    case "interrupted":
-      return "‼️ Questions interrupted";
     case "expired":
       return "⏱️ Questions expired";
   }
@@ -98,10 +95,6 @@ const terminalStatusSummary = (input: PendingQuestionBatchView) => {
       return count === 1
         ? "This question prompt was rejected without submitting answers."
         : "These question prompts were rejected without submitting answers.";
-    case "interrupted":
-      return count === 1
-        ? "This question prompt was interrupted before answers were submitted."
-        : "These question prompts were interrupted before answers were submitted.";
     case "expired":
       return count === 1
         ? "This question prompt expired before it was answered."
@@ -326,7 +319,6 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
   if (
     input.status === "answered" ||
     input.status === "rejected" ||
-    input.status === "interrupted" ||
     input.status === "expired"
   ) {
     const resolvedSections = renderResolvedQuestionSections(input).filter(Boolean);
