@@ -69,6 +69,9 @@ const lines = (...parts: Array<string | null | undefined | false>) =>
 
 const questionAllowsCustom = (question: QuestionInfo) => question.custom !== false;
 
+const questionCountLabel = (questionCount: number) =>
+  `${questionCount} question${questionCount === 1 ? "" : "s"}`;
+
 const statusTitle = (status: PendingQuestionBatchView["status"]) => {
   switch (status) {
     case "active":
@@ -83,6 +86,28 @@ const statusTitle = (status: PendingQuestionBatchView["status"]) => {
       return "‼️ Questions interrupted";
     case "expired":
       return "⏱️ Questions expired";
+  }
+};
+
+const terminalStatusSummary = (input: PendingQuestionBatchView) => {
+  const count = input.request.questions.length;
+  switch (input.status) {
+    case "answered":
+      return questionCountLabel(count);
+    case "rejected":
+      return count === 1
+        ? "This question prompt was rejected without submitting answers."
+        : "These question prompts were rejected without submitting answers.";
+    case "interrupted":
+      return count === 1
+        ? "This question prompt was interrupted before answers were submitted."
+        : "These question prompts were interrupted before answers were submitted.";
+    case "expired":
+      return count === 1
+        ? "This question prompt expired before it was answered."
+        : "These question prompts expired before they were answered.";
+    default:
+      return null;
   }
 };
 
@@ -293,7 +318,7 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
         `**${statusTitle(input.status)}**`,
         input.status === "active" || input.status === "submitting"
           ? renderQuestionMeta(input)
-          : `${input.request.questions.length} question${input.request.questions.length === 1 ? "" : "s"}`,
+          : terminalStatusSummary(input),
       ),
     ),
   );

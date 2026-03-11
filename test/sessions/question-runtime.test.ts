@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Interaction, Message, MessageCreateOptions, MessageEditOptions } from "discord.js";
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
-import { Effect, Ref } from "effect";
+import { Deferred, Effect, Ref } from "effect";
 
 import { createQuestionRuntime } from "@/sessions/question-runtime.ts";
 import { createPromptState } from "@/sessions/prompt-state.ts";
@@ -25,6 +25,7 @@ const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
 const makeHarness = async (options?: {
   postQuestionResult?: "success" | "failure";
   rejectResult?: "success" | "failure";
+  blockQuestionPost?: boolean;
 }) => {
   const postedPayloads = await Effect.runPromise(Ref.make<MessageCreateOptions[]>([]));
   const editedPayloads = await Effect.runPromise(Ref.make<MessageEditOptions[]>([]));
@@ -38,6 +39,8 @@ const makeHarness = async (options?: {
   const typingResumeCount = await Effect.runPromise(Ref.make(0));
   const typingStopCount = await Effect.runPromise(Ref.make(0));
   const promptState = await Effect.runPromise(createPromptState());
+  const questionPostStarted = await Effect.runPromise(Deferred.make<void>());
+  const allowQuestionPost = await Effect.runPromise(Deferred.make<void>());
 
   const questionMessage: Message = unsafeStub<Message>({
     id: "question-message",
@@ -52,7 +55,11 @@ const makeHarness = async (options?: {
     channelId: "channel-1",
     author: { id: "owner", tag: "owner#0001" },
     reply: (payload: MessageCreateOptions) =>
-      Effect.runPromise(Ref.update(postedPayloads, (current) => [...current, payload])).then(() => {
+      Effect.runPromise(Ref.update(postedPayloads, (current) => [...current, payload])).then(async () => {
+        if (options?.blockQuestionPost) {
+          await Effect.runPromise(Deferred.succeed(questionPostStarted, undefined).pipe(Effect.ignore));
+          await Effect.runPromise(Deferred.await(allowQuestionPost));
+        }
         if (options?.postQuestionResult === "failure") {
           throw new Error("post failed");
         }
@@ -214,6 +221,8 @@ const makeHarness = async (options?: {
     typingPauseCount,
     typingResumeCount,
     typingStopCount,
+    questionPostStarted,
+    allowQuestionPost,
     makeButtonInteraction,
     makeSelectInteraction,
     makeModalInteraction,
@@ -352,6 +361,77 @@ describe("createQuestionRuntime", () => {
     const edits = await getRef(harness.editedPayloads);
     expect(edits).toHaveLength(1);
     expect(JSON.stringify(edits[0])).toContain("‼️ Questions interrupted");
+  });
+
+  test("expires a question batch even when shutdown lands while the Discord card post is in flight", async () => {
+    const harness = await makeHarness({
+      blockQuestionPost: true,
+    });
+
+    const asked = Effect.runPromise(
+      harness.runtime.handleEvent({
+        type: "asked",
+        sessionId: harness.session.opencode.sessionId,
+        request: harness.request,
+      }),
+    );
+
+    await Effect.runPromise(Deferred.await(harness.questionPostStarted));
+    await Effect.runPromise(
+      harness.runtime.terminateForSession(harness.session.opencode.sessionId, "expired"),
+    );
+    await Effect.runPromise(Deferred.succeed(harness.allowQuestionPost, undefined).pipe(Effect.ignore));
+    await asked;
+
+    const edits = await getRef(harness.editedPayloads);
+    expect(edits).toHaveLength(1);
+    expect(JSON.stringify(edits[0])).toContain("Questions expired");
+    expect(JSON.stringify(edits[0])).toContain("This question prompt expired before it was answered.");
+  });
+
+  test("ignores new question cards after shutdown begins", async () => {
+    const harness = await makeHarness();
+
+    await Effect.runPromise(harness.runtime.shutdown("expired"));
+    await Effect.runPromise(
+      harness.runtime.handleEvent({
+        type: "asked",
+        sessionId: harness.session.opencode.sessionId,
+        request: harness.request,
+      }),
+    );
+
+    expect(await getRef(harness.postedPayloads)).toHaveLength(0);
+  });
+
+  test("finalizes a late-posted question card when a reply event wins the race", async () => {
+    const harness = await makeHarness({
+      blockQuestionPost: true,
+    });
+
+    const asked = Effect.runPromise(
+      harness.runtime.handleEvent({
+        type: "asked",
+        sessionId: harness.session.opencode.sessionId,
+        request: harness.request,
+      }),
+    );
+
+    await Effect.runPromise(Deferred.await(harness.questionPostStarted));
+    await Effect.runPromise(
+      harness.runtime.handleEvent({
+        type: "replied",
+        sessionId: harness.session.opencode.sessionId,
+        requestId: harness.request.id,
+        answers: [["Yes"]] satisfies ReadonlyArray<QuestionAnswer>,
+      }),
+    );
+    await Effect.runPromise(Deferred.succeed(harness.allowQuestionPost, undefined).pipe(Effect.ignore));
+    await asked;
+
+    const edits = await getRef(harness.editedPayloads);
+    expect(edits).toHaveLength(1);
+    expect(JSON.stringify(edits[0])).toContain("✅ Questions answered");
   });
 
   test("replies with a stale-state error after a newer page action wins", async () => {

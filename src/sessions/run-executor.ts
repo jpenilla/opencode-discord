@@ -173,11 +173,11 @@ export const executeRunBatch =
       }
 
       yield* stopTyping;
-      yield* runtime.setActiveRun(session, null);
       yield* runtime.terminateQuestionBatches(
         session.opencode.sessionId,
         activeRun.interruptRequested ? "interrupted" : "expired",
       );
+      yield* runtime.setActiveRun(session, null);
       yield* Fiber.interrupt(progressFiber);
 
       if (failed) {

@@ -170,9 +170,16 @@ export const DiscordBotLive = Layer.scoped(
     yield* Effect.promise(() => client.login(Redacted.value(config.discordToken)));
 
     yield* Effect.addFinalizer(() =>
-      Effect.promise(async () => {
+      Effect.gen(function* () {
         client.removeAllListeners();
-        await client.destroy();
+        yield* sessions.shutdown().pipe(
+          Effect.catchAll((error) =>
+            logger.warn("failed to shut down channel sessions before discord destroy", {
+              error: formatError(error),
+            }),
+          ),
+        );
+        yield* Effect.promise(() => client.destroy());
       }),
     );
 

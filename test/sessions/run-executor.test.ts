@@ -149,8 +149,8 @@ describe("executeRunBatch", () => {
       "sendFinalResponse:final transcript",
       "info:completed run",
       "typing:stop",
-      "setActiveRun:null",
       "terminateQuestionBatches:session-1:expired",
+      "setActiveRun:null",
     ]);
     expect(session.activeRun).toBeNull();
   });
@@ -211,8 +211,8 @@ describe("executeRunBatch", () => {
       "typing:stop",
       "sendRunFailure:boom",
       "typing:stop",
-      "setActiveRun:null",
       "terminateQuestionBatches:session-1:expired",
+      "setActiveRun:null",
       "ensureSessionHealthAfterFailure",
     ]);
   });
@@ -238,8 +238,8 @@ describe("executeRunBatch", () => {
       "typing:stop",
       "progress:run-finalizing",
       "typing:stop",
-      "setActiveRun:null",
       "terminateQuestionBatches:session-1:interrupted",
+      "setActiveRun:null",
     ]);
   });
 
@@ -263,8 +263,8 @@ describe("executeRunBatch", () => {
       "sendFinalResponse:final transcript",
       "info:completed run",
       "typing:stop",
-      "setActiveRun:null",
       "terminateQuestionBatches:session-1:expired",
+      "setActiveRun:null",
     ]);
   });
 });

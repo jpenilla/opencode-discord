@@ -94,6 +94,18 @@ const cardText = (payload: unknown) =>
       .components?.[0]?.components?.[0]?.data?.content ?? "",
   );
 
+const waitForReplyPayload = (replyPayloads: Ref.Ref<unknown[]>, predicate: (payload: unknown) => boolean) =>
+  Ref.get(replyPayloads).pipe(
+    Effect.flatMap((payloads) =>
+      payloads.some(predicate) ? Effect.void : Effect.fail(new Error("payload not posted yet")),
+    ),
+    Effect.eventually,
+    Effect.timeoutFail({
+      duration: "1 second",
+      onTimeout: () => new Error("Timed out waiting for reply payload"),
+    }),
+  );
+
 const makeQuestionAskedEvent = (): GlobalEvent =>
   unsafeStub<GlobalEvent>({
     payload: {
@@ -1277,6 +1289,40 @@ describe("ChannelSessionsLive integration", () => {
 
     expect(await getRef(questionInteraction.interactionReplies)).toEqual([]);
     expect((await getRef(questionInteraction.interactionEdits)).length).toBe(1);
+  });
+
+  test("expires live question cards during session shutdown even while the run is still active", async () => {
+    const promptStarted = await Effect.runPromise(Deferred.make<void>());
+    const harness = await makeHarness({
+      promptImpl: () =>
+        Deferred.succeed(promptStarted, undefined).pipe(Effect.zipRight(Effect.never)),
+    });
+    const message = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    });
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions;
+          yield* sessions.submit(message, { prompt: "hello" });
+          yield* Deferred.await(promptStarted);
+          yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));
+          yield* waitForReplyPayload(harness.replyPayloads, (payload) =>
+            cardText(payload).includes("❓ Questions need answers"),
+          );
+          yield* sessions.shutdown();
+          yield* Effect.promise(() => Bun.sleep(0));
+        }).pipe(Effect.provide(harness.layer)),
+      ),
+    );
+
+    expect(
+      (await getRef(harness.editedPayloads)).some((payload) =>
+        cardText(payload).includes("This question prompt expired before it was answered."),
+      ),
+    ).toBe(true);
   });
 
   test("surfaces a question UI failure reply when posting the question card fails", async () => {

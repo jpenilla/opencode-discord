@@ -38,6 +38,7 @@ export type ChannelSessionsShape = {
   submit: (message: Message, invocation: Invocation) => Effect.Effect<void, unknown>;
   getActiveRunBySessionId: (sessionId: string) => Effect.Effect<ActiveRun | null>;
   handleInteraction: (interaction: Interaction) => Effect.Effect<boolean, unknown>;
+  shutdown: () => Effect.Effect<void, unknown>;
 };
 
 export class ChannelSessions extends Context.Tag("ChannelSessions")<
@@ -72,6 +73,10 @@ export const ChannelSessionsLive = Layer.scoped(
     const eventQueue = yield* OpencodeEventQueue;
     const sessionStore = yield* SessionStore;
     const stateRef = yield* Ref.make(createSessionRuntimeState());
+    const shutdownStartedRef = yield* Ref.make(false);
+    const lateIdleCompactionFinalizersRef = yield* Ref.make(
+      new Map<string, { title: string; body: string }>(),
+    );
     const fiberSet = yield* FiberSet.make();
     const statePaths = resolveStatePaths(config.stateDir);
     const channelSettingsDefaults = defaultChannelSettings(config);
@@ -136,7 +141,11 @@ export const ChannelSessionsLive = Layer.scoped(
 
           const card = compaction.card;
           if (!card) {
-            return Effect.void;
+            return Ref.update(lateIdleCompactionFinalizersRef, (current) => {
+              const next = new Map(current);
+              next.set(sessionId, { title, body });
+              return next;
+            });
           }
 
           return Effect.promise(() => editInfoCard(card, title, body)).pipe(
@@ -149,6 +158,46 @@ export const ChannelSessionsLive = Layer.scoped(
             Effect.asVoid,
           );
         }),
+      );
+
+    const attachIdleCompactionCard = (sessionId: string, card: Message | null) =>
+      setIdleCompactionCard(sessionId, card).pipe(
+        Effect.zipRight(
+          !card
+            ? Effect.void
+            : Ref.modify(
+                lateIdleCompactionFinalizersRef,
+                (
+                  current,
+                ): readonly [
+                  { title: string; body: string } | null,
+                  Map<string, { title: string; body: string }>,
+                ] => {
+                  const pending = current.get(sessionId) ?? null;
+                  if (!pending) {
+                    return [null, current];
+                  }
+
+                  const next = new Map(current);
+                  next.delete(sessionId);
+                  return [pending, next];
+                },
+              ).pipe(
+                Effect.flatMap((pending) =>
+                  pending
+                    ? Effect.promise(() => editInfoCard(card, pending.title, pending.body)).pipe(
+                        Effect.catchAll((error) =>
+                          logger.warn("failed to finalize late idle compaction card", {
+                            sessionId,
+                            error: formatError(error),
+                          }),
+                        ),
+                        Effect.asVoid,
+                      )
+                    : Effect.void,
+                ),
+              ),
+        ),
       );
 
     const updateIdleCompactionCard = (sessionId: string, title: string, body: string) =>
@@ -306,7 +355,7 @@ export const ChannelSessionsLive = Layer.scoped(
       hasIdleCompaction,
       getIdleCompactionCard,
       beginIdleCompaction,
-      setIdleCompactionCard,
+      setIdleCompactionCard: attachIdleCompactionCard,
       setIdleCompactionInterruptRequested,
       getIdleCompactionInterruptRequested,
       updateIdleCompactionCard,
@@ -325,49 +374,91 @@ export const ChannelSessionsLive = Layer.scoped(
         Effect.flatMap((session) => ensureSessionHealth(session, message, reason)),
       );
 
-    const shutdownLiveCards = Ref.get(stateRef).pipe(
-      Effect.flatMap((state) =>
-        Effect.all(
-          [
-            Effect.forEach(
-              state.sessionsByChannelId.values(),
-              (session) => {
-                const activeRun = session.activeRun;
-                const sessionId = session.opencode.sessionId;
-                return activeRun
-                  ? Effect.gen(function* () {
-                      yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore);
-                      yield* activeRun.finalizeProgress("shutdown").pipe(Effect.ignore);
-                      yield* questionRuntime
-                        .terminateForSession(sessionId, "expired")
-                        .pipe(Effect.ignore);
-                    })
-                  : Effect.void;
-              },
-              { concurrency: "unbounded", discard: true },
-            ),
-            Effect.forEach(
-              state.idleCompactionsBySessionId.keys(),
-              (sessionId) =>
-                finalizeIdleCompactionCard(
-                  sessionId,
-                  compactionCardContent("stopped").title,
-                  compactionCardContent("stopped").body,
-                ),
-              { concurrency: "unbounded", discard: true },
-            ),
-          ],
-          { concurrency: "unbounded", discard: true },
+    const shutdown = () =>
+      Ref.modify(
+        shutdownStartedRef,
+        (started): readonly [Effect.Effect<void, unknown>, boolean] =>
+          started
+            ? [Effect.void, true]
+            : [
+                Effect.gen(function* () {
+                  const state = yield* Ref.get(stateRef);
+                  const activeRuns = [...state.activeRunsBySessionId.entries()];
+                  const idleCompactionIds = [...state.idleCompactionsBySessionId.keys()];
+                  const stoppedCompactionCard = compactionCardContent("stopped");
+
+                  yield* questionRuntime.shutdown("expired").pipe(
+                    Effect.catchAll((error) =>
+                      logger.warn("failed to shut down question runtime", {
+                        error: formatError(error),
+                      }),
+                    ),
+                  );
+
+                  yield* Effect.forEach(
+                    activeRuns,
+                    ([sessionId, activeRun]) =>
+                      Effect.gen(function* () {
+                        yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore);
+                        yield* activeRun.finalizeProgress("shutdown").pipe(
+                          Effect.catchAll((error) =>
+                            logger.warn("failed to finalize active run progress on shutdown", {
+                              sessionId,
+                              error: formatError(error),
+                            }),
+                          ),
+                        );
+                      }),
+                    { concurrency: "unbounded", discard: true },
+                  );
+
+                  yield* Effect.forEach(
+                    idleCompactionIds,
+                    (sessionId) =>
+                      finalizeIdleCompactionCard(
+                        sessionId,
+                        stoppedCompactionCard.title,
+                        stoppedCompactionCard.body,
+                      ).pipe(
+                        Effect.catchAll((error) =>
+                          logger.warn("failed to finalize idle compaction on shutdown", {
+                            sessionId,
+                            error: formatError(error),
+                          }),
+                        ),
+                      ),
+                    { concurrency: "unbounded", discard: true },
+                  );
+
+                  yield* FiberSet.clear(fiberSet).pipe(
+                    Effect.catchAll((error) =>
+                      logger.warn("failed to interrupt session workers on shutdown", {
+                        error: formatError(error),
+                      }),
+                    ),
+                  );
+                  yield* shutdownSessions().pipe(
+                    Effect.catchAll((error) =>
+                      logger.warn("failed to shut down sessions", {
+                        error: formatError(error),
+                      }),
+                    ),
+                  );
+                  yield* Ref.set(lateIdleCompactionFinalizersRef, new Map());
+                }),
+                true,
+              ],
+      ).pipe(
+        Effect.flatten,
+        Effect.catchAll((error) =>
+          logger.warn("channel sessions shutdown failed", {
+            error: formatError(error),
+          }),
         ),
-      ),
-    );
+      );
 
     yield* Effect.addFinalizer(() =>
-      Effect.gen(function* () {
-        yield* shutdownLiveCards.pipe(Effect.ignore);
-        yield* shutdownSessions().pipe(Effect.ignore);
-        yield* FiberSet.clear(fiberSet);
-      }),
+      shutdown(),
     );
 
     return {
@@ -426,6 +517,7 @@ export const ChannelSessionsLive = Layer.scoped(
               handled ? Effect.succeed(true) : questionRuntime.handleInteraction(interaction),
             ),
           ),
+      shutdown,
     } satisfies ChannelSessionsShape;
   }),
 );

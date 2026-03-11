@@ -68,6 +68,9 @@ export type QuestionRuntime = {
     sessionId: string,
     reason: Extract<RunFinalizationReason, "interrupted"> | "expired",
   ) => Effect.Effect<void, unknown>;
+  shutdown: (
+    reason: Extract<RunFinalizationReason, "interrupted"> | "expired",
+  ) => Effect.Effect<void, unknown>;
 };
 
 type QuestionRuntimeDeps = {
@@ -99,6 +102,8 @@ const questionBatchView = (batch: PendingQuestionBatch) => ({
 export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<QuestionRuntime> =>
   Effect.gen(function* () {
     const batchesRef = yield* Ref.make(new Map<string, PendingQuestionBatch>());
+    const detachedFinalizedBatchesRef = yield* Ref.make(new Map<string, PendingQuestionBatch>());
+    const shutdownStartedRef = yield* Ref.make(false);
 
     type PersistQuestionBatchResult =
       | { type: "updated"; batch: PendingQuestionBatch }
@@ -107,13 +112,6 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
 
     const getQuestionBatch = (requestId: string) =>
       Ref.get(batchesRef).pipe(Effect.map((batches) => batches.get(requestId) ?? null));
-
-    const putQuestionBatch = (batch: PendingQuestionBatch) =>
-      Ref.update(batchesRef, (current) => {
-        const batches = new Map(current);
-        batches.set(batch.request.id, batch);
-        return batches;
-      });
 
     const updateQuestionBatch = (
       requestId: string,
@@ -185,6 +183,33 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
         },
       );
 
+    const takeDetachedFinalizedBatch = (requestId: string) =>
+      Ref.modify(
+        detachedFinalizedBatchesRef,
+        (current): readonly [PendingQuestionBatch | null, Map<string, PendingQuestionBatch>] => {
+          const existing = current.get(requestId) ?? null;
+          if (!existing) {
+            return [null, current];
+          }
+
+          const batches = new Map(current);
+          batches.delete(requestId);
+          return [existing, batches];
+        },
+      );
+
+    const rememberDetachedFinalizedBatch = (batch: PendingQuestionBatch) => {
+      if (batch.message) {
+        return Effect.void;
+      }
+
+      return Ref.update(detachedFinalizedBatchesRef, (current) => {
+        const batches = new Map(current);
+        batches.set(batch.request.id, batch);
+        return batches;
+      });
+    };
+
     const hasPendingQuestionsForSession = (sessionId: string) =>
       Ref.get(batchesRef).pipe(
         Effect.map((batches) =>
@@ -242,6 +267,33 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
       ).pipe(Effect.asVoid);
     };
 
+    const attachQuestionMessage = (requestId: string, message: Message) =>
+      Effect.gen(function* () {
+        const attached = yield* updateQuestionBatch(requestId, (current) => ({
+          ...current,
+          message,
+        }));
+        if (attached) {
+          return {
+            type: "attached" as const,
+            batch: attached,
+          };
+        }
+
+        const finalized = yield* takeDetachedFinalizedBatch(requestId);
+        if (finalized) {
+          return {
+            type: "finalized" as const,
+            batch: {
+              ...finalized,
+              message,
+            },
+          };
+        }
+
+        return { type: "missing" as const };
+      });
+
     const replyToQuestionInteraction = (interaction: Interaction, message: string) => {
       if (
         !interaction.isButton() &&
@@ -272,22 +324,36 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
       request: QuestionRequest,
     ) =>
       Effect.gen(function* () {
-        const existing = yield* getQuestionBatch(request.id);
-        if (existing) {
+        if (yield* Ref.get(shutdownStartedRef)) {
           return;
         }
 
-        const batch: PendingQuestionBatch = {
-          request,
-          session,
-          version: 0,
-          lastModifiedBy: null,
-          message: null,
-          page: 0,
-          optionPages: request.questions.map(() => 0),
-          drafts: questionDrafts(request),
-          status: "active",
-        };
+        const batch = yield* Ref.modify(
+          batchesRef,
+          (current): readonly [PendingQuestionBatch | null, Map<string, PendingQuestionBatch>] => {
+            if (current.has(request.id)) {
+              return [null, current];
+            }
+
+            const created: PendingQuestionBatch = {
+              request,
+              session,
+              version: 0,
+              lastModifiedBy: null,
+              message: null,
+              page: 0,
+              optionPages: request.questions.map(() => 0),
+              drafts: questionDrafts(request),
+              status: "active",
+            };
+            const batches = new Map(current);
+            batches.set(request.id, created);
+            return [created, batches];
+          },
+        );
+        if (!batch) {
+          return;
+        }
 
         const questionMessage = yield* Effect.tryPromise({
           try: () =>
@@ -305,11 +371,44 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
         );
 
         if (questionMessage._tag === "Right") {
-          yield* putQuestionBatch({
-            ...batch,
-            message: questionMessage.right,
+          const attached = yield* attachQuestionMessage(request.id, questionMessage.right);
+          if (attached.type === "attached") {
+            yield* syncTypingForSession(session.opencode.sessionId);
+            return;
+          }
+
+          if (attached.type === "finalized") {
+            yield* editQuestionMessage(attached.batch).pipe(
+              Effect.catchAll((error) =>
+                deps.logger.warn("failed to edit finalized question batch after late post", {
+                  channelId: session.channelId,
+                  sessionId: session.opencode.sessionId,
+                  requestId: request.id,
+                  error: deps.formatError(error),
+                }),
+              ),
+            );
+            return;
+          }
+
+          yield* deps.logger.warn("question batch was missing after successful post", {
+            channelId: session.channelId,
+            sessionId: session.opencode.sessionId,
+            requestId: request.id,
           });
-          yield* syncTypingForSession(session.opencode.sessionId);
+          return;
+        }
+
+        const removed = yield* removeQuestionBatch(request.id);
+        if (!removed && (yield* takeDetachedFinalizedBatch(request.id))) {
+          return;
+        }
+        if (!removed) {
+          yield* deps.logger.warn("question batch was missing after failed post", {
+            channelId: session.channelId,
+            sessionId: session.opencode.sessionId,
+            requestId: request.id,
+          });
           return;
         }
 
@@ -377,6 +476,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
             }),
           ),
         );
+        yield* rememberDetachedFinalizedBatch(batch);
         yield* removeQuestionBatch(requestId);
         yield* syncTypingForSession(batch.session.opencode.sessionId);
       });
@@ -721,41 +821,74 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
         }
       });
 
-    const terminateForSession = (
-      sessionId: string,
+    const terminateMatchingBatches = (
+      predicate: (batch: PendingQuestionBatch) => boolean,
       reason: Extract<RunFinalizationReason, "interrupted"> | "expired",
     ) =>
       Effect.gen(function* () {
-        const expired = yield* Ref.modify(
+        const { terminated, sessionIds } = yield* Ref.modify(
           batchesRef,
-          (current): readonly [PendingQuestionBatch[], Map<string, PendingQuestionBatch>] => {
+          (
+            current,
+          ): readonly [
+            { terminated: PendingQuestionBatch[]; sessionIds: string[] },
+            Map<string, PendingQuestionBatch>,
+          ] => {
             const stale = [...current.values()].filter(
               (batch) =>
-                batch.session.opencode.sessionId === sessionId &&
-                (batch.status === "active" || batch.status === "submitting"),
+                predicate(batch) && (batch.status === "active" || batch.status === "submitting"),
             );
             if (stale.length === 0) {
-              return [[], current];
+              return [{ terminated: [], sessionIds: [] }, current];
             }
 
             const batches = new Map(current);
+            const terminated = stale.map((batch) => terminateQuestionBatch(batch, reason));
             for (const batch of stale) {
               batches.delete(batch.request.id);
             }
 
-            return [stale.map((batch) => terminateQuestionBatch(batch, reason)), batches];
+            return [
+              {
+                terminated,
+                sessionIds: [...new Set(terminated.map((batch) => batch.session.opencode.sessionId))],
+              },
+              batches,
+            ];
           },
         );
 
+        yield* Effect.forEach(terminated, rememberDetachedFinalizedBatch, {
+          concurrency: "unbounded",
+          discard: true,
+        });
+
         yield* Effect.forEach(
-          expired,
+          terminated,
           (batch) =>
-            editQuestionMessage(batch).pipe(
+            batch.message
+              ? editQuestionMessage(batch).pipe(
+                  Effect.catchAll((error) =>
+                    deps.logger.warn("failed to terminate question batch message", {
+                      channelId: batch.session.channelId,
+                      sessionId: batch.session.opencode.sessionId,
+                      requestId: batch.request.id,
+                      error: deps.formatError(error),
+                      reason,
+                    }),
+                  ),
+                )
+              : Effect.void,
+          { concurrency: "unbounded" },
+        ).pipe(Effect.asVoid);
+
+        yield* Effect.forEach(
+          sessionIds,
+          (sessionId) =>
+            syncTypingForSession(sessionId).pipe(
               Effect.catchAll((error) =>
-                deps.logger.warn("failed to terminate question batch message", {
-                  channelId: batch.session.channelId,
-                  sessionId: batch.session.opencode.sessionId,
-                  requestId: batch.request.id,
+                deps.logger.warn("failed to sync typing after question termination", {
+                  sessionId,
                   error: deps.formatError(error),
                   reason,
                 }),
@@ -764,6 +897,20 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
           { concurrency: "unbounded" },
         ).pipe(Effect.asVoid);
       });
+
+    const terminateForSession = (
+      sessionId: string,
+      reason: Extract<RunFinalizationReason, "interrupted"> | "expired",
+    ) => terminateMatchingBatches((batch) => batch.session.opencode.sessionId === sessionId, reason);
+
+    const shutdown = (reason: Extract<RunFinalizationReason, "interrupted"> | "expired") =>
+      Ref.modify(
+        shutdownStartedRef,
+        (started): readonly [Effect.Effect<void, unknown>, boolean] =>
+          started
+            ? [Effect.void, true]
+            : [terminateMatchingBatches(() => true, reason), true],
+      ).pipe(Effect.flatten);
 
     return {
       handleEvent: (event) => {
@@ -785,5 +932,6 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
       },
       handleInteraction,
       terminateForSession,
+      shutdown,
     } satisfies QuestionRuntime;
   });
