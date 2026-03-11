@@ -131,7 +131,7 @@ describe("tool card formatting", () => {
     expect(text).toBe("**🩹 ✅ `apply_patch` Completed in 0.00s**\n`./notes/rust-audit.md`");
   });
 
-  test("renders write cards with a plain path summary and metadata bullets", async () => {
+  test("renders write cards with a plain path summary and compact metadata", async () => {
     const text = await renderCard(
       makeToolPart({
         tool: "write",
@@ -144,7 +144,7 @@ describe("tool card formatting", () => {
       }),
     );
 
-    expect(text).toBe("**✏️ 🛠️ `write` Running**\n`./src/generated.txt`\n- Size: `5 chars`");
+    expect(text).toBe("**✏️ 🛠️ `write` Running**\n`./src/generated.txt`\nSize: `5 chars`");
   });
 
   test("renders task cards with the description as the primary summary line", async () => {
@@ -162,7 +162,7 @@ describe("tool card formatting", () => {
     );
 
     expect(text).toBe(
-      "**🧩 🛠️ `task` Running**\n`Investigate tool card noise`\n- Agent: `explorer`\n- Model: `gpt-5`",
+      "**🧩 🛠️ `task` Running**\n`Investigate tool card noise`\nAgent: `explorer` | Model: `gpt-5`",
     );
   });
 
@@ -180,7 +180,7 @@ describe("tool card formatting", () => {
     );
 
     expect(text).toBe(
-      "**🌐 ✅ `webfetch` Completed in 0.00s**\n`example.com/docs?q=tool-card`\n- Format: `html`\n- Response: `HTML`",
+      "**🌐 ✅ `webfetch` Completed in 0.00s**\n`example.com/docs?q=tool-card`\nFormat: `html` | Response: `HTML`",
     );
   });
 

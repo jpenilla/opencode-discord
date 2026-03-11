@@ -251,7 +251,7 @@ describe("runProgressWorker", () => {
     const result = await runFinalizationScenario("shutdown");
 
     expect(result.edited.map(cardText)).toContain(
-      "**💻 🛑 `bash` Stopped**\n`pwd`\nPrint cwd\n- Note: This tool did not complete because the bot shut down.",
+      "**💻 🛑 `bash` Stopped**\n`pwd`\nPrint cwd\nNote: This tool did not complete because the bot shut down.",
     );
     expect(result.edited.map(cardText)).toContain(
       "**🛑 Compaction stopped**\nOpenCode stopped compacting this session because the bot shut down.",

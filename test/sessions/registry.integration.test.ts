@@ -856,7 +856,7 @@ describe("ChannelSessionsLive integration", () => {
       "**💻 🛠️ `bash` Running**\n`pwd`\nPrint cwd",
     );
     expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
-      "**💻 ❌ `bash` Failed in 0.00s**\n`pwd`\n- Error: `aborted`",
+      "**💻 ❌ `bash` Failed in 0.00s**\n`pwd`\nError: `aborted`",
     );
   });
 

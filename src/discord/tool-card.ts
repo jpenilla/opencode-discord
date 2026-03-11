@@ -259,14 +259,117 @@ const formatGenericValue = (key: string, value: unknown, workdir: string): strin
   return null;
 };
 
+type MetaField = {
+  label: string;
+  value: string;
+};
+
+type ToolCardLine =
+  | {
+      kind: "summary";
+      text: string;
+    }
+  | {
+      kind: "meta";
+      label: string;
+      value: string;
+    }
+  | {
+      kind: "meta-group";
+      items: MetaField[];
+    }
+  | {
+      kind: "status";
+      label: string;
+      value: string;
+    }
+  | {
+      kind: "todo";
+      text: string;
+    };
+
+const summaryLine = (text: string): ToolCardLine => ({ kind: "summary", text });
+
+const metaLine = (label: string, value: string): ToolCardLine => ({
+  kind: "meta",
+  label,
+  value,
+});
+
+const metaGroupLine = (items: MetaField[]): ToolCardLine => ({
+  kind: "meta-group",
+  items,
+});
+
+const statusLine = (label: string, value: string): ToolCardLine => ({
+  kind: "status",
+  label,
+  value,
+});
+
+const todoLine = (text: string): ToolCardLine => ({ kind: "todo", text });
+
+const metaField = (label: string, value: string | null | undefined): MetaField | null =>
+  value ? { label, value } : null;
+
+const renderMetaField = (field: MetaField) => `${field.label}: ${field.value}`;
+
+const flushMetaFields = (fields: MetaField[]): ToolCardLine =>
+  fields.length === 1 ? metaLine(fields[0].label, fields[0].value) : metaGroupLine(fields);
+
+const packMetaFields = (fields: Array<MetaField | null>, maxLength = 88): ToolCardLine[] => {
+  const compact = fields.filter((field): field is MetaField => field !== null);
+  if (compact.length === 0) {
+    return [];
+  }
+
+  const lines: ToolCardLine[] = [];
+  let current: MetaField[] = [];
+  let currentLength = 0;
+
+  for (const field of compact) {
+    const rendered = renderMetaField(field);
+    const nextLength = current.length === 0 ? rendered.length : currentLength + 3 + rendered.length;
+
+    if (current.length > 0 && nextLength > maxLength) {
+      lines.push(flushMetaFields(current));
+      current = [field];
+      currentLength = rendered.length;
+      continue;
+    }
+
+    current.push(field);
+    currentLength = nextLength;
+  }
+
+  lines.push(flushMetaFields(current));
+  return lines;
+};
+
+const renderToolCardLine = (line: ToolCardLine) => {
+  switch (line.kind) {
+    case "summary":
+      return line.text;
+    case "meta":
+    case "status":
+      return `${line.label}: ${line.value}`;
+    case "meta-group":
+      return line.items.map(renderMetaField).join(" | ");
+    case "todo":
+      return line.text;
+  }
+};
+
 const formatGenericInputLines = (input: Record<string, unknown>, workdir: string) => {
-  return Object.entries(input)
+  const fields = Object.entries(input)
     .filter(([, value]) => value !== undefined && value !== null)
     .sort(([a], [b]) => a.localeCompare(b))
     .flatMap(([key, value]) => {
       const formatted = formatGenericValue(key, value, workdir);
-      return formatted ? [`- ${titleCaseKey(key)}: ${formatted}`] : [];
+      return formatted ? [metaField(titleCaseKey(key), formatted)] : [];
     });
+
+  return packMetaFields(fields);
 };
 
 type FormatterInput = {
@@ -275,7 +378,7 @@ type FormatterInput = {
   input: Record<string, unknown>;
 };
 
-type ToolInputFormatter = (input: FormatterInput) => string[];
+type ToolInputFormatter = (input: FormatterInput) => ToolCardLine[];
 
 const formatPatchInputLines: ToolInputFormatter = ({ part, workdir, input }) => {
   const patchInput = findStringInput(input, ["patchText", "patch", "content", "diff", "input"]);
@@ -284,23 +387,23 @@ const formatPatchInputLines: ToolInputFormatter = ({ part, workdir, input }) => 
   const files = extractPatchFiles(`${patchInput ?? ""}\n${patchRaw}\n${patchOutput}`, workdir);
 
   if (files.length === 0) {
-    return part.state.status === "completed" ? ["Applied patch"] : [];
+    return part.state.status === "completed" ? [summaryLine("Applied patch")] : [];
   }
 
-  return [files.map((file) => `\`${file}\``).join(", ")];
+  return [summaryLine(files.map((file) => `\`${file}\``).join(", "))];
 };
 
 const formatBashInputLines: ToolInputFormatter = ({ part, workdir, input }) => {
   const command = findStringInput(input, ["cmd", "command", "script", "shell"]);
   if (command) {
-    return [formatTextValue(command, workdir, 220)];
+    return [summaryLine(formatTextValue(command, workdir, 220))];
   }
   if (
     "raw" in part.state &&
     typeof part.state.raw === "string" &&
     part.state.raw.trim().length > 0
   ) {
-    return [formatTextValue(part.state.raw, workdir, 220)];
+    return [summaryLine(formatTextValue(part.state.raw, workdir, 220))];
   }
   return [];
 };
@@ -310,18 +413,18 @@ const formatReadInputLines: ToolInputFormatter = ({ workdir, input }) => {
   if (!filePath) {
     return [];
   }
-  return [formatPathSummaryLine(filePath, workdir)];
+  return [summaryLine(formatPathSummaryLine(filePath, workdir))];
 };
 
 const formatGlobInputLines: ToolInputFormatter = ({ workdir, input }) => {
   const pattern = findStringInput(input, ["pattern", "glob", "query"]);
   const path = findStringInput(input, ["path", "cwd", "root"]);
   const hidden = findUnknownInput(input, ["includeHidden", "hidden", "dot"]);
-  const lines: string[] = [];
-  if (pattern) lines.push(`- Pattern: ${formatTextValue(pattern, workdir, 180)}`);
-  if (path) lines.push(`- Path: \`${displayPath(path, workdir)}\``);
-  if (typeof hidden === "boolean") lines.push(`- Hidden: \`${hidden}\``);
-  return lines;
+  return packMetaFields([
+    metaField("Pattern", pattern ? formatTextValue(pattern, workdir, 180) : null),
+    metaField("Path", path ? `\`${displayPath(path, workdir)}\`` : null),
+    metaField("Hidden", typeof hidden === "boolean" ? `\`${hidden}\`` : null),
+  ]);
 };
 
 const formatGrepInputLines: ToolInputFormatter = ({ workdir, input }) => {
@@ -329,60 +432,64 @@ const formatGrepInputLines: ToolInputFormatter = ({ workdir, input }) => {
   const path = findStringInput(input, ["path", "cwd", "root"]);
   const caseSensitive = findUnknownInput(input, ["caseSensitive", "ignoreCase"]);
   const context = findUnknownInput(input, ["context", "before", "after"]);
-  const lines: string[] = [];
-  if (pattern) lines.push(`- Pattern: ${formatTextValue(pattern, workdir, 180)}`);
-  if (path) lines.push(`- Path: \`${displayPath(path, workdir)}\``);
-  if (typeof caseSensitive === "boolean") lines.push(`- Case Sensitive: \`${caseSensitive}\``);
-  if (typeof context === "number") lines.push(`- Context: \`${context}\``);
-  return lines;
+  return packMetaFields([
+    metaField("Pattern", pattern ? formatTextValue(pattern, workdir, 180) : null),
+    metaField("Path", path ? `\`${displayPath(path, workdir)}\`` : null),
+    metaField("Case Sensitive", typeof caseSensitive === "boolean" ? `\`${caseSensitive}\`` : null),
+    metaField("Context", typeof context === "number" ? `\`${context}\`` : null),
+  ]);
 };
 
 const formatEditInputLines: ToolInputFormatter = ({ workdir, input }) => {
   const path = findStringInput(input, ["filePath", "path", "file"]);
   const search = findStringInput(input, ["oldText", "search", "find"]);
   const replace = findStringInput(input, ["newText", "replace", "replacement"]);
-  const lines: string[] = [];
-  if (path) lines.push(`- File: \`${displayPath(path, workdir)}\``);
-  if (search && replace) {
-    lines.push(
-      `- Edit: ${formatTextValue(`${singleLine(search)} -> ${singleLine(replace)}`, workdir, 200)}`,
-    );
-  }
-  return lines;
+  return packMetaFields([
+    metaField("File", path ? `\`${displayPath(path, workdir)}\`` : null),
+    metaField(
+      "Edit",
+      search && replace
+        ? formatTextValue(`${singleLine(search)} -> ${singleLine(replace)}`, workdir, 200)
+        : null,
+    ),
+  ]);
 };
 
 const formatWriteInputLines: ToolInputFormatter = ({ workdir, input }) => {
   const path = findStringInput(input, ["filePath", "path", "file"]);
   const content = findStringInput(input, ["content", "text"]);
-  const lines: string[] = [];
-  if (path) lines.push(formatPathSummaryLine(path, workdir));
-  if (content) lines.push(`- Size: \`${content.length} chars\``);
-  return lines;
+  return [
+    ...(path ? [summaryLine(formatPathSummaryLine(path, workdir))] : []),
+    ...packMetaFields([metaField("Size", content ? `\`${content.length} chars\`` : null)]),
+  ];
 };
 
 const formatTaskInputLines: ToolInputFormatter = ({ workdir, input }) => {
   const description = findStringInput(input, ["description", "prompt", "task"]);
   const agent = findStringInput(input, ["agent", "agentID", "subagent_type", "subagentType"]);
   const model = findStringInput(input, ["model", "modelID"]);
-  const lines: string[] = [];
-  if (description) lines.push(formatTextValue(description, workdir, 200));
-  if (agent) lines.push(`- Agent: \`${agent}\``);
-  if (model) lines.push(`- Model: \`${model}\``);
-  return lines;
+  return [
+    ...(description ? [summaryLine(formatTextValue(description, workdir, 200))] : []),
+    ...packMetaFields([
+      metaField("Agent", agent ? `\`${agent}\`` : null),
+      metaField("Model", model ? `\`${model}\`` : null),
+    ]),
+  ];
 };
 
 const formatWebfetchInputLines: ToolInputFormatter = ({ part, input }) => {
   const url = findStringInput(input, ["url", "link"]);
   const format = findStringInput(input, ["format"]);
-  const lines: string[] = [];
+  const metadata: Array<MetaField | null> = [];
+  const lines: ToolCardLine[] = [];
 
   if (url) {
     const compact = compactUrl(url);
-    lines.push(`\`${compact ? truncate(compact, 180) : truncate(url, 180)}\``);
+    lines.push(summaryLine(`\`${compact ? truncate(compact, 180) : truncate(url, 180)}\``));
   }
 
   if (format && format !== "markdown") {
-    lines.push(`- Format: \`${format}\``);
+    metadata.push(metaField("Format", `\`${format}\``));
   }
 
   if (part.state.status === "completed") {
@@ -392,34 +499,37 @@ const formatWebfetchInputLines: ToolInputFormatter = ({ part, input }) => {
       if (parsed) {
         if (url && parsed.url !== url) {
           const finalUrl = compactUrl(parsed.url);
-          lines.push(
-            `- Final URL: \`${finalUrl ? truncate(finalUrl, 180) : truncate(parsed.url, 180)}\``,
+          metadata.push(
+            metaField(
+              "Final URL",
+              `\`${finalUrl ? truncate(finalUrl, 180) : truncate(parsed.url, 180)}\``,
+            ),
           );
         }
-        lines.push(`- Response: \`${summarizeContentType(parsed.contentType)}\``);
+        metadata.push(metaField("Response", `\`${summarizeContentType(parsed.contentType)}\``));
       }
     }
   }
 
-  return lines;
+  return [...lines, ...packMetaFields(metadata)];
 };
 
 const formatSearchInputLines: ToolInputFormatter = ({ workdir, input }) => {
   const query = findStringInput(input, ["query", "q", "pattern", "search"]);
   const path = findStringInput(input, ["path", "cwd", "root"]);
-  const lines: string[] = [];
-  if (query) lines.push(formatTextValue(query, workdir, 180));
-  if (path) lines.push(`- Path: \`${displayPath(path, workdir)}\``);
-  return lines;
+  return [
+    ...(query ? [summaryLine(formatTextValue(query, workdir, 180))] : []),
+    ...packMetaFields([metaField("Path", path ? `\`${displayPath(path, workdir)}\`` : null)]),
+  ];
 };
 
 const formatSkillInputLines: ToolInputFormatter = ({ input }) => {
   const name = findStringInput(input, ["name", "skill", "id"]);
   const action = findStringInput(input, ["action", "mode", "op"]);
-  const lines: string[] = [];
-  if (name) lines.push(`- Skill: \`${name}\``);
-  if (action) lines.push(`- Action: \`${action}\``);
-  return lines;
+  return packMetaFields([
+    metaField("Skill", name ? `\`${name}\`` : null),
+    metaField("Action", action ? `\`${action}\`` : null),
+  ]);
 };
 
 const formatTodoInputLines: ToolInputFormatter = ({ input }) => {
@@ -428,7 +538,7 @@ const formatTodoInputLines: ToolInputFormatter = ({ input }) => {
     return [];
   }
 
-  const lines: string[] = [];
+  const lines: ToolCardLine[] = [];
   for (const todo of todos) {
     if (!todo || typeof todo !== "object") {
       continue;
@@ -454,33 +564,33 @@ const formatTodoInputLines: ToolInputFormatter = ({ input }) => {
             ? "⛔"
             : "🕒";
 
-    lines.push(`${emoji} ${truncate(singleLine(content), 120)}`);
+    lines.push(todoLine(`${emoji} ${truncate(singleLine(content), 120)}`));
   }
   return lines;
 };
 
 const formatPlanExitInputLines: ToolInputFormatter = ({ workdir, input }) => {
   const reason = findStringInput(input, ["reason", "message", "status"]);
-  return reason ? [`- Exit: ${formatTextValue(reason, workdir, 180)}`] : [];
+  return reason ? [statusLine("Exit", formatTextValue(reason, workdir, 180))] : [];
 };
 
 const formatBatchInputLines: ToolInputFormatter = ({ input }) => {
   const items = findUnknownInput(input, ["items", "calls", "tasks"]);
-  return Array.isArray(items) ? [`- Batched Calls: \`${items.length}\``] : [];
+  return Array.isArray(items) ? [metaLine("Batched Calls", `\`${items.length}\``)] : [];
 };
 
 const formatLspInputLines: ToolInputFormatter = ({ workdir, input }) => {
   const action = findStringInput(input, ["action", "method", "operation"]);
   const path = findStringInput(input, ["path", "filePath", "uri"]);
-  const lines: string[] = [];
-  if (action) lines.push(`- Action: \`${action}\``);
-  if (path) lines.push(`- Path: \`${displayPath(path, workdir)}\``);
-  return lines;
+  return packMetaFields([
+    metaField("Action", action ? `\`${action}\`` : null),
+    metaField("Path", path ? `\`${displayPath(path, workdir)}\`` : null),
+  ]);
 };
 
 const formatInvalidInputLines: ToolInputFormatter = ({ workdir, input }) => {
   const reason = findStringInput(input, ["reason", "error", "message"]);
-  return reason ? [`- Reason: ${formatTextValue(reason, workdir, 180)}`] : [];
+  return reason ? [statusLine("Reason", formatTextValue(reason, workdir, 180))] : [];
 };
 
 const TOOL_INPUT_FORMATTERS: Record<string, ToolInputFormatter> = {
@@ -517,7 +627,7 @@ const formatToolInputLines = (part: ToolPart, workdir: string) => {
   return formatGenericInputLines(input, workdir);
 };
 
-type StepDisplayMode = "hidden" | "summary" | "bullet";
+type StepDisplayMode = "hidden" | "summary" | "meta";
 
 const TOOL_STEP_DISPLAY: Record<string, StepDisplayMode> = {
   bash: "summary",
@@ -536,7 +646,7 @@ const stepDisplayMode = (tool: string): StepDisplayMode => {
     return "hidden";
   }
 
-  return TOOL_STEP_DISPLAY[tool] ?? "bullet";
+  return TOOL_STEP_DISPLAY[tool] ?? "meta";
 };
 
 const shouldShowStep = (step: string) => {
@@ -562,9 +672,9 @@ const formatStepLine = (part: ToolPart, step: string) => {
     case "hidden":
       return null;
     case "summary":
-      return step;
-    case "bullet":
-      return `- Step: ${step}`;
+      return summaryLine(step);
+    case "meta":
+      return metaLine("Step", step);
   }
 };
 
@@ -610,7 +720,7 @@ const renderToolCard = (input: {
 
   const inputLines = formatToolInputLines(part, input.workdir);
   if (inputLines.length > 0) {
-    lines.push(...inputLines);
+    lines.push(...inputLines.map(renderToolCardLine));
   }
 
   const title = titleForPart(part);
@@ -618,22 +728,31 @@ const renderToolCard = (input: {
     const step = normalizeDisplayText(title, input.workdir);
     const stepLine = formatStepLine(part, step);
     if (stepLine) {
-      lines.push(stepLine);
+      lines.push(renderToolCardLine(stepLine));
     }
   }
 
   const resultInfo = searchResultInfo(part);
   if (resultInfo && "count" in resultInfo) {
-    lines.push(`- Results: \`${resultInfo.count}\``);
+    lines.push(renderToolCardLine(statusLine("Results", `\`${resultInfo.count}\``)));
   } else if (resultInfo && "error" in resultInfo) {
-    lines.push(`- Results Error: \`${resultInfo.error}\``);
+    lines.push(renderToolCardLine(statusLine("Results Error", `\`${resultInfo.error}\``)));
   }
 
   if (terminalState === "shutdown") {
-    lines.push("- Note: This tool did not complete because the bot shut down.");
+    lines.push(
+      renderToolCardLine(
+        statusLine("Note", "This tool did not complete because the bot shut down."),
+      ),
+    );
   } else if (part.state.status === "error") {
     lines.push(
-      `- Error: \`${truncate(normalizeDisplayText(part.state.error, input.workdir), 600)}\``,
+      renderToolCardLine(
+        statusLine(
+          "Error",
+          `\`${truncate(normalizeDisplayText(part.state.error, input.workdir), 600)}\``,
+        ),
+      ),
     );
   }
 
