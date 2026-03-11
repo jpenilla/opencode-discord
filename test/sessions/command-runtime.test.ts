@@ -309,7 +309,9 @@ describe("createCommandRuntime", () => {
     expect(handled).toBe(true);
     expect(harness.activeRun.interruptRequested).toBe(true);
     expect(await getRef(harness.typingStopCount)).toBe(0);
-    expect(await getRef(harness.edits)).toEqual(["Requested interruption of the active OpenCode run."]);
+    expect(await getRef(harness.edits)).toEqual([
+      "Requested interruption of the active OpenCode run.",
+    ]);
   });
 
   test("rejects interrupt while a question prompt is pending", async () => {

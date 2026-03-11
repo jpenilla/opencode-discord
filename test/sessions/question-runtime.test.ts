@@ -55,16 +55,20 @@ const makeHarness = async (options?: {
     channelId: "channel-1",
     author: { id: "owner", tag: "owner#0001" },
     reply: (payload: MessageCreateOptions) =>
-      Effect.runPromise(Ref.update(postedPayloads, (current) => [...current, payload])).then(async () => {
-        if (options?.blockQuestionPost) {
-          await Effect.runPromise(Deferred.succeed(questionPostStarted, undefined).pipe(Effect.ignore));
-          await Effect.runPromise(Deferred.await(allowQuestionPost));
-        }
-        if (options?.postQuestionResult === "failure") {
-          throw new Error("post failed");
-        }
-        return questionMessage;
-      }),
+      Effect.runPromise(Ref.update(postedPayloads, (current) => [...current, payload])).then(
+        async () => {
+          if (options?.blockQuestionPost) {
+            await Effect.runPromise(
+              Deferred.succeed(questionPostStarted, undefined).pipe(Effect.ignore),
+            );
+            await Effect.runPromise(Deferred.await(allowQuestionPost));
+          }
+          if (options?.postQuestionResult === "failure") {
+            throw new Error("post failed");
+          }
+          return questionMessage;
+        },
+      ),
   });
 
   const activeRun: ActiveRun = {
@@ -324,7 +328,9 @@ describe("createQuestionRuntime", () => {
       }),
     );
 
-    await Effect.runPromise(harness.runtime.terminateForSession(harness.session.opencode.sessionId));
+    await Effect.runPromise(
+      harness.runtime.terminateForSession(harness.session.opencode.sessionId),
+    );
 
     const handled = await Effect.runPromise(
       harness.runtime.handleInteraction(
@@ -376,13 +382,17 @@ describe("createQuestionRuntime", () => {
     await Effect.runPromise(
       harness.runtime.terminateForSession(harness.session.opencode.sessionId),
     );
-    await Effect.runPromise(Deferred.succeed(harness.allowQuestionPost, undefined).pipe(Effect.ignore));
+    await Effect.runPromise(
+      Deferred.succeed(harness.allowQuestionPost, undefined).pipe(Effect.ignore),
+    );
     await asked;
 
     const edits = await getRef(harness.editedPayloads);
     expect(edits).toHaveLength(1);
     expect(JSON.stringify(edits[0])).toContain("Questions expired");
-    expect(JSON.stringify(edits[0])).toContain("This question prompt expired before it was answered.");
+    expect(JSON.stringify(edits[0])).toContain(
+      "This question prompt expired before it was answered.",
+    );
   });
 
   test("ignores new question cards after shutdown begins", async () => {
@@ -422,7 +432,9 @@ describe("createQuestionRuntime", () => {
         answers: [["Yes"]] satisfies ReadonlyArray<QuestionAnswer>,
       }),
     );
-    await Effect.runPromise(Deferred.succeed(harness.allowQuestionPost, undefined).pipe(Effect.ignore));
+    await Effect.runPromise(
+      Deferred.succeed(harness.allowQuestionPost, undefined).pipe(Effect.ignore),
+    );
     await asked;
 
     const edits = await getRef(harness.editedPayloads);

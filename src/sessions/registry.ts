@@ -391,79 +391,77 @@ export const ChannelSessionsLive = Layer.scoped(
       );
 
     const shutdown = () =>
-      Ref.modify(
-        shutdownStartedRef,
-        (started): readonly [Effect.Effect<void, unknown>, boolean] =>
-          started
-            ? [Effect.void, true]
-            : [
-                Effect.gen(function* () {
-                  const state = yield* Ref.get(stateRef);
-                  const activeRuns = [...state.activeRunsBySessionId.entries()];
-                  const idleCompactionIds = [...state.idleCompactionsBySessionId.keys()];
-                  const stoppedCompactionCard = compactionCardContent("stopped");
+      Ref.modify(shutdownStartedRef, (started): readonly [Effect.Effect<void, unknown>, boolean] =>
+        started
+          ? [Effect.void, true]
+          : [
+              Effect.gen(function* () {
+                const state = yield* Ref.get(stateRef);
+                const activeRuns = [...state.activeRunsBySessionId.entries()];
+                const idleCompactionIds = [...state.idleCompactionsBySessionId.keys()];
+                const stoppedCompactionCard = compactionCardContent("stopped");
 
-                  yield* questionRuntime.shutdown().pipe(
-                    Effect.catchAll((error) =>
-                      logger.warn("failed to shut down question runtime", {
-                        error: formatError(error),
-                      }),
-                    ),
-                  );
+                yield* questionRuntime.shutdown().pipe(
+                  Effect.catchAll((error) =>
+                    logger.warn("failed to shut down question runtime", {
+                      error: formatError(error),
+                    }),
+                  ),
+                );
 
-                  yield* Effect.forEach(
-                    activeRuns,
-                    ([sessionId, activeRun]) =>
-                      Effect.gen(function* () {
-                        yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore);
-                        yield* activeRun.finalizeProgress("shutdown").pipe(
-                          Effect.catchAll((error) =>
-                            logger.warn("failed to finalize active run progress on shutdown", {
-                              sessionId,
-                              error: formatError(error),
-                            }),
-                          ),
-                        );
-                      }),
-                    { concurrency: "unbounded", discard: true },
-                  );
-
-                  yield* Effect.forEach(
-                    idleCompactionIds,
-                    (sessionId) =>
-                      finalizeIdleCompactionCard(
-                        sessionId,
-                        stoppedCompactionCard.title,
-                        stoppedCompactionCard.body,
-                      ).pipe(
+                yield* Effect.forEach(
+                  activeRuns,
+                  ([sessionId, activeRun]) =>
+                    Effect.gen(function* () {
+                      yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore);
+                      yield* activeRun.finalizeProgress("shutdown").pipe(
                         Effect.catchAll((error) =>
-                          logger.warn("failed to finalize idle compaction on shutdown", {
+                          logger.warn("failed to finalize active run progress on shutdown", {
                             sessionId,
                             error: formatError(error),
                           }),
                         ),
-                      ),
-                    { concurrency: "unbounded", discard: true },
-                  );
+                      );
+                    }),
+                  { concurrency: "unbounded", discard: true },
+                );
 
-                  yield* FiberSet.clear(fiberSet).pipe(
-                    Effect.catchAll((error) =>
-                      logger.warn("failed to interrupt session workers on shutdown", {
-                        error: formatError(error),
-                      }),
+                yield* Effect.forEach(
+                  idleCompactionIds,
+                  (sessionId) =>
+                    finalizeIdleCompactionCard(
+                      sessionId,
+                      stoppedCompactionCard.title,
+                      stoppedCompactionCard.body,
+                    ).pipe(
+                      Effect.catchAll((error) =>
+                        logger.warn("failed to finalize idle compaction on shutdown", {
+                          sessionId,
+                          error: formatError(error),
+                        }),
+                      ),
                     ),
-                  );
-                  yield* shutdownSessions().pipe(
-                    Effect.catchAll((error) =>
-                      logger.warn("failed to shut down sessions", {
-                        error: formatError(error),
-                      }),
-                    ),
-                  );
-                  yield* Ref.set(lateIdleCompactionFinalizersRef, new Map());
-                }),
-                true,
-              ],
+                  { concurrency: "unbounded", discard: true },
+                );
+
+                yield* FiberSet.clear(fiberSet).pipe(
+                  Effect.catchAll((error) =>
+                    logger.warn("failed to interrupt session workers on shutdown", {
+                      error: formatError(error),
+                    }),
+                  ),
+                );
+                yield* shutdownSessions().pipe(
+                  Effect.catchAll((error) =>
+                    logger.warn("failed to shut down sessions", {
+                      error: formatError(error),
+                    }),
+                  ),
+                );
+                yield* Ref.set(lateIdleCompactionFinalizersRef, new Map());
+              }),
+              true,
+            ],
       ).pipe(
         Effect.flatten,
         Effect.catchAll((error) =>
@@ -473,9 +471,7 @@ export const ChannelSessionsLive = Layer.scoped(
         ),
       );
 
-    yield* Effect.addFinalizer(() =>
-      shutdown(),
-    );
+    yield* Effect.addFinalizer(() => shutdown());
 
     return {
       submit: (message, invocation): FallibleEffect<void> =>

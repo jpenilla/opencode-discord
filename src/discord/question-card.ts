@@ -316,11 +316,7 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
     ),
   );
 
-  if (
-    input.status === "answered" ||
-    input.status === "rejected" ||
-    input.status === "expired"
-  ) {
+  if (input.status === "answered" || input.status === "rejected" || input.status === "expired") {
     const resolvedSections = renderResolvedQuestionSections(input).filter(Boolean);
     for (const [index, section] of resolvedSections.entries()) {
       if (index > 0) {

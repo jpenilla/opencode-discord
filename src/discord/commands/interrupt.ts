@@ -16,10 +16,9 @@ import {
 
 const executeInterruptSession: GuildCommand["execute"] = (context) =>
   Effect.gen(function* () {
-    const hasPendingQuestions =
-      context.session?.activeRun
-        ? yield* context.deps.hasPendingQuestions(context.session.opencode.sessionId)
-        : false;
+    const hasPendingQuestions = context.session?.activeRun
+      ? yield* context.deps.hasPendingQuestions(context.session.opencode.sessionId)
+      : false;
     const interruptEntry = decideInterruptEntry({
       inGuildTextChannel: context.inGuildTextChannel,
       hasSession: !!context.session,

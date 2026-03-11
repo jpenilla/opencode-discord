@@ -825,9 +825,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
         }
       });
 
-    const terminateMatchingBatches = (
-      predicate: (batch: PendingQuestionBatch) => boolean,
-    ) =>
+    const terminateMatchingBatches = (predicate: (batch: PendingQuestionBatch) => boolean) =>
       Effect.gen(function* () {
         const { terminated, sessionIds } = yield* Ref.modify(
           batchesRef,
@@ -854,7 +852,9 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
             return [
               {
                 terminated,
-                sessionIds: [...new Set(terminated.map((batch) => batch.session.opencode.sessionId))],
+                sessionIds: [
+                  ...new Set(terminated.map((batch) => batch.session.opencode.sessionId)),
+                ],
               },
               batches,
             ];
@@ -903,12 +903,8 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
       terminateMatchingBatches((batch) => batch.session.opencode.sessionId === sessionId);
 
     const shutdown = () =>
-      Ref.modify(
-        shutdownStartedRef,
-        (started): readonly [Effect.Effect<void, unknown>, boolean] =>
-          started
-            ? [Effect.void, true]
-            : [terminateMatchingBatches(() => true), true],
+      Ref.modify(shutdownStartedRef, (started): readonly [Effect.Effect<void, unknown>, boolean] =>
+        started ? [Effect.void, true] : [terminateMatchingBatches(() => true), true],
       ).pipe(Effect.flatten);
 
     return {

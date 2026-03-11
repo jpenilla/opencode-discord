@@ -96,7 +96,10 @@ const cardText = (payload: unknown) =>
       .components?.[0]?.components?.[0]?.data?.content ?? "",
   );
 
-const waitForReplyPayload = (replyPayloads: Ref.Ref<unknown[]>, predicate: (payload: unknown) => boolean) =>
+const waitForReplyPayload = (
+  replyPayloads: Ref.Ref<unknown[]>,
+  predicate: (payload: unknown) => boolean,
+) =>
   Ref.get(replyPayloads).pipe(
     Effect.flatMap((payloads) =>
       payloads.some(predicate) ? Effect.void : Effect.fail(new Error("payload not posted yet")),
