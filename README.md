@@ -163,6 +163,10 @@ Main variables:
   Optional extra instructions appended to OpenCode's system prompt for each Discord channel session
 - `STATE_DIR`
   Persistent storage root. Default: `./storage`
+- `DEFAULT_PROVIDER_ID`
+  Optional provider id override applied to each session prompt when paired with `DEFAULT_MODEL_ID`
+- `DEFAULT_MODEL_ID`
+  Optional model id override applied to each session prompt when paired with `DEFAULT_PROVIDER_ID`
 - `SHOW_THINKING_BY_DEFAULT`
   Whether thinking progress messages are shown by default in channels without an override yet. Default: `true`
 - `SHOW_COMPACTION_SUMMARIES_BY_DEFAULT`
@@ -187,6 +191,7 @@ Notes:
 - `DISCORD_TOKEN` is the only required env var.
 - `SESSION_INSTRUCTIONS` is applied per OpenCode session, not injected into every visible Discord message.
 - `STATE_DIR` stores both the SQLite metadata DB and per-channel session homes/workspaces.
+- `DEFAULT_PROVIDER_ID` and `DEFAULT_MODEL_ID` are only used when both are set; otherwise the bot keeps using OpenCode's normal default model resolution.
 - `SESSION_IDLE_TIMEOUT_MS` closes only the worker process after inactivity; the persisted thread and files remain and are reopened lazily.
 - `SANDBOX_READ_ONLY_PATHS` replaces the default `bwrap` read-only bind list; it does not append to it.
 - `SANDBOX_ENV_PASSTHROUGH` is for additional env vars only. OpenCode auth should usually come from host state.

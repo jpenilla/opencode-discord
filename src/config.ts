@@ -1,10 +1,12 @@
-import { Config, ConfigProvider, Context, Effect, Layer, Redacted } from "effect";
+import { Config, ConfigProvider, Context, Effect, Layer, Option, Redacted } from "effect";
 
 export type AppConfigShape = {
   discordToken: Redacted.Redacted<string>;
   triggerPhrase: string;
   sessionInstructions: string;
   stateDir: string;
+  defaultProviderId?: string;
+  defaultModelId?: string;
   showThinkingByDefault: boolean;
   showCompactionSummariesByDefault: boolean;
   sessionIdleTimeoutMs: number;
@@ -34,11 +36,21 @@ const positiveInteger = (name: string, fallback: number) =>
 const stringList = (name: string) =>
   Config.withDefault(Config.array(Config.string(), name), [] as Array<string>);
 
+const optionalString = (name: string) =>
+  Config.map(Config.option(Config.string(name)), (value) =>
+    Option.match(value, {
+      onNone: () => undefined,
+      onSome: (entry) => entry,
+    }),
+  );
+
 const AppConfigSource: Config.Config<AppConfigShape> = Config.all({
   discordToken: Config.redacted(Config.nonEmptyString("discordToken")),
   triggerPhrase: Config.withDefault(Config.string("triggerPhrase"), "hey opencode"),
   sessionInstructions: Config.withDefault(Config.string("sessionInstructions"), ""),
   stateDir: Config.withDefault(Config.string("stateDir"), "./storage"),
+  defaultProviderId: optionalString("defaultProviderId"),
+  defaultModelId: optionalString("defaultModelId"),
   showThinkingByDefault: Config.withDefault(Config.boolean("showThinkingByDefault"), true),
   showCompactionSummariesByDefault: Config.withDefault(
     Config.boolean("showCompactionSummariesByDefault"),

@@ -43,6 +43,8 @@ const makeConfig = (): AppConfigShape => ({
   triggerPhrase: "hey opencode",
   sessionInstructions: "",
   stateDir: TEST_STATE_DIR,
+  defaultProviderId: undefined,
+  defaultModelId: undefined,
   showThinkingByDefault: true,
   showCompactionSummariesByDefault: true,
   sessionIdleTimeoutMs: 30 * 60 * 1_000,

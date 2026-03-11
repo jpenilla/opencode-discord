@@ -9,6 +9,11 @@ import { fileURLToPath } from "node:url";
 
 import { AppConfig } from "@/config.ts";
 import { OpencodeEventQueue, type OpencodeEventQueueShape } from "@/opencode/events.ts";
+import {
+  buildPromptRequestInput,
+  hasIncompletePromptModelOverride,
+  resolvePromptModelOverride,
+} from "@/opencode/prompt-model.ts";
 import { renderTranscript } from "@/opencode/transcript.ts";
 import {
   describeSandboxBackend,
@@ -326,6 +331,14 @@ export const OpencodeServiceLive = Layer.scoped(
           }),
         ),
       );
+    const promptModelOverride = resolvePromptModelOverride(config);
+
+    if (hasIncompletePromptModelOverride(config)) {
+      yield* logger.warn("ignoring incomplete default model override", {
+        hasProviderId: Boolean(config.defaultProviderId),
+        hasModelId: Boolean(config.defaultModelId),
+      });
+    }
 
     const bootstrapSession = (
       workdir: string,
@@ -440,11 +453,9 @@ export const OpencodeServiceLive = Layer.scoped(
       submitPrompt: (session, prompt) =>
         Effect.gen(function* () {
           const result = yield* Effect.promise(() =>
-            session.client.session.promptAsync({
-              sessionID: session.sessionId,
-              noReply: false,
-              parts: [{ type: "text", text: prompt }],
-            }),
+            session.client.session.promptAsync(
+              buildPromptRequestInput(session.sessionId, prompt, promptModelOverride),
+            ),
           );
 
           if (result.error) {
