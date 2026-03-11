@@ -6,6 +6,7 @@ import {
   decideCompactEntry,
   decideInterruptEntry,
   decideRunCompletion,
+  QUESTION_PENDING_INTERRUPT_MESSAGE,
 } from "@/sessions/command-lifecycle.ts";
 
 describe("decideCompactEntry", () => {
@@ -81,6 +82,7 @@ describe("decideInterruptEntry", () => {
         inGuildTextChannel: false,
         hasSession: true,
         hasActiveRun: true,
+        hasPendingQuestions: false,
         hasIdleCompaction: false,
       }),
     ).toEqual({
@@ -95,6 +97,7 @@ describe("decideInterruptEntry", () => {
         inGuildTextChannel: true,
         hasSession: false,
         hasActiveRun: false,
+        hasPendingQuestions: false,
         hasIdleCompaction: false,
       }),
     ).toEqual({
@@ -109,6 +112,7 @@ describe("decideInterruptEntry", () => {
         inGuildTextChannel: true,
         hasSession: true,
         hasActiveRun: false,
+        hasPendingQuestions: false,
         hasIdleCompaction: false,
       }),
     ).toEqual({
@@ -123,9 +127,25 @@ describe("decideInterruptEntry", () => {
         inGuildTextChannel: true,
         hasSession: true,
         hasActiveRun: true,
+        hasPendingQuestions: false,
         hasIdleCompaction: false,
       }),
     ).toEqual({ type: "defer-and-interrupt", target: "run" });
+  });
+
+  test("rejects active run interrupts while a question prompt is pending", () => {
+    expect(
+      decideInterruptEntry({
+        inGuildTextChannel: true,
+        hasSession: true,
+        hasActiveRun: true,
+        hasPendingQuestions: true,
+        hasIdleCompaction: false,
+      }),
+    ).toEqual({
+      type: "reject",
+      message: QUESTION_PENDING_INTERRUPT_MESSAGE,
+    });
   });
 
   test("allows active compactions through to interruption", () => {
@@ -134,6 +154,7 @@ describe("decideInterruptEntry", () => {
         inGuildTextChannel: true,
         hasSession: true,
         hasActiveRun: false,
+        hasPendingQuestions: false,
         hasIdleCompaction: true,
       }),
     ).toEqual({ type: "defer-and-interrupt", target: "compaction" });

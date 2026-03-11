@@ -64,6 +64,7 @@ export type QuestionRuntimeEvent =
 export type QuestionRuntime = {
   handleEvent: (event: QuestionRuntimeEvent) => Effect.Effect<void, unknown>;
   handleInteraction: (interaction: Interaction) => Effect.Effect<boolean, unknown>;
+  hasPendingQuestionsForSession: (sessionId: string) => Effect.Effect<boolean>;
   terminateForSession: (
     sessionId: string,
     reason: Extract<RunFinalizationReason, "interrupted"> | "expired",
@@ -931,6 +932,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
         }
       },
       handleInteraction,
+      hasPendingQuestionsForSession,
       terminateForSession,
       shutdown,
     } satisfies QuestionRuntime;

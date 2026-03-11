@@ -8,6 +8,7 @@ import {
   type Message,
   type MessageCreateOptions,
   type MessageEditOptions,
+  MessageFlags,
   type SendableChannels,
 } from "discord.js";
 import { Deferred, Effect, Layer, Queue, Redacted, Ref } from "effect";
@@ -27,6 +28,7 @@ import {
   type SessionHandle,
 } from "@/opencode/service.ts";
 import { ChannelSessions, ChannelSessionsLive } from "@/sessions/registry.ts";
+import { QUESTION_PENDING_INTERRUPT_MESSAGE } from "@/sessions/command-lifecycle.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import {
   SessionStore,
@@ -969,6 +971,60 @@ describe("ChannelSessionsLive integration", () => {
     ]);
     expect(await getRef(harness.replies)).toEqual([]);
     expect((await getRef(harness.sentPayloads)).map(cardText)).toContain(
+      "**‼️ Run interrupted**\nOpenCode stopped the active run in this channel.",
+    );
+  });
+
+  test("rejects /interrupt while a question prompt is awaiting input", async () => {
+    const promptStarted = await Effect.runPromise(Deferred.make<void>());
+    const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>());
+    const harness = await makeHarness({
+      promptImpl: ({ completePrompt }) =>
+        Deferred.succeed(promptStarted, undefined).pipe(
+          Effect.zipRight(Deferred.await(allowPromptToFinish)),
+          Effect.zipRight(
+            completePrompt({
+              messageId: "assistant-1",
+              transcript: "done",
+            }),
+          ),
+        ),
+    });
+    const message = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    });
+    const command = harness.makeCommandInteraction("interrupt");
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions;
+          yield* sessions.submit(message, { prompt: "hello" });
+          yield* Deferred.await(promptStarted);
+          yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));
+          yield* waitForReplyPayload(harness.replyPayloads, (payload) =>
+            cardText(payload).includes("❓ Questions need answers"),
+          );
+          yield* sessions.handleInteraction(command.interaction);
+          yield* Effect.promise(() => harness.publishEvent(makeQuestionRepliedEvent()));
+          yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore);
+          yield* Queue.take(harness.replyEvents);
+        }).pipe(Effect.provide(harness.layer)),
+      ),
+    );
+
+    expect(await getRef(harness.interruptCalls)).toBe(0);
+    expect(await getRef(command.interactionDefers)).toBe(0);
+    expect(await getRef(command.interactionReplies)).toEqual([
+      {
+        content: QUESTION_PENDING_INTERRUPT_MESSAGE,
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { parse: [] },
+      },
+    ]);
+    expect(await getRef(command.interactionEdits)).toEqual([]);
+    expect((await getRef(harness.sentPayloads)).map(cardText)).not.toContain(
       "**‼️ Run interrupted**\nOpenCode stopped the active run in this channel.",
     );
   });

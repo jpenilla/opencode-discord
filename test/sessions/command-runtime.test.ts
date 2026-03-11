@@ -4,6 +4,7 @@ import { Deferred, Effect, Ref } from "effect";
 
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { createCommandRuntime } from "@/sessions/command-runtime.ts";
+import { QUESTION_PENDING_INTERRUPT_MESSAGE } from "@/sessions/command-lifecycle.ts";
 import { createPromptState } from "@/sessions/prompt-state.ts";
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
@@ -15,6 +16,7 @@ const makeHarness = async (options?: {
   sessionHealthy?: boolean;
   interruptResult?: "success" | "failure";
   hasActiveRun?: boolean;
+  hasPendingQuestions?: boolean;
   hasSession?: boolean;
   initialChannelSettings?: PersistedChannelSettings | null;
 }) => {
@@ -158,6 +160,7 @@ const makeHarness = async (options?: {
       Effect.all([Ref.get(idleCompactionActive), Ref.get(idleCardRef)]).pipe(
         Effect.map(([active, card]) => active || card !== null),
       ),
+    hasPendingQuestions: () => Effect.succeed(options?.hasPendingQuestions ?? false),
     getIdleCompactionCard: (_sessionId) => Ref.get(idleCardRef),
     beginIdleCompaction: () => Ref.set(idleCompactionActive, true),
     setIdleCompactionCard: (_sessionId, card) =>
@@ -312,6 +315,24 @@ describe("createCommandRuntime", () => {
       },
     ]);
     expect(await getRef(harness.edits)).toEqual(["Interrupted the active OpenCode run."]);
+  });
+
+  test("rejects interrupt while a question prompt is pending", async () => {
+    const harness = await makeHarness({
+      hasActiveRun: true,
+      hasPendingQuestions: true,
+    });
+    harness.interaction.commandName = "interrupt";
+
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+
+    expect(handled).toBe(true);
+    expect(harness.activeRun.interruptRequested).toBe(false);
+    expect(await getRef(harness.defers)).toBe(0);
+    expect(await getRef(harness.replies)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
+    expect(await getRef(harness.edits)).toEqual([]);
+    expect(await getRef(harness.typingStopCount)).toBe(0);
+    expect(await getRef(harness.sentInfoCards)).toEqual([]);
   });
 
   test("interrupts an active compaction card without posting a run card", async () => {

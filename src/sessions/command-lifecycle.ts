@@ -3,6 +3,8 @@ import type { ActiveRun, QuestionOutcome } from "@/sessions/session.ts";
 export type CommandRejection = { type: "reject"; message: string };
 export const GUILD_TEXT_COMMAND_ONLY_MESSAGE =
   "This command only works in standard guild text channels.";
+export const QUESTION_PENDING_INTERRUPT_MESSAGE =
+  "A question prompt is awaiting input in this channel. Answer it or reject it instead of interrupting the run.";
 
 export const decideCompactEntry = (input: {
   inGuildTextChannel: boolean;
@@ -40,6 +42,7 @@ export const decideInterruptEntry = (input: {
   inGuildTextChannel: boolean;
   hasSession: boolean;
   hasActiveRun: boolean;
+  hasPendingQuestions: boolean;
   hasIdleCompaction: boolean;
 }): CommandRejection | { type: "defer-and-interrupt"; target: "run" | "compaction" } => {
   if (!input.inGuildTextChannel) {
@@ -49,6 +52,12 @@ export const decideInterruptEntry = (input: {
     return { type: "reject", message: "No OpenCode session exists in this channel yet." };
   }
   if (input.hasActiveRun) {
+    if (input.hasPendingQuestions) {
+      return {
+        type: "reject",
+        message: QUESTION_PENDING_INTERRUPT_MESSAGE,
+      };
+    }
     return { type: "defer-and-interrupt", target: "run" };
   }
   if (input.hasIdleCompaction) {

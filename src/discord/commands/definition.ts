@@ -14,6 +14,7 @@ export type GuildCommandRuntimeDeps = {
   upsertChannelSettings: (settings: PersistedChannelSettings) => Effect.Effect<void, unknown>;
   channelSettingsDefaults: ChannelSettings;
   hasIdleCompaction: (sessionId: string) => Effect.Effect<boolean, unknown>;
+  hasPendingQuestions: (sessionId: string) => Effect.Effect<boolean, unknown>;
   getIdleCompactionCard: (sessionId: string) => Effect.Effect<Message | null, unknown>;
   beginIdleCompaction: (sessionId: string) => Effect.Effect<void, unknown>;
   setIdleCompactionCard: (sessionId: string, card: Message | null) => Effect.Effect<void, unknown>;

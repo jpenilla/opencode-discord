@@ -353,6 +353,7 @@ export const ChannelSessionsLive = Layer.scoped(
       upsertChannelSettings: sessionStore.upsertChannelSettings,
       channelSettingsDefaults,
       hasIdleCompaction,
+      hasPendingQuestions: questionRuntime.hasPendingQuestionsForSession,
       getIdleCompactionCard,
       beginIdleCompaction,
       setIdleCompactionCard: attachIdleCompactionCard,
