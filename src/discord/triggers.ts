@@ -25,10 +25,17 @@ export const detectInvocation = async (input: {
   client: Client;
   message: Message;
   triggerPhrase: string;
+  ignoreOtherBotTriggers: boolean;
 }): Promise<Invocation | null> => {
-  const { client, message, triggerPhrase } = input;
+  const { client, message, triggerPhrase, ignoreOtherBotTriggers } = input;
   const botUser = client.user;
   if (!botUser) {
+    return null;
+  }
+  if (message.author.id === botUser.id) {
+    return null;
+  }
+  if (ignoreOtherBotTriggers && message.author.bot) {
     return null;
   }
 

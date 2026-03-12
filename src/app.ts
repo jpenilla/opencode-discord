@@ -95,14 +95,12 @@ export const DiscordBotLive = Layer.scoped(
       if (message.channel.type !== ChannelType.GuildText) {
         return;
       }
-      if (message.author.bot) {
-        return;
-      }
 
       const invocation = await detectInvocation({
         client,
         message,
         triggerPhrase: config.triggerPhrase,
+        ignoreOtherBotTriggers: config.ignoreOtherBotTriggers,
       });
 
       if (!invocation) {

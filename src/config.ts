@@ -3,6 +3,7 @@ import { Config, ConfigProvider, Context, Effect, Layer, Option, Redacted } from
 export type AppConfigShape = {
   discordToken: Redacted.Redacted<string>;
   triggerPhrase: string;
+  ignoreOtherBotTriggers: boolean;
   sessionInstructions: string;
   stateDir: string;
   defaultProviderId?: string;
@@ -47,6 +48,7 @@ const optionalString = (name: string) =>
 const AppConfigSource: Config.Config<AppConfigShape> = Config.all({
   discordToken: Config.redacted(Config.nonEmptyString("discordToken")),
   triggerPhrase: Config.withDefault(Config.string("triggerPhrase"), "hey opencode"),
+  ignoreOtherBotTriggers: Config.withDefault(Config.boolean("ignoreOtherBotTriggers"), false),
   sessionInstructions: Config.withDefault(Config.string("sessionInstructions"), ""),
   stateDir: Config.withDefault(Config.string("stateDir"), "./storage"),
   defaultProviderId: optionalString("defaultProviderId"),

@@ -18,7 +18,8 @@ What the bot does:
 Current scope:
 
 - Supported: standard guild text channels.
-- Ignored: DMs, threads, forum posts, announcement channels, and bot-authored messages.
+- Ignored: DMs, threads, forum posts, announcement channels, and this bot's own messages.
+- Other bot-authored messages are allowed by default. Set `IGNORE_OTHER_BOT_TRIGGERS=true` to ignore them.
 - Channel session metadata is persisted in SQLite.
 - Channel-level visibility preferences for thinking messages and compaction summaries are persisted in SQLite.
 - Per-channel session homes/workspaces are stored under `./storage` by default.
@@ -26,7 +27,7 @@ Current scope:
 
 ## How Invocation Works
 
-The bot starts a run when a user message in a supported channel does one of these:
+The bot starts a run when a message in a supported channel does one of these:
 
 - Mentions the bot.
 - Starts with the configured trigger phrase.
@@ -37,6 +38,8 @@ Behavior details:
 - Trigger phrase matching is case-insensitive.
 - Reply-without-ping does not count as a trigger.
 - Reply-to-bot invocation includes the replied bot message text as reply context for the next run.
+- The bot always ignores its own messages.
+- Set `IGNORE_OTHER_BOT_TRIGGERS=true` to also ignore other bot-authored messages.
 
 Default trigger phrase: `hey opencode`
 
@@ -159,6 +162,8 @@ Main variables:
   Discord bot token. Required.
 - `TRIGGER_PHRASE`
   Leading text trigger. Default: `hey opencode`
+- `IGNORE_OTHER_BOT_TRIGGERS`
+  Whether to ignore trigger phrase, mention, and reply triggers from other bots. Default: `false`
 - `SESSION_INSTRUCTIONS`
   Optional extra instructions appended to OpenCode's system prompt for each Discord channel session
 - `STATE_DIR`

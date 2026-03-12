@@ -43,6 +43,7 @@ const TEST_STATE_DIR = join(tmpdir(), `.opencode-discord-test-storage-${process.
 const makeConfig = (): AppConfigShape => ({
   discordToken: Redacted.make("discord-token"),
   triggerPhrase: "hey opencode",
+  ignoreOtherBotTriggers: false,
   sessionInstructions: "",
   stateDir: TEST_STATE_DIR,
   defaultProviderId: undefined,
