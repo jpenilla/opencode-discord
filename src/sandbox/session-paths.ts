@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 export const SANDBOX_HOME_DIR = "/home/opencode";
@@ -5,7 +6,7 @@ export const SANDBOX_WORKSPACE_DIR = `${SANDBOX_HOME_DIR}/workspace`;
 
 export const sessionHomeDir = (workdir: string) => dirname(resolve(workdir));
 
-const pathAliases = (path: string) => {
+export const pathAliases = (path: string) => {
   const normalized = resolve(path);
   const aliases = new Set<string>([normalized]);
   if (normalized.startsWith("/private/")) {
@@ -16,7 +17,7 @@ const pathAliases = (path: string) => {
   return [...aliases];
 };
 
-const relativeToAliasedRoot = (root: string, candidate: string) => {
+export const relativeToAliasedRoot = (root: string, candidate: string) => {
   for (const rootAlias of pathAliases(root)) {
     for (const candidateAlias of pathAliases(candidate)) {
       const rel = relative(rootAlias, candidateAlias);
@@ -58,8 +59,26 @@ export const resolveSessionPath = (workdir: string, candidate: string) => {
   return isAbsolute(normalized) ? resolve(normalized) : resolve(workdir, normalized);
 };
 
-export const displaySessionPath = (workdir: string, candidate: string) => {
-  const trimmed = candidate.trim();
+export const resolveHostPath = (workdir: string, candidate: string, homeDir = homedir()) => {
+  const normalized = candidate.trim();
+  if (normalized === "~") {
+    return resolve(homeDir);
+  }
+  if (normalized.startsWith("~/")) {
+    return resolve(homeDir, normalized.slice(2));
+  }
+
+  return isAbsolute(normalized) ? resolve(normalized) : resolve(workdir, normalized);
+};
+
+const displayPath = (input: {
+  workdir: string;
+  homeDir: string;
+  candidate: string;
+  resolvePath: (candidate: string) => string;
+  includeSandboxAlias: boolean;
+}) => {
+  const trimmed = input.candidate.trim();
   const shouldResolve =
     trimmed === "." ||
     trimmed === ".." ||
@@ -68,14 +87,14 @@ export const displaySessionPath = (workdir: string, candidate: string) => {
     trimmed.startsWith("../") ||
     trimmed.startsWith("~/") ||
     trimmed.startsWith("/") ||
-    trimmed.startsWith(SANDBOX_HOME_DIR);
+    (input.includeSandboxAlias && trimmed.startsWith(SANDBOX_HOME_DIR));
 
   if (!shouldResolve) {
-    return candidate;
+    return input.candidate;
   }
 
-  const resolvedCandidate = resolveSessionPath(workdir, trimmed);
-  const resolvedWorkdir = resolve(workdir);
+  const resolvedCandidate = input.resolvePath(trimmed);
+  const resolvedWorkdir = resolve(input.workdir);
   const workdirRelative = relativeToAliasedRoot(resolvedWorkdir, resolvedCandidate);
   if (workdirRelative === "") {
     return ".";
@@ -84,7 +103,7 @@ export const displaySessionPath = (workdir: string, candidate: string) => {
     return `./${workdirRelative}`;
   }
 
-  const homeRelative = relativeToAliasedRoot(sessionHomeDir(workdir), resolvedCandidate);
+  const homeRelative = relativeToAliasedRoot(resolve(input.homeDir), resolvedCandidate);
   if (homeRelative === "") {
     return "~";
   }
@@ -92,5 +111,23 @@ export const displaySessionPath = (workdir: string, candidate: string) => {
     return `~/${homeRelative}`;
   }
 
-  return candidate;
+  return input.candidate;
 };
+
+export const displaySessionPath = (workdir: string, candidate: string) =>
+  displayPath({
+    workdir,
+    homeDir: sessionHomeDir(workdir),
+    candidate,
+    resolvePath: (value) => resolveSessionPath(workdir, value),
+    includeSandboxAlias: true,
+  });
+
+export const displayHostPath = (workdir: string, candidate: string, homeDir = homedir()) =>
+  displayPath({
+    workdir,
+    homeDir,
+    candidate,
+    resolvePath: (value) => resolveHostPath(workdir, value, homeDir),
+    includeSandboxAlias: false,
+  });

@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { ToolPart } from "@opencode-ai/sdk/v2";
 import type { Message, MessageCreateOptions } from "discord.js";
+import type { ResolvedSandboxBackend } from "@/sandbox/backend.ts";
 
 import { upsertToolCard } from "@/discord/tool-card.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const WORKDIR = "/home/opencode/workspace";
+const UNSAFE_WORKDIR = "/Users/jason/project";
 
 const cardText = (payload: MessageCreateOptions) =>
   String(
@@ -41,7 +43,13 @@ const makeToolPart = (input: {
     },
   });
 
-const renderCard = async (part: ToolPart) => {
+const renderCard = async (
+  part: ToolPart,
+  {
+    workdir = WORKDIR,
+    backend = "bwrap",
+  }: { workdir?: string; backend?: ResolvedSandboxBackend } = {},
+) => {
   let payload: MessageCreateOptions | null = null;
   const sourceMessage = unsafeStub<Message>({
     channel: unsafeStub({
@@ -57,7 +65,8 @@ const renderCard = async (part: ToolPart) => {
     sourceMessage,
     existingCard: null,
     part,
-    workdir: WORKDIR,
+    workdir,
+    backend,
   });
 
   if (!payload) {
@@ -98,7 +107,9 @@ describe("tool card formatting", () => {
       }),
     );
 
-    expect(text).toBe("**🩹 ✅ `apply_patch` Completed in 0.00s**\n`./src/discord/tool-card.ts`");
+    expect(text).toBe(
+      "**🩹 ✅ `apply_patch` Completed in 0.00s**\n✏️ Modified: `./src/discord/tool-card.ts`",
+    );
   });
 
   test("renders apply_patch fallback text when no files can be extracted", async () => {
@@ -116,7 +127,7 @@ describe("tool card formatting", () => {
     expect(text).toBe("**🩹 ✅ `apply_patch` Completed in 0.00s**\nApplied patch");
   });
 
-  test("deduplicates mixed patch path variants to one summary line", async () => {
+  test("deduplicates mixed patch path variants within a patch action group", async () => {
     const text = await renderCard(
       makeToolPart({
         tool: "apply_patch",
@@ -128,7 +139,118 @@ describe("tool card formatting", () => {
       }),
     );
 
-    expect(text).toBe("**🩹 ✅ `apply_patch` Completed in 0.00s**\n`./notes/rust-audit.md`");
+    expect(text).toBe(
+      "**🩹 ✅ `apply_patch` Completed in 0.00s**\n➕ Added: `./notes/rust-audit.md`",
+    );
+  });
+
+  test("renders apply_patch cards with separate add modify and remove groups", async () => {
+    const text = await renderCard(
+      makeToolPart({
+        tool: "apply_patch",
+        status: "completed",
+        toolInput: {
+          patchText: [
+            "*** Add File: ./src/new-tool.ts",
+            "+hello",
+            "*** Update File: ./src/existing-tool.ts",
+            "@@",
+            "-old",
+            "+new",
+            "*** Delete File: ./src/old-tool.ts",
+            "-bye",
+          ].join("\n"),
+        },
+        output: "",
+      }),
+    );
+
+    expect(text).toBe(
+      [
+        "**🩹 ✅ `apply_patch` Completed in 0.00s**",
+        "➕ Added: `./src/new-tool.ts`",
+        "✏️ Modified: `./src/existing-tool.ts`",
+        "🗑️ Removed: `./src/old-tool.ts`",
+      ].join("\n"),
+    );
+  });
+
+  test("deduplicates /var and /private/var patch variants without resolving symlinks", async () => {
+    const text = await renderCard(
+      makeToolPart({
+        tool: "apply_patch",
+        status: "completed",
+        toolInput: {
+          patchText: "*** Add File: ./notes/rust-audit.md\n+hello",
+        },
+        output: "A /private/var/folders/abc/project/notes/rust-audit.md",
+      }),
+      {
+        workdir: "/var/folders/abc/project",
+        backend: "unsafe-dev",
+      },
+    );
+
+    expect(text).toBe(
+      "**🩹 ✅ `apply_patch` Completed in 0.00s**\n➕ Added: `./notes/rust-audit.md`",
+    );
+  });
+
+  test("leaves unstructured bash text unchanged", async () => {
+    const text = await renderCard(
+      makeToolPart({
+        tool: "bash",
+        status: "running",
+        toolInput: {
+          cmd: "curl https://example.com/docs?q=tool-card",
+        },
+        title: "curl https://example.com/docs?q=tool-card",
+      }),
+    );
+
+    expect(text).toBe(
+      "**💻 🛠️ `bash` Running**\n`curl https://example.com/docs?q=tool-card`\ncurl https://example.com/docs?q=tool-card",
+    );
+  });
+
+  test("does not reinterpret sandbox aliases in unsafe-dev path fields", async () => {
+    const text = await renderCard(
+      makeToolPart({
+        tool: "read",
+        status: "running",
+        toolInput: {
+          filePath: "/home/opencode/workspace/src/discord/tool-card.ts",
+        },
+        title: "src/discord/tool-card.ts",
+      }),
+      {
+        workdir: UNSAFE_WORKDIR,
+        backend: "unsafe-dev",
+      },
+    );
+
+    expect(text).toBe(
+      "**📖 🛠️ `read` Running**\n`/home/opencode/workspace/src/discord/tool-card.ts`",
+    );
+  });
+
+  test("still renders host paths relative to the workdir in unsafe-dev", async () => {
+    const text = await renderCard(
+      makeToolPart({
+        tool: "read",
+        status: "running",
+        toolInput: {
+          filePath: "/Users/jason/project/src/discord/tool-card.ts",
+        },
+        title: "src/discord/tool-card.ts",
+      }),
+      {
+        workdir: UNSAFE_WORKDIR,
+        backend: "unsafe-dev",
+      },
+    );
+
+    expect(text).toBe("**📖 🛠️ `read` Running**\n`./src/discord/tool-card.ts`");
   });
 
   test("renders write cards with a plain path summary and compact metadata", async () => {

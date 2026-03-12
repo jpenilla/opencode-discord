@@ -157,7 +157,7 @@ const trackLiveToolState = (state: ProgressState, part: ToolPart) => {
 const handleToolCard = (
   state: ProgressState,
   message: Message,
-  workdir: string,
+  pathContext: { workdir: string; backend: ChannelSession["opencode"]["backend"] },
   event: Extract<RunProgressEvent, { type: "tool-updated" }>,
 ) =>
   Effect.gen(function* () {
@@ -171,7 +171,8 @@ const handleToolCard = (
       upsertToolCard({
         sourceMessage: message,
         existingCard: todoTool ? null : existingCard,
-        workdir,
+        workdir: pathContext.workdir,
+        backend: pathContext.backend,
         part: event.part,
         mode: todoTool ? "always-send" : "edit-or-send",
       }),
@@ -232,7 +233,11 @@ const handleCompactionCard = (
     state.compactionCard = null;
   });
 
-const finalizeLiveCards = (state: ProgressState, workdir: string, reason: RunFinalizationReason) =>
+const finalizeLiveCards = (
+  state: ProgressState,
+  pathContext: { workdir: string; backend: ChannelSession["opencode"]["backend"] },
+  reason: RunFinalizationReason,
+) =>
   Effect.gen(function* () {
     if (reason === "shutdown") {
       yield* Effect.forEach(
@@ -247,7 +252,8 @@ const finalizeLiveCards = (state: ProgressState, workdir: string, reason: RunFin
             editToolCard({
               card,
               part,
-              workdir,
+              workdir: pathContext.workdir,
+              backend: pathContext.backend,
               terminalState: "shutdown",
             }),
           ).pipe(Effect.ignore);
@@ -327,13 +333,17 @@ export const collectProgressEvents = (event: Event): ReadonlyArray<RunProgressEv
 };
 
 export const runProgressWorker = (
-  session: Pick<ChannelSession, "channelSettings">,
+  session: Pick<ChannelSession, "channelSettings" | "opencode">,
   message: Message,
   workdir: string,
   queue: Queue.Queue<RunProgressEvent>,
 ): Effect.Effect<never, unknown> =>
   Effect.gen(function* () {
     const state = createProgressState();
+    const pathContext = {
+      workdir,
+      backend: session.opencode.backend,
+    } as const;
 
     while (true) {
       const first = yield* Queue.take(queue);
@@ -344,14 +354,14 @@ export const runProgressWorker = (
         if (event.type === "run-finalizing") {
           progressUpdateForEvent(event, state, session);
           if (event.reason) {
-            yield* finalizeLiveCards(state, workdir, event.reason);
+            yield* finalizeLiveCards(state, pathContext, event.reason);
           }
           yield* Deferred.succeed(event.ack, undefined).pipe(Effect.ignore);
           continue;
         }
 
         if (event.type === "tool-updated") {
-          yield* handleToolCard(state, message, workdir, event);
+          yield* handleToolCard(state, message, pathContext, event);
           continue;
         }
 

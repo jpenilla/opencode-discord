@@ -1,9 +1,14 @@
+import { resolve } from "node:path";
 import { ContainerBuilder, TextDisplayBuilder } from "@discordjs/builders";
 import { MessageFlags, type Message, type SendableChannels } from "discord.js";
 import type { ToolPart } from "@opencode-ai/sdk/v2";
+import type { ResolvedSandboxBackend } from "@/sandbox/backend.ts";
 import {
   SANDBOX_HOME_DIR,
+  displayHostPath,
   displaySessionPath,
+  pathAliases,
+  resolveHostPath,
   resolveSessionPath,
 } from "@/sandbox/session-paths.ts";
 
@@ -132,21 +137,69 @@ const findUnknownInput = (input: Record<string, unknown>, keys: readonly string[
   return null;
 };
 
-const displayPath = (path: string, workdir: string) => displaySessionPath(workdir, path);
+type ToolCardPathContext = {
+  workdir: string;
+  backend: ResolvedSandboxBackend;
+};
 
-const formatPathSummaryLine = (path: string, workdir: string) => {
-  const normalized = displayPath(path, workdir);
+type NormalizedToolPath = { kind: "resolved"; path: string } | { kind: "raw"; value: string };
+
+const isSandboxAliasPath = (path: string) =>
+  path === SANDBOX_HOME_DIR ||
+  path.startsWith(`${SANDBOX_HOME_DIR}/`) ||
+  path.startsWith(SANDBOX_HOME_DIR.slice(1));
+
+const normalizeToolPath = (path: string, context: ToolCardPathContext): NormalizedToolPath => {
+  const trimmed = path.trim();
+  if (trimmed.length === 0) {
+    return { kind: "raw", value: trimmed };
+  }
+
+  if (context.backend === "bwrap") {
+    const slashPrefixed = trimmed.startsWith(SANDBOX_HOME_DIR.slice(1)) ? `/${trimmed}` : trimmed;
+    return {
+      kind: "resolved",
+      path: resolveSessionPath(context.workdir, slashPrefixed),
+    };
+  }
+
+  if (isSandboxAliasPath(trimmed)) {
+    return { kind: "raw", value: trimmed };
+  }
+
+  return {
+    kind: "resolved",
+    path: resolveHostPath(context.workdir, trimmed),
+  };
+};
+
+const displayResolvedPath = (path: string, context: ToolCardPathContext) =>
+  context.backend === "bwrap"
+    ? displaySessionPath(context.workdir, path)
+    : displayHostPath(context.workdir, path);
+
+const displayNormalizedPath = (path: NormalizedToolPath, context: ToolCardPathContext) =>
+  path.kind === "resolved" ? displayResolvedPath(path.path, context) : path.value;
+
+const displayPath = (path: string, context: ToolCardPathContext) =>
+  displayNormalizedPath(normalizeToolPath(path, context), context);
+
+const formatPathSummaryLine = (path: string, context: ToolCardPathContext) => {
+  const normalized = displayPath(path, context);
   return normalized === "." ? "`.` (cwd)" : `\`${normalized}\``;
 };
 
-const normalizeDisplayText = (value: string, workdir: string) => {
-  return value.replace(/(?:\/private)?\/[^\s`"'|)]+/g, (token) => displayPath(token, workdir));
-};
+const patchPathIdentityKey = (path: NormalizedToolPath) =>
+  path.kind === "resolved"
+    ? (pathAliases(resolve(path.path)).sort()[0] ?? path.path)
+    : `raw:${path.value}`;
 
-const normalizePatchFilePath = (path: string, workdir: string) => {
-  const trimmed = path.trim();
-  const slashPrefixed = trimmed.startsWith(SANDBOX_HOME_DIR.slice(1)) ? `/${trimmed}` : trimmed;
-  const displayed = displaySessionPath(workdir, resolveSessionPath(workdir, slashPrefixed));
+const displayPatchFilePath = (path: NormalizedToolPath, context: ToolCardPathContext) => {
+  const displayed = displayNormalizedPath(path, context);
+
+  if (path.kind !== "resolved") {
+    return displayed;
+  }
 
   if (
     displayed !== "." &&
@@ -161,18 +214,140 @@ const normalizePatchFilePath = (path: string, workdir: string) => {
   return displayed;
 };
 
-const extractPatchFiles = (value: string, workdir: string) => {
-  const hunkFiles = [...value.matchAll(/\*\*\* (?:(?:Add|Delete|Update) File|Move to): (.+)/g)].map(
-    (match) => normalizePatchFilePath(match[1], workdir),
-  );
-  const outputFiles = [...value.matchAll(/(?:^|\n)(?:A|M|D|R\d+|C\d+)\s+([^\n]+)/g)].map((match) =>
-    normalizePatchFilePath(match[1], workdir),
-  );
-  return [...new Set([...hunkFiles, ...outputFiles])].sort();
+type PatchAction = "add" | "modify" | "remove";
+
+const PATCH_ACTION_ORDER: ReadonlyArray<PatchAction> = ["add", "modify", "remove"];
+
+const PATCH_ACTION_FORMAT: Record<PatchAction, { emoji: string; label: string }> = {
+  add: { emoji: "➕", label: "Added" },
+  modify: { emoji: "✏️", label: "Modified" },
+  remove: { emoji: "🗑️", label: "Removed" },
 };
 
-const formatTextValue = (value: string, workdir: string, maxLength: number) =>
-  quoted(normalizeDisplayText(value, workdir), maxLength);
+const createPatchActionMap = () => ({
+  add: new Map<string, string>(),
+  modify: new Map<string, string>(),
+  remove: new Map<string, string>(),
+});
+
+const recordPatchFile = (
+  groups: ReturnType<typeof createPatchActionMap>,
+  action: PatchAction,
+  path: string,
+  context: ToolCardPathContext,
+) => {
+  const normalized = normalizeToolPath(path, context);
+  const key = patchPathIdentityKey(normalized);
+  const displayed = displayPatchFilePath(normalized, context);
+  for (const candidate of PATCH_ACTION_ORDER) {
+    groups[candidate].delete(key);
+  }
+  groups[action].set(key, displayed);
+};
+
+const collectPatchHunkFiles = (
+  value: string,
+  groups: ReturnType<typeof createPatchActionMap>,
+  context: ToolCardPathContext,
+) => {
+  let pendingUpdate: string | null = null;
+  const flushPendingUpdate = () => {
+    if (!pendingUpdate) {
+      return;
+    }
+    recordPatchFile(groups, "modify", pendingUpdate, context);
+    pendingUpdate = null;
+  };
+
+  for (const line of value.split(/\r?\n/)) {
+    const add = line.match(/^\*\*\* Add File: (.+)$/);
+    if (add) {
+      flushPendingUpdate();
+      recordPatchFile(groups, "add", add[1], context);
+      continue;
+    }
+
+    const remove = line.match(/^\*\*\* Delete File: (.+)$/);
+    if (remove) {
+      flushPendingUpdate();
+      recordPatchFile(groups, "remove", remove[1], context);
+      continue;
+    }
+
+    const update = line.match(/^\*\*\* Update File: (.+)$/);
+    if (update) {
+      flushPendingUpdate();
+      pendingUpdate = update[1];
+      continue;
+    }
+
+    const move = line.match(/^\*\*\* Move to: (.+)$/);
+    if (move) {
+      if (pendingUpdate) {
+        recordPatchFile(groups, "remove", pendingUpdate, context);
+        recordPatchFile(groups, "add", move[1], context);
+        pendingUpdate = null;
+      } else {
+        recordPatchFile(groups, "modify", move[1], context);
+      }
+      continue;
+    }
+
+    if (line.startsWith("*** ")) {
+      flushPendingUpdate();
+    }
+  }
+
+  flushPendingUpdate();
+};
+
+const collectPatchOutputFiles = (
+  value: string,
+  groups: ReturnType<typeof createPatchActionMap>,
+  context: ToolCardPathContext,
+) => {
+  for (const rawLine of value.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length === 0) {
+      continue;
+    }
+
+    const rename = line.match(/^R\d+\s+(.+?)\s+->\s+(.+)$/);
+    if (rename) {
+      recordPatchFile(groups, "remove", rename[1], context);
+      recordPatchFile(groups, "add", rename[2], context);
+      continue;
+    }
+
+    const copy = line.match(/^C\d+\s+(.+?)\s+->\s+(.+)$/);
+    if (copy) {
+      recordPatchFile(groups, "add", copy[2], context);
+      continue;
+    }
+
+    const status = line.match(/^([AMD])\s+(.+)$/);
+    if (!status) {
+      continue;
+    }
+
+    const action = status[1] === "A" ? "add" : status[1] === "D" ? "remove" : "modify";
+    recordPatchFile(groups, action, status[2], context);
+  }
+};
+
+const extractPatchFiles = (value: string, context: ToolCardPathContext) => {
+  const groups = createPatchActionMap();
+  collectPatchHunkFiles(value, groups, context);
+  collectPatchOutputFiles(value, groups, context);
+
+  return {
+    add: [...groups.add.values()].sort(),
+    modify: [...groups.modify.values()].sort(),
+    remove: [...groups.remove.values()].sort(),
+  } as const;
+};
+
+const formatTextValue = (value: string, maxLength: number) => quoted(value, maxLength);
 
 const titleCaseKey = (key: string) =>
   key
@@ -230,7 +405,11 @@ const summarizeContentType = (value: string) => {
   }
 };
 
-const formatGenericValue = (key: string, value: unknown, workdir: string): string | null => {
+const formatGenericValue = (
+  key: string,
+  value: unknown,
+  pathContext: ToolCardPathContext,
+): string | null => {
   if (typeof value === "string") {
     const url = compactUrl(value);
     if (url) {
@@ -238,10 +417,10 @@ const formatGenericValue = (key: string, value: unknown, workdir: string): strin
     }
 
     if (isPathLikeKey(key)) {
-      return `\`${displayPath(value, workdir)}\``;
+      return `\`${displayPath(value, pathContext)}\``;
     }
 
-    return formatTextValue(value, workdir, 160);
+    return formatTextValue(value, 160);
   }
 
   if (typeof value === "number" || typeof value === "boolean") {
@@ -360,12 +539,15 @@ const renderToolCardLine = (line: ToolCardLine) => {
   }
 };
 
-const formatGenericInputLines = (input: Record<string, unknown>, workdir: string) => {
+const formatGenericInputLines = (
+  input: Record<string, unknown>,
+  pathContext: ToolCardPathContext,
+) => {
   const fields = Object.entries(input)
     .filter(([, value]) => value !== undefined && value !== null)
     .sort(([a], [b]) => a.localeCompare(b))
     .flatMap(([key, value]) => {
-      const formatted = formatGenericValue(key, value, workdir);
+      const formatted = formatGenericValue(key, value, pathContext);
       return formatted ? [metaField(titleCaseKey(key), formatted)] : [];
     });
 
@@ -374,102 +556,114 @@ const formatGenericInputLines = (input: Record<string, unknown>, workdir: string
 
 type FormatterInput = {
   part: ToolPart;
-  workdir: string;
+  pathContext: ToolCardPathContext;
   input: Record<string, unknown>;
 };
 
 type ToolInputFormatter = (input: FormatterInput) => ToolCardLine[];
 
-const formatPatchInputLines: ToolInputFormatter = ({ part, workdir, input }) => {
+const formatPatchInputLines: ToolInputFormatter = ({ part, pathContext, input }) => {
   const patchInput = findStringInput(input, ["patchText", "patch", "content", "diff", "input"]);
   const patchRaw = "raw" in part.state && typeof part.state.raw === "string" ? part.state.raw : "";
   const patchOutput = part.state.status === "completed" ? part.state.output : "";
-  const files = extractPatchFiles(`${patchInput ?? ""}\n${patchRaw}\n${patchOutput}`, workdir);
+  const files = extractPatchFiles(`${patchInput ?? ""}\n${patchRaw}\n${patchOutput}`, pathContext);
 
-  if (files.length === 0) {
+  if (PATCH_ACTION_ORDER.every((action) => files[action].length === 0)) {
     return part.state.status === "completed" ? [summaryLine("Applied patch")] : [];
   }
 
-  return [summaryLine(files.map((file) => `\`${file}\``).join(", "))];
+  return PATCH_ACTION_ORDER.flatMap((action) => {
+    const entries = files[action];
+    if (entries.length === 0) {
+      return [];
+    }
+
+    const format = PATCH_ACTION_FORMAT[action];
+    return [
+      summaryLine(
+        `${format.emoji} ${format.label}: ${entries.map((file) => `\`${file}\``).join(", ")}`,
+      ),
+    ];
+  });
 };
 
-const formatBashInputLines: ToolInputFormatter = ({ part, workdir, input }) => {
+const formatBashInputLines: ToolInputFormatter = ({ part, input }) => {
   const command = findStringInput(input, ["cmd", "command", "script", "shell"]);
   if (command) {
-    return [summaryLine(formatTextValue(command, workdir, 220))];
+    return [summaryLine(formatTextValue(command, 220))];
   }
   if (
     "raw" in part.state &&
     typeof part.state.raw === "string" &&
     part.state.raw.trim().length > 0
   ) {
-    return [summaryLine(formatTextValue(part.state.raw, workdir, 220))];
+    return [summaryLine(formatTextValue(part.state.raw, 220))];
   }
   return [];
 };
 
-const formatReadInputLines: ToolInputFormatter = ({ workdir, input }) => {
+const formatReadInputLines: ToolInputFormatter = ({ pathContext, input }) => {
   const filePath = findStringInput(input, ["filePath", "path", "filepath", "target"]);
   if (!filePath) {
     return [];
   }
-  return [summaryLine(formatPathSummaryLine(filePath, workdir))];
+  return [summaryLine(formatPathSummaryLine(filePath, pathContext))];
 };
 
-const formatGlobInputLines: ToolInputFormatter = ({ workdir, input }) => {
+const formatGlobInputLines: ToolInputFormatter = ({ pathContext, input }) => {
   const pattern = findStringInput(input, ["pattern", "glob", "query"]);
   const path = findStringInput(input, ["path", "cwd", "root"]);
   const hidden = findUnknownInput(input, ["includeHidden", "hidden", "dot"]);
   return packMetaFields([
-    metaField("Pattern", pattern ? formatTextValue(pattern, workdir, 180) : null),
-    metaField("Path", path ? `\`${displayPath(path, workdir)}\`` : null),
+    metaField("Pattern", pattern ? formatTextValue(pattern, 180) : null),
+    metaField("Path", path ? `\`${displayPath(path, pathContext)}\`` : null),
     metaField("Hidden", typeof hidden === "boolean" ? `\`${hidden}\`` : null),
   ]);
 };
 
-const formatGrepInputLines: ToolInputFormatter = ({ workdir, input }) => {
+const formatGrepInputLines: ToolInputFormatter = ({ pathContext, input }) => {
   const pattern = findStringInput(input, ["pattern", "query", "search"]);
   const path = findStringInput(input, ["path", "cwd", "root"]);
   const caseSensitive = findUnknownInput(input, ["caseSensitive", "ignoreCase"]);
   const context = findUnknownInput(input, ["context", "before", "after"]);
   return packMetaFields([
-    metaField("Pattern", pattern ? formatTextValue(pattern, workdir, 180) : null),
-    metaField("Path", path ? `\`${displayPath(path, workdir)}\`` : null),
+    metaField("Pattern", pattern ? formatTextValue(pattern, 180) : null),
+    metaField("Path", path ? `\`${displayPath(path, pathContext)}\`` : null),
     metaField("Case Sensitive", typeof caseSensitive === "boolean" ? `\`${caseSensitive}\`` : null),
     metaField("Context", typeof context === "number" ? `\`${context}\`` : null),
   ]);
 };
 
-const formatEditInputLines: ToolInputFormatter = ({ workdir, input }) => {
+const formatEditInputLines: ToolInputFormatter = ({ pathContext, input }) => {
   const path = findStringInput(input, ["filePath", "path", "file"]);
   const search = findStringInput(input, ["oldText", "search", "find"]);
   const replace = findStringInput(input, ["newText", "replace", "replacement"]);
   return packMetaFields([
-    metaField("File", path ? `\`${displayPath(path, workdir)}\`` : null),
+    metaField("File", path ? `\`${displayPath(path, pathContext)}\`` : null),
     metaField(
       "Edit",
       search && replace
-        ? formatTextValue(`${singleLine(search)} -> ${singleLine(replace)}`, workdir, 200)
+        ? formatTextValue(`${singleLine(search)} -> ${singleLine(replace)}`, 200)
         : null,
     ),
   ]);
 };
 
-const formatWriteInputLines: ToolInputFormatter = ({ workdir, input }) => {
+const formatWriteInputLines: ToolInputFormatter = ({ pathContext, input }) => {
   const path = findStringInput(input, ["filePath", "path", "file"]);
   const content = findStringInput(input, ["content", "text"]);
   return [
-    ...(path ? [summaryLine(formatPathSummaryLine(path, workdir))] : []),
+    ...(path ? [summaryLine(formatPathSummaryLine(path, pathContext))] : []),
     ...packMetaFields([metaField("Size", content ? `\`${content.length} chars\`` : null)]),
   ];
 };
 
-const formatTaskInputLines: ToolInputFormatter = ({ workdir, input }) => {
+const formatTaskInputLines: ToolInputFormatter = ({ input }) => {
   const description = findStringInput(input, ["description", "prompt", "task"]);
   const agent = findStringInput(input, ["agent", "agentID", "subagent_type", "subagentType"]);
   const model = findStringInput(input, ["model", "modelID"]);
   return [
-    ...(description ? [summaryLine(formatTextValue(description, workdir, 200))] : []),
+    ...(description ? [summaryLine(formatTextValue(description, 200))] : []),
     ...packMetaFields([
       metaField("Agent", agent ? `\`${agent}\`` : null),
       metaField("Model", model ? `\`${model}\`` : null),
@@ -514,12 +708,12 @@ const formatWebfetchInputLines: ToolInputFormatter = ({ part, input }) => {
   return [...lines, ...packMetaFields(metadata)];
 };
 
-const formatSearchInputLines: ToolInputFormatter = ({ workdir, input }) => {
+const formatSearchInputLines: ToolInputFormatter = ({ pathContext, input }) => {
   const query = findStringInput(input, ["query", "q", "pattern", "search"]);
   const path = findStringInput(input, ["path", "cwd", "root"]);
   return [
-    ...(query ? [summaryLine(formatTextValue(query, workdir, 180))] : []),
-    ...packMetaFields([metaField("Path", path ? `\`${displayPath(path, workdir)}\`` : null)]),
+    ...(query ? [summaryLine(formatTextValue(query, 180))] : []),
+    ...packMetaFields([metaField("Path", path ? `\`${displayPath(path, pathContext)}\`` : null)]),
   ];
 };
 
@@ -569,9 +763,9 @@ const formatTodoInputLines: ToolInputFormatter = ({ input }) => {
   return lines;
 };
 
-const formatPlanExitInputLines: ToolInputFormatter = ({ workdir, input }) => {
+const formatPlanExitInputLines: ToolInputFormatter = ({ input }) => {
   const reason = findStringInput(input, ["reason", "message", "status"]);
-  return reason ? [statusLine("Exit", formatTextValue(reason, workdir, 180))] : [];
+  return reason ? [statusLine("Exit", formatTextValue(reason, 180))] : [];
 };
 
 const formatBatchInputLines: ToolInputFormatter = ({ input }) => {
@@ -579,18 +773,18 @@ const formatBatchInputLines: ToolInputFormatter = ({ input }) => {
   return Array.isArray(items) ? [metaLine("Batched Calls", `\`${items.length}\``)] : [];
 };
 
-const formatLspInputLines: ToolInputFormatter = ({ workdir, input }) => {
+const formatLspInputLines: ToolInputFormatter = ({ pathContext, input }) => {
   const action = findStringInput(input, ["action", "method", "operation"]);
   const path = findStringInput(input, ["path", "filePath", "uri"]);
   return packMetaFields([
     metaField("Action", action ? `\`${action}\`` : null),
-    metaField("Path", path ? `\`${displayPath(path, workdir)}\`` : null),
+    metaField("Path", path ? `\`${displayPath(path, pathContext)}\`` : null),
   ]);
 };
 
-const formatInvalidInputLines: ToolInputFormatter = ({ workdir, input }) => {
+const formatInvalidInputLines: ToolInputFormatter = ({ input }) => {
   const reason = findStringInput(input, ["reason", "error", "message"]);
-  return reason ? [statusLine("Reason", formatTextValue(reason, workdir, 180))] : [];
+  return reason ? [statusLine("Reason", formatTextValue(reason, 180))] : [];
 };
 
 const TOOL_INPUT_FORMATTERS: Record<string, ToolInputFormatter> = {
@@ -613,18 +807,18 @@ const TOOL_INPUT_FORMATTERS: Record<string, ToolInputFormatter> = {
   invalid: formatInvalidInputLines,
 };
 
-const formatToolInputLines = (part: ToolPart, workdir: string) => {
+const formatToolInputLines = (part: ToolPart, pathContext: ToolCardPathContext) => {
   const input = inputObject(part);
   if (part.tool === "apply_patch" || part.tool.includes("patch")) {
-    return formatPatchInputLines({ part, workdir, input });
+    return formatPatchInputLines({ part, pathContext, input });
   }
 
   const formatter = TOOL_INPUT_FORMATTERS[part.tool];
   if (formatter) {
-    return formatter({ part, workdir, input });
+    return formatter({ part, pathContext, input });
   }
 
-  return formatGenericInputLines(input, workdir);
+  return formatGenericInputLines(input, pathContext);
 };
 
 type StepDisplayMode = "hidden" | "summary" | "meta";
@@ -704,7 +898,7 @@ const searchResultInfo = (part: ToolPart): { count: number } | { error: string }
 
 const renderToolCard = (input: {
   part: ToolPart;
-  workdir: string;
+  pathContext: ToolCardPathContext;
   terminalState?: ToolCardTerminalState;
 }) => {
   const { part, terminalState } = input;
@@ -718,14 +912,14 @@ const renderToolCard = (input: {
       : `**${toolEmoji(part.tool)} ${statusEmoji(part, terminalState)} \`${part.tool}\` ${statusLabel}**`;
   const lines = [header];
 
-  const inputLines = formatToolInputLines(part, input.workdir);
+  const inputLines = formatToolInputLines(part, input.pathContext);
   if (inputLines.length > 0) {
     lines.push(...inputLines.map(renderToolCardLine));
   }
 
   const title = titleForPart(part);
   if (title) {
-    const step = normalizeDisplayText(title, input.workdir);
+    const step = singleLine(title);
     const stepLine = formatStepLine(part, step);
     if (stepLine) {
       lines.push(renderToolCardLine(stepLine));
@@ -747,12 +941,7 @@ const renderToolCard = (input: {
     );
   } else if (part.state.status === "error") {
     lines.push(
-      renderToolCardLine(
-        statusLine(
-          "Error",
-          `\`${truncate(normalizeDisplayText(part.state.error, input.workdir), 600)}\``,
-        ),
-      ),
+      renderToolCardLine(statusLine("Error", `\`${truncate(singleLine(part.state.error), 600)}\``)),
     );
   }
 
@@ -765,7 +954,7 @@ const renderToolCard = (input: {
 
 const createPayload = (input: {
   part: ToolPart;
-  workdir: string;
+  pathContext: ToolCardPathContext;
   includeNotificationSuppression: boolean;
   terminalState?: ToolCardTerminalState;
 }) => ({
@@ -774,7 +963,7 @@ const createPayload = (input: {
     : MessageFlags.IsComponentsV2,
   components: renderToolCard({
     part: input.part,
-    workdir: input.workdir,
+    pathContext: input.pathContext,
     terminalState: input.terminalState,
   }),
   allowedMentions: { parse: [] as Array<never> },
@@ -785,6 +974,7 @@ export const upsertToolCard = async (input: {
   existingCard: Message | null;
   part: ToolPart;
   workdir: string;
+  backend: ResolvedSandboxBackend;
   mode?: "edit-or-send" | "always-send";
   terminalState?: ToolCardTerminalState;
 }) => {
@@ -794,7 +984,7 @@ export const upsertToolCard = async (input: {
       await input.existingCard.edit(
         createPayload({
           part: input.part,
-          workdir: input.workdir,
+          pathContext: { workdir: input.workdir, backend: input.backend },
           includeNotificationSuppression: false,
           terminalState: input.terminalState,
         }),
@@ -812,7 +1002,7 @@ export const upsertToolCard = async (input: {
   return (input.sourceMessage.channel as SendableChannels).send(
     createPayload({
       part: input.part,
-      workdir: input.workdir,
+      pathContext: { workdir: input.workdir, backend: input.backend },
       includeNotificationSuppression: true,
       terminalState: input.terminalState,
     }),
@@ -823,12 +1013,13 @@ export const editToolCard = (input: {
   card: Message;
   part: ToolPart;
   workdir: string;
+  backend: ResolvedSandboxBackend;
   terminalState: ToolCardTerminalState;
 }) =>
   input.card.edit(
     createPayload({
       part: input.part,
-      workdir: input.workdir,
+      pathContext: { workdir: input.workdir, backend: input.backend },
       includeNotificationSuppression: false,
       terminalState: input.terminalState,
     }),

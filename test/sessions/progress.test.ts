@@ -56,6 +56,9 @@ const makeHarness = async (showThinking = true) => {
         showThinking,
         showCompactionSummaries: true,
       },
+      opencode: {
+        backend: "bwrap",
+      },
     }),
     sourceMessage,
     sentPayloads,

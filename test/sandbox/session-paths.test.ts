@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 
 import {
   SANDBOX_HOME_DIR,
+  displayHostPath,
   displaySessionPath,
   insideAliasedRoot,
+  resolveHostPath,
   resolveSessionPath,
   sessionHomeDir,
 } from "@/sandbox/session-paths.ts";
@@ -75,6 +77,26 @@ describe("resolveSessionPath", () => {
   });
 });
 
+describe("resolveHostPath", () => {
+  const workdir = "/Users/test/project";
+
+  test("resolves ~ to the real home directory", () => {
+    expect(resolveHostPath(workdir, "~", "/Users/test")).toBe("/Users/test");
+  });
+
+  test("resolves ~/... beneath the real home directory", () => {
+    expect(resolveHostPath(workdir, "~/logs/out.txt", "/Users/test")).toBe(
+      "/Users/test/logs/out.txt",
+    );
+  });
+
+  test("resolves relative paths beneath the workdir", () => {
+    expect(resolveHostPath(workdir, "./src/index.ts", "/Users/test")).toBe(
+      "/Users/test/project/src/index.ts",
+    );
+  });
+});
+
 describe("displaySessionPath", () => {
   const workdir = "/tmp/session-1/workspace";
 
@@ -106,5 +128,41 @@ describe("displaySessionPath", () => {
 
   test("leaves external absolute paths unchanged", () => {
     expect(displaySessionPath(workdir, "/etc/hosts")).toBe("/etc/hosts");
+  });
+});
+
+describe("displayHostPath", () => {
+  const workdir = "/Users/test/project";
+
+  test("renders host workdir children relative to the workspace", () => {
+    expect(displayHostPath(workdir, "/Users/test/project/src/index.ts", "/Users/test")).toBe(
+      "./src/index.ts",
+    );
+  });
+
+  test("renders host home children relative to ~", () => {
+    expect(displayHostPath(workdir, "/Users/test/logs/out.txt", "/Users/test")).toBe(
+      "~/logs/out.txt",
+    );
+  });
+
+  test("handles /private/var alias paths against a /var workdir", () => {
+    expect(
+      displayHostPath(
+        "/var/folders/abc/project",
+        "/private/var/folders/abc/project/src/index.ts",
+        "/Users/test",
+      ),
+    ).toBe("./src/index.ts");
+  });
+
+  test("does not treat sandbox aliases as host-relative paths", () => {
+    expect(
+      displayHostPath(
+        "/Users/test/project",
+        "/home/opencode/workspace/src/index.ts",
+        "/Users/test",
+      ),
+    ).toBe("/home/opencode/workspace/src/index.ts");
   });
 });
