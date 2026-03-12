@@ -9,11 +9,7 @@ const makeClient = (botId = "bot-1") =>
     user: { id: botId },
   });
 
-const makeMessage = (input?: {
-  content?: string;
-  authorId?: string;
-  authorBot?: boolean;
-}) =>
+const makeMessage = (input?: { content?: string; authorId?: string; authorBot?: boolean }) =>
   unsafeStub<Message>({
     content: input?.content ?? "",
     author: {
