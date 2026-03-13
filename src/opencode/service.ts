@@ -10,6 +10,10 @@ import { fileURLToPath } from "node:url";
 import { AppConfig } from "@/config.ts";
 import { OpencodeEventQueue, type OpencodeEventQueueShape } from "@/opencode/events.ts";
 import {
+  summarizeOpencodeEventForLog,
+  summarizePermissionForLog,
+} from "@/opencode/log-summary.ts";
+import {
   buildPromptRequestInput,
   hasIncompletePromptModelOverride,
   resolvePromptModelOverride,
@@ -127,10 +131,7 @@ const consumeEvents = (input: {
         event.payload.type === "message.part.updated"
       ) {
         await Effect.runPromise(
-          input.logger.info("opencode event", {
-            type: event.payload.type,
-            properties: event.payload.properties,
-          }),
+          input.logger.info("opencode event", summarizeOpencodeEventForLog(event.payload)),
         );
       }
 
@@ -143,7 +144,7 @@ const consumeEvents = (input: {
           await Effect.runPromise(
             input.logger.warn("failed to auto-reply to opencode permission request", {
               requestID: event.payload.properties.id,
-              permission: event.payload.properties.permission,
+              permission: summarizePermissionForLog(event.payload.properties),
               error: formatValue(reply.error),
             }),
           );

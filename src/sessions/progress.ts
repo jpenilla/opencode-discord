@@ -38,7 +38,8 @@ const SKIPPED_TOOL_CARD_NAMES = new Set([
 
 type ProgressState = {
   patchPartIds: Set<string>;
-  toolStates: Map<string, string>;
+  toolUpdateKeys: Map<string, string>;
+  terminalToolCallIds: Set<string>;
   toolCards: Map<string, Message>;
   activeToolParts: Map<string, ToolPart>;
   todoCards: Message[];
@@ -50,7 +51,8 @@ type ProgressState = {
 
 const createProgressState = (): ProgressState => ({
   patchPartIds: new Set<string>(),
-  toolStates: new Map<string, string>(),
+  toolUpdateKeys: new Map<string, string>(),
+  terminalToolCallIds: new Set<string>(),
   toolCards: new Map<string, Message>(),
   activeToolParts: new Map<string, ToolPart>(),
   todoCards: [],
@@ -65,6 +67,15 @@ const isTodoTool = (tool: string) => tool === "todowrite";
 const hasLiveCompaction = (state: ProgressState) =>
   state.compactionCard !== null || state.compactionPartIds.size > 0;
 
+const isTerminalToolPart = (part: ToolPart) =>
+  part.state.status === "completed" || part.state.status === "error";
+
+const toolUpdateKey = (part: ToolPart) => {
+  const title =
+    part.state.status === "running" || part.state.status === "completed" ? part.state.title : "";
+  return `${part.state.status}:${title}`;
+};
+
 const shouldSkipToolUpdate = (
   state: ProgressState,
   event: Extract<RunProgressEvent, { type: "tool-updated" }>,
@@ -76,17 +87,20 @@ const shouldSkipToolUpdate = (
     return true;
   }
 
-  const title =
-    event.part.state.status === "running" || event.part.state.status === "completed"
-      ? event.part.state.title
-      : "";
-  const nextKey = `${event.part.state.status}:${title}`;
-  const previousKey = state.toolStates.get(event.part.callID);
+  if (isTerminalToolPart(event.part) && state.terminalToolCallIds.has(event.part.callID)) {
+    return true;
+  }
+
+  const nextKey = toolUpdateKey(event.part);
+  const previousKey = state.toolUpdateKeys.get(event.part.callID);
   if (previousKey === nextKey) {
     return true;
   }
 
-  state.toolStates.set(event.part.callID, nextKey);
+  state.toolUpdateKeys.set(event.part.callID, nextKey);
+  if (isTerminalToolPart(event.part)) {
+    state.terminalToolCallIds.add(event.part.callID);
+  }
   return false;
 };
 

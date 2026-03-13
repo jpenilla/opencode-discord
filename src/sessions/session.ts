@@ -46,6 +46,9 @@ export type ActiveRun = {
   discordMessage: Message;
   workdir: string;
   attachmentMessagesById: Map<string, Message>;
+  currentPromptUserMessageId: string | null;
+  assistantMessageParentIds: Map<string, string>;
+  observedToolCallIds: Set<string>;
   progressQueue: Queue<RunProgressEvent>;
   promptState: Ref<PendingPrompt | null>;
   followUpQueue: Queue<RunRequest>;
@@ -79,6 +82,17 @@ export type ChannelSession = {
   emittedCompactionSummaryMessageIds: Set<string>;
   queue: Queue<RunRequest>;
   activeRun: ActiveRun | null;
+};
+
+export const resetActivePromptTracking = (
+  activeRun: Pick<
+    ActiveRun,
+    "currentPromptUserMessageId" | "assistantMessageParentIds" | "observedToolCallIds"
+  >,
+) => {
+  activeRun.currentPromptUserMessageId = null;
+  activeRun.assistantMessageParentIds.clear();
+  activeRun.observedToolCallIds.clear();
 };
 
 export const buildSessionCreateSpec = (input: {

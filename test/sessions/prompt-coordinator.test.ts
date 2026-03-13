@@ -61,6 +61,9 @@ const resolveCurrentPrompt = (
 
 const makeActiveRunState = async () => ({
   attachmentMessagesById: new Map<string, Message>(),
+  currentPromptUserMessageId: "stale-user",
+  assistantMessageParentIds: new Map<string, string>([["assistant-old", "stale-user"]]),
+  observedToolCallIds: new Set<string>(["call-old"]),
   promptState: await Effect.runPromise(createPromptState()),
   followUpQueue: await Effect.runPromise(Queue.unbounded<RunRequest>()),
   acceptFollowUps: await Effect.runPromise(Ref.make(true)),
@@ -182,6 +185,54 @@ describe("coordinateActiveRunPrompts", () => {
     expect(
       await Effect.runPromise(Queue.takeAll(sessionQueue).pipe(Effect.map((items) => [...items]))),
     ).toEqual([]);
+  });
+
+  test("resets prompt-scoped tracking before each prompt submission", async () => {
+    const activeRun = await makeActiveRunState();
+    const snapshots: Array<{
+      userMessageId: string | null;
+      assistantCount: number;
+      toolCallCount: number;
+    }> = [];
+    const submitPrompt = (_session: SessionHandle, _value: string) =>
+      Effect.gen(function* () {
+        snapshots.push({
+          userMessageId: activeRun.currentPromptUserMessageId,
+          assistantCount: activeRun.assistantMessageParentIds.size,
+          toolCallCount: activeRun.observedToolCallIds.size,
+        });
+        yield* resolveCurrentPrompt(activeRun, {
+          messageId: `msg-${snapshots.length}`,
+          transcript: `reply-${snapshots.length}`,
+        });
+      });
+
+    await Effect.runPromise(Queue.offer(activeRun.followUpQueue, makeRequest("m-2", "follow-up")));
+
+    await Effect.runPromise(
+      coordinateActiveRunPrompts({
+        channelId: "c-1",
+        session: makeSessionHandle(),
+        activeRun,
+        initialRequests: [makeRequest("m-1", "initial")],
+        awaitIdleCompaction: () => Effect.void,
+        submitPrompt,
+        logger: makeLogger(),
+      }),
+    );
+
+    expect(snapshots).toEqual([
+      {
+        userMessageId: null,
+        assistantCount: 0,
+        toolCallCount: 0,
+      },
+      {
+        userMessageId: null,
+        assistantCount: 0,
+        toolCallCount: 0,
+      },
+    ]);
   });
 
   test("fails immediately when prompt submission fails", async () => {

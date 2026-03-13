@@ -26,7 +26,6 @@ import {
   isPathLikeKey,
   parseWebfetchTitle,
   singleLine,
-  summarizeContentType,
   titleCaseKey,
   titleForPart,
   truncate,
@@ -194,14 +193,11 @@ const formatWebfetchInputLines: ToolInputFormatter = ({ part, input }) => {
   const format = findStringInput(input, ["format"]);
   const metadata: Array<ReturnType<typeof metaField>> = [];
   const lines: ToolCardLine[] = [];
+  let responseContentType: string | null = null;
 
   if (url) {
     const compact = compactUrl(url);
     lines.push(summaryLine(`\`${compact ? truncate(compact, 180) : truncate(url, 180)}\``));
-  }
-
-  if (format && format !== "markdown") {
-    metadata.push(metaField("Format", `\`${format}\``));
   }
 
   if (part.state.status === "completed") {
@@ -218,9 +214,16 @@ const formatWebfetchInputLines: ToolInputFormatter = ({ part, input }) => {
             ),
           );
         }
-        metadata.push(metaField("Response", `\`${summarizeContentType(parsed.contentType)}\``));
+        responseContentType = parsed.contentType;
       }
     }
+  }
+
+  if (format) {
+    metadata.push(metaField("Requested", `\`${format}\``));
+  }
+  if (responseContentType) {
+    metadata.push(metaField("Response", `\`${responseContentType}\``));
   }
 
   return [...lines, ...packMetaFields(metadata)];

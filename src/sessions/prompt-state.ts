@@ -1,18 +1,13 @@
-import type { AssistantMessage, ToolPart, UserMessage } from "@opencode-ai/sdk/v2";
+import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2";
 import { Deferred, Effect, Ref } from "effect";
 
 import { isCompactionSummaryAssistant, isObservedAssistantMessage } from "@/opencode/events.ts";
 import type { PromptResult } from "@/opencode/service.ts";
 
-type TrackedAssistant = {
-  info: AssistantMessage | null;
-  liveToolCallIds: Set<string>;
-};
-
 export type PendingPrompt = {
   userMessageId: string | null;
   deferred: Deferred.Deferred<PromptResult, unknown>;
-  assistantsByMessageId: Map<string, TrackedAssistant>;
+  assistantMessagesById: Map<string, AssistantMessage>;
 };
 
 export type PromptTrackingAction =
@@ -35,34 +30,24 @@ const isResolvablePromptReply = (message: AssistantMessage) =>
   message.finish !== "tool-calls" &&
   message.finish !== "unknown";
 
-const cloneTrackedAssistant = (tracked?: TrackedAssistant): TrackedAssistant => ({
-  info: tracked?.info ?? null,
-  liveToolCallIds: new Set(tracked?.liveToolCallIds ?? []),
-});
-
 const selectPromptReplyCandidate = (
   prompt: PendingPrompt,
-): { messageId: string; tracked: TrackedAssistant } | null => {
+): { messageId: string; message: AssistantMessage } | null => {
   if (!prompt.userMessageId) {
     return null;
   }
 
-  let candidate: { messageId: string; tracked: TrackedAssistant } | null = null;
-  for (const [messageId, tracked] of prompt.assistantsByMessageId.entries()) {
-    const info = tracked.info;
-    if (!info) {
-      continue;
-    }
+  let candidate: { messageId: string; message: AssistantMessage } | null = null;
+  for (const [messageId, message] of prompt.assistantMessagesById.entries()) {
     if (
-      !isPromptReply(prompt.userMessageId, info) ||
-      isCompactionSummaryAssistant(info) ||
-      !isResolvablePromptReply(info) ||
-      tracked.liveToolCallIds.size > 0
+      !isPromptReply(prompt.userMessageId, message) ||
+      isCompactionSummaryAssistant(message) ||
+      !isResolvablePromptReply(message)
     ) {
       continue;
     }
 
-    candidate = { messageId, tracked };
+    candidate = { messageId, message };
   }
 
   return candidate;
@@ -72,11 +57,11 @@ const evaluatePromptActions = (prompt: PendingPrompt): ReadonlyArray<PromptTrack
   const actions: PromptTrackingAction[] = [];
 
   const candidate = selectPromptReplyCandidate(prompt);
-  if (candidate?.tracked.info?.error) {
+  if (candidate?.message.error) {
     actions.push({
       type: "fail-prompt",
       deferred: prompt.deferred,
-      error: candidate.tracked.info.error,
+      error: candidate.message.error,
     });
     return actions;
   }
@@ -115,7 +100,7 @@ const updatePendingPrompt = (
 
 const clonePrompt = (prompt: PendingPrompt): PendingPrompt => ({
   ...prompt,
-  assistantsByMessageId: new Map(prompt.assistantsByMessageId),
+  assistantMessagesById: new Map(prompt.assistantMessagesById),
 });
 
 export const handleSessionError = (
@@ -185,7 +170,7 @@ export const beginPendingPrompt = (
     yield* Ref.set(stateRef, {
       userMessageId: null,
       deferred,
-      assistantsByMessageId: new Map<string, TrackedAssistant>(),
+      assistantMessagesById: new Map<string, AssistantMessage>(),
     });
     return deferred;
   });
@@ -227,26 +212,6 @@ export const handleAssistantMessageUpdated = (
 ): Effect.Effect<ReadonlyArray<PromptTrackingAction>> =>
   updatePendingPrompt(stateRef, (current) => {
     const nextPrompt = clonePrompt(current);
-    const assistantsByMessageId = nextPrompt.assistantsByMessageId;
-    const tracked = cloneTrackedAssistant(assistantsByMessageId.get(message.id));
-    tracked.info = message;
-    assistantsByMessageId.set(message.id, tracked);
-    return nextPrompt;
-  });
-
-export const handleToolPartUpdated = (
-  stateRef: Ref.Ref<PendingPrompt | null>,
-  part: ToolPart,
-): Effect.Effect<ReadonlyArray<PromptTrackingAction>> =>
-  updatePendingPrompt(stateRef, (current) => {
-    const nextPrompt = clonePrompt(current);
-    const assistantsByMessageId = nextPrompt.assistantsByMessageId;
-    const tracked = cloneTrackedAssistant(assistantsByMessageId.get(part.messageID));
-    if (part.state.status === "pending" || part.state.status === "running") {
-      tracked.liveToolCallIds.add(part.callID);
-    } else {
-      tracked.liveToolCallIds.delete(part.callID);
-    }
-    assistantsByMessageId.set(part.messageID, tracked);
+    nextPrompt.assistantMessagesById.set(message.id, message);
     return nextPrompt;
   });

@@ -6,12 +6,18 @@ import {
   admitRequestBatchToActiveRun,
   type NonEmptyRunRequestBatch,
 } from "@/sessions/run-batch.ts";
-import type { ActiveRun } from "@/sessions/session.ts";
+import { resetActivePromptTracking, type ActiveRun } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
 type PromptCoordinatorActiveRun = Pick<
   ActiveRun,
-  "attachmentMessagesById" | "promptState" | "followUpQueue" | "acceptFollowUps"
+  | "attachmentMessagesById"
+  | "promptState"
+  | "followUpQueue"
+  | "acceptFollowUps"
+  | "currentPromptUserMessageId"
+  | "assistantMessageParentIds"
+  | "observedToolCallIds"
 >;
 
 export type ActiveRunPromptCoordinatorInput = {
@@ -41,6 +47,7 @@ export const coordinateActiveRunPrompts = (
   Effect.gen(function* () {
     const runPrompt = (value: string) =>
       Effect.gen(function* () {
+        resetActivePromptTracking(input.activeRun);
         const completion = yield* beginPendingPrompt(input.activeRun.promptState);
 
         yield* input

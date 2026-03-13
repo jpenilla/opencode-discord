@@ -302,7 +302,25 @@ describe("tool card formatting", () => {
     );
 
     expect(text).toBe(
-      "**🌐 ✅ `webfetch` Completed in 0.00s**\n`example.com/docs?q=tool-card`\nFormat: `html` | Response: `HTML`",
+      "**🌐 ✅ `webfetch` Completed in 0.00s**\n`example.com/docs?q=tool-card`\nRequested: `html` | Response: `text/html`",
+    );
+  });
+
+  test("keeps both webfetch format and response when they differ", async () => {
+    const text = await renderCard(
+      makeToolPart({
+        tool: "webfetch",
+        status: "completed",
+        toolInput: {
+          url: "https://example.com/docs?q=tool-card",
+          format: "json",
+        },
+        title: "https://example.com/docs?q=tool-card (text/html)",
+      }),
+    );
+
+    expect(text).toBe(
+      "**🌐 ✅ `webfetch` Completed in 0.00s**\n`example.com/docs?q=tool-card`\nRequested: `json` | Response: `text/html`",
     );
   });
 

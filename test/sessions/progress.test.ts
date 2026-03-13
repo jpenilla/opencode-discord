@@ -66,22 +66,34 @@ const makeHarness = async (showThinking = true) => {
   };
 };
 
-const makeRunningToolPart = (): ToolPart =>
+const makeToolPart = (
+  status: "running" | "completed" | "error",
+  input?: {
+    callId?: string;
+    title?: string;
+  },
+): ToolPart =>
   unsafeStub<ToolPart>({
     id: "part-1",
     sessionID: "session-1",
     messageID: "assistant-1",
-    callID: "call-1",
+    callID: input?.callId ?? "call-1",
     tool: "bash",
     state: {
-      status: "running",
+      status,
       input: {
         command: "pwd",
       },
-      title: "Print cwd",
-      time: {
-        start: 1,
-      },
+      ...(status === "error" ? { error: "aborted" } : { title: input?.title ?? "Print cwd" }),
+      time:
+        status === "running"
+          ? {
+              start: 1,
+            }
+          : {
+              start: 1,
+              end: 2,
+            },
     },
   });
 
@@ -110,11 +122,11 @@ const runFinalizationScenario = async (reason: "interrupted" | "shutdown") => {
           ),
         );
 
-        const ack = yield* Deferred.make<void>();
-        yield* Queue.offer(queue, {
-          type: "tool-updated",
-          part: makeRunningToolPart(),
-        });
+          const ack = yield* Deferred.make<void>();
+          yield* Queue.offer(queue, {
+            type: "tool-updated",
+            part: makeToolPart("running"),
+          });
         yield* Queue.offer(queue, {
           type: "session-compacting",
           part: makeCompactionPart(),
@@ -333,5 +345,53 @@ describe("runProgressWorker", () => {
     );
 
     expect(result.map((payload) => payload.content)).not.toContain("*🧠 planning the change*");
+  });
+
+  test("ignores later terminal updates once a tool call is already terminal", async () => {
+    const harness = await makeHarness();
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const queue = yield* Queue.unbounded<RunProgressEvent>();
+          const worker = yield* Effect.fork(
+            runProgressWorker(
+              harness.session,
+              harness.sourceMessage,
+              "/home/opencode/workspace",
+              queue,
+            ),
+          );
+
+          const ack = yield* Deferred.make<void>();
+          yield* Queue.offer(queue, {
+            type: "tool-updated",
+            part: makeToolPart("completed", {
+              title: "Print cwd",
+            }),
+          });
+          yield* Queue.offer(queue, {
+            type: "tool-updated",
+            part: makeToolPart("error", {
+              title: "This terminal update should be ignored",
+            }),
+          });
+          yield* Queue.offer(queue, {
+            type: "run-finalizing",
+            ack,
+          });
+          yield* Deferred.await(ack);
+          yield* Fiber.interrupt(worker);
+
+          return {
+            sent: yield* Ref.get(harness.sentPayloads),
+            edited: yield* Ref.get(harness.editedPayloads),
+          };
+        }),
+      ),
+    );
+
+    expect(result.sent.map(cardText)).toEqual(["**💻 ✅ `bash` Completed in 0.00s**\n`pwd`\nPrint cwd"]);
+    expect(result.edited.map(cardText)).toEqual([]);
   });
 });

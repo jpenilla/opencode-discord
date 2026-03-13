@@ -165,20 +165,3 @@ export const parseWebfetchTitle = (title: string) => {
     contentType: title.slice(suffixStart + 2, -1),
   };
 };
-
-export const summarizeContentType = (value: string) => {
-  const mime = value.split(";")[0]?.trim().toLowerCase();
-  switch (mime) {
-    case "application/json":
-      return "JSON";
-    case "text/html":
-      return "HTML";
-    case "text/plain":
-      return "Text";
-    case "text/markdown":
-    case "text/x-markdown":
-      return "Markdown";
-    default:
-      return mime || value;
-  }
-};

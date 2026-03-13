@@ -34,6 +34,9 @@ const makeSession = async (withActiveRun: boolean, showCompactionSummaries = tru
         }),
         workdir: "/home/opencode/workspace",
         attachmentMessagesById: new Map(),
+        currentPromptUserMessageId: null,
+        assistantMessageParentIds: new Map<string, string>(),
+        observedToolCallIds: new Set<string>(),
         progressQueue,
         promptState,
         followUpQueue: {} as ActiveRun["followUpQueue"],
@@ -201,13 +204,19 @@ const makeUserMessageUpdatedEvent = (id = "user-1"): Event =>
     },
   });
 
-const makeToolPart = (status: "running" | "error"): ToolPart =>
+const makeToolPart = (
+  status: "running" | "completed" | "error",
+  input?: {
+    messageId?: string;
+    callId?: string;
+  },
+): ToolPart =>
   unsafeStub<ToolPart>({
     id: `part-${status}`,
     sessionID: "session-1",
-    messageID: "assistant-1",
+    messageID: input?.messageId ?? "assistant-1",
     type: "tool",
-    callID: "call-1",
+    callID: input?.callId ?? "call-1",
     tool: "bash",
     state:
       status === "running"
@@ -221,6 +230,18 @@ const makeToolPart = (status: "running" | "error"): ToolPart =>
               start: 1,
             },
           }
+        : status === "completed"
+          ? {
+              status: "completed",
+              input: {
+                command: "pwd",
+              },
+              title: "Print cwd",
+              time: {
+                start: 1,
+                end: 2,
+              },
+            }
         : {
             status: "error",
             input: {
@@ -234,11 +255,17 @@ const makeToolPart = (status: "running" | "error"): ToolPart =>
           },
   });
 
-const makeToolEvent = (status: "running" | "error"): Event =>
+const makeToolEvent = (
+  status: "running" | "completed" | "error",
+  input?: {
+    messageId?: string;
+    callId?: string;
+  },
+): Event =>
   unsafeStub<Event>({
     type: "message.part.updated",
     properties: {
-      part: makeToolPart(status),
+      part: makeToolPart(status, input),
     },
   });
 
@@ -565,7 +592,7 @@ describe("createEventRuntime", () => {
     });
   });
 
-  test("waits for the late terminal tool update before completing the pending prompt", async () => {
+  test("completes on the final assistant reply even when tool progress was already observed", async () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
 
@@ -600,20 +627,169 @@ describe("createEventRuntime", () => {
       ),
     );
 
+    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([
+      {
+        type: "tool-updated",
+        part: makeToolPart("running"),
+      },
+    ]);
+    expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
+      messageId: "assistant-1",
+      transcript: "final reply",
+    });
+  });
+
+  test("ignores completed tool updates that do not belong to the active run", async () => {
+    const { session, activeRun, progressQueue, promptState } = await makeSession(true);
+    const completion = await Effect.runPromise(beginPendingPrompt(promptState));
+
+    const runtime = createEventRuntime({
+      getSessionContext: (sessionId) =>
+        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
+      handleQuestionEvent: () => Effect.void,
+      finalizeIdleCompactionCard: () => Effect.void,
+      sendCompactionSummary: () => Effect.void,
+      readPromptResult: (_session, messageId) =>
+        Effect.succeed({
+          messageId,
+          transcript: "final reply",
+        }),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
+    });
+
+    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
+    await Effect.runPromise(
+      runtime.handleEvent(
+        makeAssistantMessageUpdatedEvent({
+          id: "assistant-current",
+          parentId: "user-1",
+        }),
+      ),
+    );
+
+    await Effect.runPromise(
+      runtime.handleEvent(
+        makeToolEvent("completed", {
+          messageId: "assistant-old",
+          callId: "call-old",
+        }),
+      ),
+    );
+
+    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([]);
+    expect(activeRun?.observedToolCallIds.size).toBe(0);
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+  });
+
+  test("ignores terminal tool updates for stale assistants seen before prompt binding", async () => {
+    const { session, activeRun, progressQueue, promptState } = await makeSession(true);
+    const completion = await Effect.runPromise(beginPendingPrompt(promptState));
+
+    const runtime = createEventRuntime({
+      getSessionContext: (sessionId) =>
+        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
+      handleQuestionEvent: () => Effect.void,
+      finalizeIdleCompactionCard: () => Effect.void,
+      sendCompactionSummary: () => Effect.void,
+      readPromptResult: (_session, messageId) =>
+        Effect.succeed({
+          messageId,
+          transcript: "final reply",
+        }),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
+    });
+
+    await Effect.runPromise(
+      runtime.handleEvent(
+        makeAssistantMessageUpdatedEvent({
+          id: "assistant-old",
+          parentId: "user-old",
+          completed: true,
+        }),
+      ),
+    );
+    await Effect.runPromise(
+      runtime.handleEvent(
+        makeToolEvent("completed", {
+          messageId: "assistant-old",
+          callId: "call-old",
+        }),
+      ),
+    );
+
+    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([]);
+    expect(activeRun?.observedToolCallIds.size).toBe(0);
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
 
-    await Effect.runPromise(runtime.handleEvent(makeToolEvent("error")));
+    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
+
+    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([]);
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+  });
+
+  test("emits in-flight tool updates before the assistant message is bound", async () => {
+    const { session, activeRun, progressQueue, promptState } = await makeSession(true);
+    const completion = await Effect.runPromise(beginPendingPrompt(promptState));
+
+    const runtime = createEventRuntime({
+      getSessionContext: (sessionId) =>
+        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
+      handleQuestionEvent: () => Effect.void,
+      finalizeIdleCompactionCard: () => Effect.void,
+      sendCompactionSummary: () => Effect.void,
+      readPromptResult: (_session, messageId) =>
+        Effect.succeed({
+          messageId,
+          transcript: "final reply",
+        }),
+      logger: {
+        info: () => Effect.void,
+        warn: () => Effect.void,
+        error: () => Effect.void,
+      },
+      formatError: (error) => String(error),
+    });
+
+    await Effect.runPromise(
+      runtime.handleEvent(
+        makeAssistantMessageUpdatedEvent({
+          id: "assistant-1",
+          parentId: "user-1",
+          completed: true,
+        }),
+      ),
+    );
+    await Effect.runPromise(
+      runtime.handleEvent(
+        makeToolEvent("running", {
+          messageId: "assistant-1",
+          callId: "call-1",
+        }),
+      ),
+    );
 
     expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([
       {
         type: "tool-updated",
         part: makeToolPart("running"),
       },
-      {
-        type: "tool-updated",
-        part: makeToolPart("error"),
-      },
     ]);
+    expect(activeRun?.observedToolCallIds.has("call-1")).toBe(true);
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+
+    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
+
+    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([]);
     expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
       messageId: "assistant-1",
       transcript: "final reply",

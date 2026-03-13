@@ -820,7 +820,7 @@ describe("ChannelSessionsLive integration", () => {
     expect(await getRef(harness.replies)).toEqual(["final reply"]);
   });
 
-  test("waits for the late aborted-tool update before finalizing the run UI", async () => {
+  test("surfaces a late aborted-tool update in the run UI after the final reply", async () => {
     const harness = await makeHarness({
       promptImpl: ({ publishEvent, storePromptResult, messageId, sessionId }) =>
         storePromptResult({

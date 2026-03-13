@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { AssistantMessage, ToolPart, UserMessage } from "@opencode-ai/sdk/v2";
+import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2";
 import { Deferred, Effect, Option, Ref } from "effect";
 
 import {
   beginPendingPrompt,
   createPromptState,
   handleAssistantMessageUpdated,
-  handleToolPartUpdated,
   handleUserMessageUpdated,
 } from "@/sessions/prompt-state.ts";
 import { unsafeStub } from "../support/stub.ts";
@@ -17,6 +16,7 @@ const makeAssistantMessage = (input: {
   summary?: boolean;
   mode?: string;
   completed?: boolean;
+  finish?: AssistantMessage["finish"];
 }): AssistantMessage =>
   unsafeStub<AssistantMessage>({
     id: input.id,
@@ -42,6 +42,7 @@ const makeAssistantMessage = (input: {
         write: 0,
       },
     },
+    finish: input.finish,
     time: input.completed
       ? {
           created: 1,
@@ -50,39 +51,6 @@ const makeAssistantMessage = (input: {
       : {
           created: 1,
         },
-  });
-
-const makeToolPart = (status: "running" | "error"): ToolPart =>
-  unsafeStub<ToolPart>({
-    id: `part-${status}`,
-    sessionID: "session-1",
-    messageID: "assistant-1",
-    type: "tool",
-    callID: "call-1",
-    tool: "bash",
-    state:
-      status === "running"
-        ? {
-            status: "running",
-            input: {
-              command: "pwd",
-            },
-            title: "Print cwd",
-            time: {
-              start: 1,
-            },
-          }
-        : {
-            status: "error",
-            input: {
-              command: "pwd",
-            },
-            error: "aborted",
-            time: {
-              start: 1,
-              end: 2,
-            },
-          },
   });
 
 const makeUserMessage = (id: string): UserMessage =>
@@ -144,15 +112,12 @@ describe("prompt-state", () => {
     expect(action.messageId).toBe("assistant-1");
   });
 
-  test("does not complete the prompt until the live tool settles", async () => {
+  test("waits for the follow-up assistant after a tool-calls turn", async () => {
     const state = await Effect.runPromise(createPromptState());
     const completion = await Effect.runPromise(beginPendingPrompt(state));
 
     await Effect.runPromise(handleUserMessageUpdated(state, makeUserMessage("user-1")));
 
-    expect(await Effect.runPromise(handleToolPartUpdated(state, makeToolPart("running")))).toEqual(
-      [],
-    );
     expect(
       await Effect.runPromise(
         handleAssistantMessageUpdated(
@@ -161,13 +126,24 @@ describe("prompt-state", () => {
             id: "assistant-1",
             parentId: "user-1",
             completed: true,
+            finish: "tool-calls",
           }),
         ),
       ),
     ).toEqual([]);
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
 
-    const actions = await Effect.runPromise(handleToolPartUpdated(state, makeToolPart("error")));
+    const actions = await Effect.runPromise(
+      handleAssistantMessageUpdated(
+        state,
+        makeAssistantMessage({
+          id: "assistant-2",
+          parentId: "user-1",
+          completed: true,
+          finish: "stop",
+        }),
+      ),
+    );
 
     expect(actions).toHaveLength(1);
     const action = actions[0];
@@ -175,7 +151,7 @@ describe("prompt-state", () => {
     if (!action || action.type !== "complete-prompt") {
       throw new Error("expected a completion action");
     }
-    expect(action.messageId).toBe("assistant-1");
+    expect(action.messageId).toBe("assistant-2");
     expect(await Effect.runPromise(Ref.get(state))).toBeNull();
   });
 
