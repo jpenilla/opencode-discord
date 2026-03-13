@@ -78,9 +78,7 @@ export const summarizeOpencodeEventForLog = (event: GlobalEvent["payload"]) => {
         completed: "completed" in info.time ? info.time.completed !== undefined : undefined,
         finish: "finish" in info ? info.finish : undefined,
         error:
-          "error" in info && info.error
-            ? truncateLogField(formatLogValue(info.error))
-            : undefined,
+          "error" in info && info.error ? truncateLogField(formatLogValue(info.error)) : undefined,
       };
     }
     case "message.part.updated": {

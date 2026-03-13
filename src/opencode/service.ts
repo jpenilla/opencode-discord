@@ -9,10 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { AppConfig } from "@/config.ts";
 import { OpencodeEventQueue, type OpencodeEventQueueShape } from "@/opencode/events.ts";
-import {
-  summarizeOpencodeEventForLog,
-  summarizePermissionForLog,
-} from "@/opencode/log-summary.ts";
+import { summarizeOpencodeEventForLog, summarizePermissionForLog } from "@/opencode/log-summary.ts";
 import {
   buildPromptRequestInput,
   hasIncompletePromptModelOverride,

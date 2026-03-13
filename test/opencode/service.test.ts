@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { GlobalEvent, PermissionRequest } from "@opencode-ai/sdk/v2";
 
-import {
-  summarizeOpencodeEventForLog,
-  summarizePermissionForLog,
-} from "@/opencode/log-summary.ts";
+import { summarizeOpencodeEventForLog, summarizePermissionForLog } from "@/opencode/log-summary.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 describe("opencode log summaries", () => {

@@ -201,7 +201,9 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
         const promptActions = [];
 
         if (userMessage) {
-          promptActions.push(...(yield* handleUserMessageUpdated(activeRun.promptState, userMessage)));
+          promptActions.push(
+            ...(yield* handleUserMessageUpdated(activeRun.promptState, userMessage)),
+          );
         }
 
         if (assistantMessage) {
@@ -230,30 +232,33 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
           : progressEvents.filter((progressEvent) => progressEvent.type !== "tool-updated");
         yield* Effect.forEach(
           runProgressEvents,
-          (progressEvent) => Queue.offer(activeRun.progressQueue, progressEvent).pipe(Effect.asVoid),
+          (progressEvent) =>
+            Queue.offer(activeRun.progressQueue, progressEvent).pipe(Effect.asVoid),
           { discard: true },
         );
 
         const { completePrompt, failPrompt } = resolvePromptTrackingActions(promptActions);
 
         if (completePrompt) {
-          yield* deps
-            .readPromptResult(context.session.opencode, completePrompt.messageId)
-            .pipe(
-              Effect.flatMap((result) =>
-                Deferred.succeed(completePrompt.deferred, result).pipe(Effect.ignore),
-              ),
-              Effect.catchAll((error) =>
-                deps.logger
-                  .warn("failed to resolve prompt result from event stream", {
-                    channelId: context.session.channelId,
-                    sessionId,
-                    messageId: completePrompt.messageId,
-                    error: deps.formatError(error),
-                  })
-                  .pipe(Effect.zipRight(Deferred.fail(completePrompt.deferred, error).pipe(Effect.ignore))),
-              ),
-            );
+          yield* deps.readPromptResult(context.session.opencode, completePrompt.messageId).pipe(
+            Effect.flatMap((result) =>
+              Deferred.succeed(completePrompt.deferred, result).pipe(Effect.ignore),
+            ),
+            Effect.catchAll((error) =>
+              deps.logger
+                .warn("failed to resolve prompt result from event stream", {
+                  channelId: context.session.channelId,
+                  sessionId,
+                  messageId: completePrompt.messageId,
+                  error: deps.formatError(error),
+                })
+                .pipe(
+                  Effect.zipRight(
+                    Deferred.fail(completePrompt.deferred, error).pipe(Effect.ignore),
+                  ),
+                ),
+            ),
+          );
         }
 
         if (failPrompt) {

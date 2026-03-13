@@ -122,11 +122,11 @@ const runFinalizationScenario = async (reason: "interrupted" | "shutdown") => {
           ),
         );
 
-          const ack = yield* Deferred.make<void>();
-          yield* Queue.offer(queue, {
-            type: "tool-updated",
-            part: makeToolPart("running"),
-          });
+        const ack = yield* Deferred.make<void>();
+        yield* Queue.offer(queue, {
+          type: "tool-updated",
+          part: makeToolPart("running"),
+        });
         yield* Queue.offer(queue, {
           type: "session-compacting",
           part: makeCompactionPart(),
@@ -391,7 +391,9 @@ describe("runProgressWorker", () => {
       ),
     );
 
-    expect(result.sent.map(cardText)).toEqual(["**💻 ✅ `bash` Completed in 0.00s**\n`pwd`\nPrint cwd"]);
+    expect(result.sent.map(cardText)).toEqual([
+      "**💻 ✅ `bash` Completed in 0.00s**\n`pwd`\nPrint cwd",
+    ]);
     expect(result.edited.map(cardText)).toEqual([]);
   });
 });

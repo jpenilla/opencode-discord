@@ -242,17 +242,17 @@ const makeToolPart = (
                 end: 2,
               },
             }
-        : {
-            status: "error",
-            input: {
-              command: "pwd",
+          : {
+              status: "error",
+              input: {
+                command: "pwd",
+              },
+              error: "aborted",
+              time: {
+                start: 1,
+                end: 2,
+              },
             },
-            error: "aborted",
-            time: {
-              start: 1,
-              end: 2,
-            },
-          },
   });
 
 const makeToolEvent = (
@@ -681,7 +681,9 @@ describe("createEventRuntime", () => {
       ),
     );
 
-    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([]);
+    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual(
+      [],
+    );
     expect(activeRun?.observedToolCallIds.size).toBe(0);
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
   });
@@ -727,13 +729,17 @@ describe("createEventRuntime", () => {
       ),
     );
 
-    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([]);
+    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual(
+      [],
+    );
     expect(activeRun?.observedToolCallIds.size).toBe(0);
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
 
     await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
 
-    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([]);
+    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual(
+      [],
+    );
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
   });
 
@@ -789,7 +795,9 @@ describe("createEventRuntime", () => {
 
     await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
 
-    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([]);
+    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual(
+      [],
+    );
     expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
       messageId: "assistant-1",
       transcript: "final reply",
