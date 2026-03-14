@@ -1,9 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import { mkdir, rm } from "node:fs/promises";
 
 import { Context, Effect, Layer, Redacted } from "effect";
-import type { Message as DiscordMessage } from "discord.js";
+import { AttachmentBuilder, type Message as DiscordMessage } from "discord.js";
 
 import { AppConfig } from "@/config.ts";
 import {
@@ -12,12 +12,7 @@ import {
   listUsableStickers,
   normalizeReactionEmoji,
 } from "@/discord/assets.ts";
-import {
-  displaySessionPath,
-  insideAliasedRoot,
-  resolveSessionPath,
-  sessionHomeDir,
-} from "@/sandbox/session-paths.ts";
+import { formatAttachmentList } from "@/tools/attachments.ts";
 import { ChannelSessions } from "@/sessions/registry.ts";
 import { classifyToolBridgeFailure } from "@/tools/bridge-error.ts";
 import { getRunMessageById, resolveReactionTargetMessage } from "@/tools/run-message.ts";
@@ -31,49 +26,18 @@ export class ToolBridge extends Context.Tag("ToolBridge")<ToolBridge, ToolBridge
 
 type ToolRequest = {
   sessionID: string;
-  path?: string;
-  directory?: string;
   messageId?: string;
   caption?: string;
+  filename?: string;
+  displayPath?: string;
+  dataBase64?: string;
   emoji?: string;
   stickerID?: string;
-};
-
-const insideDirectory = (root: string, candidate: string) => {
-  const rootPath = resolve(root);
-  const candidatePath = isAbsolute(candidate) ? resolve(candidate) : resolve(rootPath, candidate);
-  return insideAliasedRoot(rootPath, candidatePath);
 };
 
 const sendJson = (response: ServerResponse, body: unknown, status = 200) => {
   response.writeHead(status, { "content-type": "application/json" });
   response.end(JSON.stringify(body));
-};
-
-const sanitizeFilename = (value: string) => {
-  const name = basename(value).trim();
-  const safe = name
-    .replaceAll("/", "_")
-    .replaceAll("\\", "_")
-    .replaceAll(":", "_")
-    .replaceAll("\0", "_");
-  return safe.length > 0 ? safe : "attachment.bin";
-};
-
-const uniquePath = async (directory: string, filename: string) => {
-  const dot = filename.lastIndexOf(".");
-  const base = dot > 0 ? filename.slice(0, dot) : filename;
-  const ext = dot > 0 ? filename.slice(dot) : "";
-
-  let attempt = 0;
-  while (true) {
-    const candidate = resolve(directory, attempt === 0 ? filename : `${base}-${attempt}${ext}`);
-    const file = Bun.file(candidate);
-    if (!(await file.exists())) {
-      return candidate;
-    }
-    attempt += 1;
-  }
 };
 
 const readJsonBody = async (request: IncomingMessage): Promise<ToolRequest | undefined> => {
@@ -168,16 +132,13 @@ export const ToolBridgeLive = Layer.scoped(
 
         if (request.method === "POST" && pathname === "/tool/send-file") {
           operation = "file upload";
-          if (!payload.path) {
-            sendJson(response, { error: "missing path" }, 400);
+          if (!payload.filename || typeof payload.dataBase64 !== "string") {
+            sendJson(response, { error: "missing upload data" }, 400);
             return;
           }
-          const sessionHome = sessionHomeDir(activeRun.workdir);
-          const filePath = resolveSessionPath(activeRun.workdir, payload.path);
-          if (!insideDirectory(sessionHome, filePath)) {
-            sendJson(response, { error: "path outside session home" }, 403);
-            return;
-          }
+          const file = new AttachmentBuilder(Buffer.from(payload.dataBase64, "base64"), {
+            name: payload.filename,
+          });
 
           if (!activeRun.discordMessage.channel.isSendable()) {
             sendJson(response, { error: "channel not sendable" }, 409);
@@ -186,29 +147,26 @@ export const ToolBridgeLive = Layer.scoped(
 
           await activeRun.discordMessage.channel.send({
             content: payload.caption,
-            files: [filePath],
+            files: [file],
             allowedMentions: { parse: ["users", "roles", "everyone"] },
           });
 
           sendJson(response, {
             ok: true,
-            message: `Sent file ${displaySessionPath(activeRun.workdir, filePath)}`,
+            message: `Sent file ${payload.displayPath ?? payload.filename}`,
           });
           return;
         }
 
         if (request.method === "POST" && pathname === "/tool/send-image") {
           operation = "image upload";
-          if (!payload.path) {
-            sendJson(response, { error: "missing path" }, 400);
+          if (!payload.filename || typeof payload.dataBase64 !== "string") {
+            sendJson(response, { error: "missing upload data" }, 400);
             return;
           }
-          const sessionHome = sessionHomeDir(activeRun.workdir);
-          const imagePath = resolveSessionPath(activeRun.workdir, payload.path);
-          if (!insideDirectory(sessionHome, imagePath)) {
-            sendJson(response, { error: "path outside session home" }, 403);
-            return;
-          }
+          const image = new AttachmentBuilder(Buffer.from(payload.dataBase64, "base64"), {
+            name: payload.filename,
+          });
 
           if (!activeRun.discordMessage.channel.isSendable()) {
             sendJson(response, { error: "channel not sendable" }, 409);
@@ -217,13 +175,13 @@ export const ToolBridgeLive = Layer.scoped(
 
           await activeRun.discordMessage.channel.send({
             content: payload.caption,
-            files: [imagePath],
+            files: [image],
             allowedMentions: { parse: ["users", "roles", "everyone"] },
           });
 
           sendJson(response, {
             ok: true,
-            message: `Sent image ${displaySessionPath(activeRun.workdir, imagePath)}`,
+            message: `Sent image ${payload.displayPath ?? payload.filename}`,
           });
           return;
         }
@@ -293,7 +251,9 @@ export const ToolBridgeLive = Layer.scoped(
           if (!targetMessage) {
             sendJson(
               response,
-              { error: `messageId is not available in this channel: ${payload.messageId}` },
+              {
+                error: `messageId is not available in this channel: ${payload.messageId}`,
+              },
               404,
             );
             return;
@@ -311,16 +271,10 @@ export const ToolBridgeLive = Layer.scoped(
           return;
         }
 
-        if (request.method === "POST" && pathname === "/tool/download-attachments") {
-          operation = "attachment download";
+        if (request.method === "POST" && pathname === "/tool/list-attachments") {
+          operation = "attachment listing";
           if (!payload.messageId) {
             sendJson(response, { error: "missing messageId" }, 400);
-            return;
-          }
-
-          const targetDirectory = resolveSessionPath(activeRun.workdir, payload.directory ?? ".");
-          if (!insideDirectory(sessionHomeDir(activeRun.workdir), targetDirectory)) {
-            sendJson(response, { error: "directory outside session home" }, 403);
             return;
           }
 
@@ -328,7 +282,9 @@ export const ToolBridgeLive = Layer.scoped(
           if (!targetMessage) {
             sendJson(
               response,
-              { error: `messageId is not available in the current run: ${payload.messageId}` },
+              {
+                error: `messageId is not available in the current run: ${payload.messageId}`,
+              },
               404,
             );
             return;
@@ -349,44 +305,24 @@ export const ToolBridgeLive = Layer.scoped(
             return;
           }
 
-          await mkdir(targetDirectory, { recursive: true });
-
-          const downloaded: Array<{
-            savedPath: string;
-            originalName: string;
-            messageId: string;
-          }> = [];
-          for (const { attachment, messageId } of attachments) {
-            const download = await fetch(attachment.url);
-            if (!download.ok) {
-              sendJson(
-                response,
-                { error: `failed to download attachment: ${attachment.url}` },
-                502,
-              );
-              return;
-            }
-
-            const arrayBuffer = await download.arrayBuffer();
-            const filename = sanitizeFilename(attachment.name ?? attachment.id);
-            const destination = await uniquePath(targetDirectory, filename);
-            await writeFile(destination, new Uint8Array(arrayBuffer));
-            downloaded.push({
-              savedPath: displaySessionPath(activeRun.workdir, destination),
-              originalName: attachment.name ?? attachment.id,
-              messageId,
-            });
-          }
-
           sendJson(response, {
             ok: true,
-            message: [
-              `Downloaded ${downloaded.length} attachment${downloaded.length === 1 ? "" : "s"}:`,
-              ...downloaded.map(
-                ({ savedPath, originalName, messageId }) =>
-                  `- \`${savedPath}\` from Discord message \`${messageId}\` (\`${originalName}\`)`,
-              ),
-            ].join("\n"),
+            message: JSON.stringify(
+              {
+                description: `Attachments on Discord message ${payload.messageId}`,
+                list: formatAttachmentList(
+                  attachments.map(({ attachment }) => ({
+                    attachmentId: attachment.id,
+                    name: attachment.name ?? attachment.id,
+                    contentType: attachment.contentType,
+                    size: attachment.size,
+                    url: attachment.url,
+                  })),
+                ),
+              },
+              null,
+              2,
+            ),
           });
           return;
         }

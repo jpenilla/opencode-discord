@@ -103,7 +103,7 @@ Command behavior:
 
 Repo-local tools live under [`opencode/tools`](./opencode/tools):
 
-- `download-attachments`
+- `list-attachments`
 - `list-custom-emojis`
 - `list-stickers`
 - `react`
@@ -114,11 +114,11 @@ Repo-local tools live under [`opencode/tools`](./opencode/tools):
 What they do:
 
 - `send-file`
-  Upload a file to Discord. Relative paths resolve from the current session workdir and must stay under the synthetic session home.
+  Upload a file to Discord. Paths use the same semantics as built-in OpenCode file tools: relative to the current session cwd or absolute.
 - `send-image`
-  Upload an image to Discord. Relative paths resolve from the current session workdir and must stay under the synthetic session home.
-- `download-attachments`
-  Download attachments from a specific Discord message by `messageId`. Relative destinations resolve from the current session workdir and must stay under the synthetic session home.
+  Upload an image to Discord. Paths use the same semantics as built-in OpenCode file tools: relative to the current session cwd or absolute.
+- `list-attachments`
+  List attachments from a specific Discord message by `messageId`, including direct download URLs.
 - `react`
   Add a reaction to a specific Discord message by `messageId`.
 - `list-custom-emojis`
@@ -130,9 +130,9 @@ What they do:
 
 Current guardrails:
 
-- File/image paths are resolved from the session workdir when relative and must stay under the synthetic session home.
-- Download destinations are resolved from the session workdir when relative and must stay under the synthetic session home.
-- `download-attachments` is limited to messages associated with the current run context.
+- File/image uploads use the same cwd-relative or absolute path semantics as built-in OpenCode file tools.
+- File/image uploads are read inside the worker and sent to the bot over the local bridge, so `bwrap` mount visibility is the read boundary when sandboxing is enabled.
+- `list-attachments` is limited to messages associated with the current run context.
 - Reactions are allowed for any message in the current Discord channel.
 - Emoji/sticker availability is filtered by the current Discord context and permissions.
 
@@ -245,7 +245,7 @@ Behavior:
 
 Important caveat:
 
-- The current path confinement checks for file/image/download tools are lexical (`resolve`/`relative`), not `realpath`-based. Symlinks inside the synthetic session home are therefore not a hard security boundary.
+- File/image uploads no longer rely on host-side path confinement, but `unsafe-dev` is still not a security boundary.
 
 ## Running
 

@@ -29,7 +29,7 @@ const SKIPPED_TOOL_CARD_NAMES = new Set([
   "send-file",
   "send-image",
   "react",
-  "download-attachments",
+  "list-attachments",
   "list-custom-emojis",
   "list-stickers",
   "send-sticker",
