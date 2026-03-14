@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { Message } from "discord.js";
 import { Effect } from "effect";
 
-import { getRunMessageById, resolveReactionTargetMessage } from "@/tools/run-message.ts";
-import { unsafeStub } from "../support/stub.ts";
+import { getRunMessageById, resolveReactionTargetMessage } from "@/tools/bridge/run-message.ts";
+import { unsafeStub } from "../../support/stub.ts";
 
 const makeMessage = (id: string, overrides: Record<string, unknown> = {}) =>
   unsafeStub<Message>({ id, ...overrides });

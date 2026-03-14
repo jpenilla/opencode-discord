@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { classifyToolBridgeFailure } from "@/tools/bridge-error.ts";
+import { classifyToolBridgeFailure } from "@/tools/bridge/errors.ts";
 
 describe("classifyToolBridgeFailure", () => {
   test("classifies Discord API upload failures separately from bridge failures", () => {

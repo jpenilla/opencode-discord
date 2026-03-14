@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { formatAttachmentList } from "@/tools/attachments.ts";
+import { formatAttachmentList } from "@/tools/bridge/handlers/messages.ts";
 
 describe("formatAttachmentList", () => {
   test("formats attachment metadata and URLs as stable structured data", () => {

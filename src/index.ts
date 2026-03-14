@@ -7,7 +7,7 @@ import { OpencodeEventQueueLive } from "@/opencode/events.ts";
 import { OpencodeServiceLive } from "@/opencode/service.ts";
 import { ChannelSessionsLive } from "@/sessions/registry.ts";
 import { SessionStoreLive } from "@/state/store.ts";
-import { ToolBridgeLive } from "@/tools/http.ts";
+import { ToolBridgeLive } from "@/tools/bridge/server.ts";
 import { Logger, LoggerLive } from "@/util/logging.ts";
 
 const BaseLive = Layer.mergeAll(AppConfigLive, LoggerLive, OpencodeEventQueueLive);

@@ -6,6 +6,15 @@ export type ToolBridgeFailure = {
   error: string;
 };
 
+export class ToolBridgeResponseError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
 
