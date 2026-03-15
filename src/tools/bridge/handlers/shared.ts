@@ -8,6 +8,12 @@ export const defaultAllowedMentions = {
   parse: ["users", "roles", "everyone"] as const,
 };
 
+export const tryBridgePromise = <A>(promise: () => Promise<A>) =>
+  Effect.tryPromise({
+    try: promise,
+    catch: (error) => error,
+  });
+
 export const requireSendableChannel = (activeRun: ActiveRun) => {
   const channel = activeRun.discordMessage.channel;
   if (!channel.isSendable()) {
@@ -18,7 +24,7 @@ export const requireSendableChannel = (activeRun: ActiveRun) => {
 };
 
 export const sendBridgeMessage = (channel: SendableChannels, body: MessageCreateOptions) => {
-  return Effect.tryPromise(() =>
+  return tryBridgePromise(() =>
     Promise.resolve(
       channel.send({
         ...body,

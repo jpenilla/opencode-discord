@@ -61,6 +61,8 @@ const resolveCurrentPrompt = (
 
 const makeActiveRunState = async () => ({
   attachmentMessagesById: new Map<string, Message>(),
+  previousPromptMessageIds: new Set<string>(["user-old", "assistant-old"]),
+  currentPromptMessageIds: new Set<string>(),
   currentPromptUserMessageId: "stale-user",
   assistantMessageParentIds: new Map<string, string>([["assistant-old", "stale-user"]]),
   observedToolCallIds: new Set<string>(["call-old"]),
@@ -233,6 +235,75 @@ describe("coordinateActiveRunPrompts", () => {
         toolCallCount: 0,
       },
     ]);
+  });
+
+  test("rotates prompt message lineage across multiple absorbed follow-ups", async () => {
+    const activeRun = await makeActiveRunState();
+    const sessionQueue = await Effect.runPromise(Queue.unbounded<RunRequest>());
+    const session = {
+      queue: sessionQueue,
+      activeRun,
+    } satisfies Parameters<typeof enqueueRunRequest>[0];
+    const snapshots: Array<{
+      previous: string[];
+      current: string[];
+    }> = [];
+
+    const submitPrompt = (_session: SessionHandle, _value: string) =>
+      Effect.gen(function* () {
+        const callIndex = snapshots.length + 1;
+        snapshots.push({
+          previous: [...activeRun.previousPromptMessageIds],
+          current: [...activeRun.currentPromptMessageIds],
+        });
+
+        activeRun.currentPromptMessageIds.add(`user-${callIndex}`);
+        activeRun.currentPromptMessageIds.add(`assistant-${callIndex}`);
+
+        if (callIndex === 2) {
+          const destination = yield* enqueueRunRequest(session, makeRequest("m-3", "follow-2"));
+          expect(destination).toBe("follow-up");
+        }
+
+        yield* resolveCurrentPrompt(activeRun, {
+          messageId: `msg-${callIndex}`,
+          transcript: `reply-${callIndex}`,
+        });
+      });
+
+    await Effect.runPromise(Queue.offer(activeRun.followUpQueue, makeRequest("m-2", "follow-1")));
+
+    await Effect.runPromise(
+      coordinateActiveRunPrompts({
+        channelId: "c-1",
+        session: makeSessionHandle(),
+        activeRun,
+        initialRequests: [makeRequest("m-1", "initial")],
+        awaitIdleCompaction: () => Effect.void,
+        submitPrompt,
+        logger: makeLogger(),
+      }),
+    );
+
+    expect(snapshots).toEqual([
+      {
+        previous: [],
+        current: [],
+      },
+      {
+        previous: ["user-1", "assistant-1"],
+        current: [],
+      },
+      {
+        previous: ["user-2", "assistant-2"],
+        current: [],
+      },
+    ]);
+    expect([...activeRun.previousPromptMessageIds]).toEqual(["user-2", "assistant-2"]);
+    expect([...activeRun.currentPromptMessageIds]).toEqual(["user-3", "assistant-3"]);
+    expect(
+      await Effect.runPromise(Queue.takeAll(sessionQueue).pipe(Effect.map((items) => [...items]))),
+    ).toEqual([]);
   });
 
   test("fails immediately when prompt submission fails", async () => {

@@ -4,7 +4,11 @@ import * as v from "valibot";
 
 import { formatCustomEmoji, listUsableCustomEmojis, listUsableStickers } from "@/discord/assets.ts";
 import { ToolBridgeResponseError } from "@/tools/bridge/errors.ts";
-import { requireSendableChannel, sendBridgeMessage } from "@/tools/bridge/handlers/shared.ts";
+import {
+  requireSendableChannel,
+  sendBridgeMessage,
+  tryBridgePromise,
+} from "@/tools/bridge/handlers/shared.ts";
 import type { ToolBridgeHandlerContext } from "@/tools/bridge/routes.ts";
 import { nonEmptyString } from "@/tools/bridge/validation.ts";
 
@@ -53,7 +57,7 @@ const formatStickerList = (message: Message) => {
 };
 
 const listContextStickers = (message: Message) =>
-  Effect.tryPromise(() => listUsableStickers(message));
+  tryBridgePromise(() => listUsableStickers(message));
 
 export const handleListCustomEmojis = (context: ToolBridgeHandlerContext<void>) => {
   return Effect.succeed(formatEmojiList(context.activeRun.discordMessage));

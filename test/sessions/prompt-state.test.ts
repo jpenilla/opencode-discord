@@ -6,6 +6,7 @@ import {
   beginPendingPrompt,
   createPromptState,
   handleAssistantMessageUpdated,
+  handleSessionStatusUpdated,
   handleUserMessageUpdated,
 } from "@/sessions/prompt-state.ts";
 import { unsafeStub } from "../support/stub.ts";
@@ -103,13 +104,60 @@ describe("prompt-state", () => {
       ),
     );
 
-    expect(finalActions).toHaveLength(1);
-    const action = finalActions[0];
+    expect(finalActions).toEqual([]);
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+
+    const idleActions = await Effect.runPromise(
+      handleSessionStatusUpdated(state, { type: "idle" }),
+    );
+
+    expect(idleActions).toHaveLength(1);
+    const action = idleActions[0];
     expect(action?.type).toBe("complete-prompt");
     if (!action || action.type !== "complete-prompt") {
       throw new Error("expected a completion action");
     }
     expect(action.messageId).toBe("assistant-1");
+  });
+
+  test("waits for session.status idle before completing a prompt", async () => {
+    const state = await Effect.runPromise(createPromptState());
+    const completion = await Effect.runPromise(beginPendingPrompt(state));
+
+    await Effect.runPromise(handleUserMessageUpdated(state, makeUserMessage("user-1")));
+
+    expect(
+      await Effect.runPromise(
+        handleAssistantMessageUpdated(
+          state,
+          makeAssistantMessage({
+            id: "assistant-1",
+            parentId: "user-1",
+            completed: true,
+            finish: "stop",
+          }),
+        ),
+      ),
+    ).toEqual([]);
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+
+    expect(await Effect.runPromise(handleSessionStatusUpdated(state, { type: "busy" }))).toEqual(
+      [],
+    );
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+
+    const idleActions = await Effect.runPromise(
+      handleSessionStatusUpdated(state, { type: "idle" }),
+    );
+
+    expect(idleActions).toHaveLength(1);
+    const action = idleActions[0];
+    expect(action?.type).toBe("complete-prompt");
+    if (!action || action.type !== "complete-prompt") {
+      throw new Error("expected a completion action");
+    }
+    expect(action.messageId).toBe("assistant-1");
+    expect(await Effect.runPromise(Ref.get(state))).toBeNull();
   });
 
   test("waits for the follow-up assistant after a tool-calls turn", async () => {
@@ -145,8 +193,15 @@ describe("prompt-state", () => {
       ),
     );
 
-    expect(actions).toHaveLength(1);
-    const action = actions[0];
+    expect(actions).toEqual([]);
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+
+    const idleActions = await Effect.runPromise(
+      handleSessionStatusUpdated(state, { type: "idle" }),
+    );
+
+    expect(idleActions).toHaveLength(1);
+    const action = idleActions[0];
     expect(action?.type).toBe("complete-prompt");
     if (!action || action.type !== "complete-prompt") {
       throw new Error("expected a completion action");
@@ -155,7 +210,7 @@ describe("prompt-state", () => {
     expect(await Effect.runPromise(Ref.get(state))).toBeNull();
   });
 
-  test("waits to bind the server-created user message before completing the prompt", async () => {
+  test("waits to bind the server-created user message before session.status idle completes the prompt", async () => {
     const state = await Effect.runPromise(createPromptState());
     const completion = await Effect.runPromise(beginPendingPrompt(state));
 
@@ -171,6 +226,9 @@ describe("prompt-state", () => {
     );
 
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+    expect(await Effect.runPromise(handleSessionStatusUpdated(state, { type: "idle" }))).toEqual(
+      [],
+    );
 
     const actions = await Effect.runPromise(
       handleUserMessageUpdated(state, makeUserMessage("user-1")),

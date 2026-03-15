@@ -101,6 +101,8 @@ export const executeRunBatch =
         discordMessage: responseMessage,
         workdir: session.workdir,
         attachmentMessagesById: new Map<string, Message>(),
+        previousPromptMessageIds: new Set<string>(),
+        currentPromptMessageIds: new Set<string>(),
         currentPromptUserMessageId: null,
         assistantMessageParentIds: new Map<string, string>(),
         observedToolCallIds: new Set<string>(),

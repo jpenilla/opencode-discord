@@ -24,8 +24,20 @@ const stringProp = (record: Record<string, unknown> | null, key: string): string
 const numberProp = (record: Record<string, unknown> | null, key: string): number | null =>
   typeof record?.[key] === "number" ? (record[key] as number) : null;
 
-const formatErrorMessage = (error: unknown) => {
+// Bridge handlers preserve raw promise rejections at the boundary. This is only a fallback for
+// wrapped failures that already crossed an Effect.tryPromise boundary elsewhere.
+const unwrapEffectUnknownException = (error: unknown): unknown => {
   const record = asRecord(error);
+  if (record?._tag !== "UnknownException") {
+    return error;
+  }
+
+  return record.error ?? record.cause ?? error;
+};
+
+const formatErrorMessage = (error: unknown) => {
+  const unwrapped = unwrapEffectUnknownException(error);
+  const record = asRecord(unwrapped);
   const directMessage = stringProp(record, "message");
   if (directMessage) {
     return directMessage;
@@ -37,14 +49,14 @@ const formatErrorMessage = (error: unknown) => {
     return rawMessage;
   }
 
-  if (error instanceof Error) {
-    return error.message;
+  if (unwrapped instanceof Error) {
+    return unwrapped.message;
   }
-  return String(error);
+  return String(unwrapped);
 };
 
 const isDiscordApiError = (error: unknown) => {
-  const record = asRecord(error);
+  const record = asRecord(unwrapEffectUnknownException(error));
   const name = stringProp(record, "name");
   return Boolean(
     (name && name.startsWith("DiscordAPIError")) ||
@@ -53,10 +65,11 @@ const isDiscordApiError = (error: unknown) => {
 };
 
 export const classifyToolBridgeFailure = (operation: string, error: unknown): ToolBridgeFailure => {
-  const record = asRecord(error);
+  const unwrapped = unwrapEffectUnknownException(error);
+  const record = asRecord(unwrapped);
   const message = formatErrorMessage(error);
 
-  if (isDiscordApiError(error)) {
+  if (isDiscordApiError(unwrapped)) {
     const status = numberProp(record, "status");
     const code = record?.code;
     const details = [

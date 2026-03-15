@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { IncomingMessage } from "node:http";
 import { Effect } from "effect";
 
 import {
@@ -50,22 +51,33 @@ describe("parseUploadHeaders", () => {
 });
 
 describe("cleanupFailedUpload", () => {
-  test("only destroys the outgoing upload stream", async () => {
+  test("stops reading the request body and destroys the outgoing upload stream", async () => {
+    let requestPaused = false;
+    let requestUnpiped = false;
     let uploadDestroyed = false;
+    const request: Pick<IncomingMessage, "pause" | "unpipe"> = {
+      pause: () => {
+        requestPaused = true;
+        return request as IncomingMessage;
+      },
+      unpipe: () => {
+        requestUnpiped = true;
+        return request as IncomingMessage;
+      },
+    };
 
     await expect(
       Effect.runPromise(
-        cleanupFailedUpload(
-          {
-            destroyed: false,
-            destroy: () => {
-              uploadDestroyed = true;
-            },
+        cleanupFailedUpload(request, {
+          destroyed: false,
+          destroy: () => {
+            uploadDestroyed = true;
           },
-          new Error("upload failed"),
-        ),
+        }),
       ),
     ).resolves.toBeUndefined();
+    expect(requestPaused).toBe(true);
+    expect(requestUnpiped).toBe(true);
     expect(uploadDestroyed).toBe(true);
   });
 });

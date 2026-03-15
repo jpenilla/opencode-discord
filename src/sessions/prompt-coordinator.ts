@@ -12,6 +12,8 @@ import type { LoggerShape } from "@/util/logging.ts";
 type PromptCoordinatorActiveRun = Pick<
   ActiveRun,
   | "attachmentMessagesById"
+  | "previousPromptMessageIds"
+  | "currentPromptMessageIds"
   | "promptState"
   | "followUpQueue"
   | "acceptFollowUps"

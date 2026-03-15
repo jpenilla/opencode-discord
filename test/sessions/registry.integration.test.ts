@@ -270,9 +270,12 @@ const makeToolUpdatedEvent = (input: {
 const makeSessionIdleEvent = (sessionId = "session-1"): GlobalEvent =>
   unsafeStub<GlobalEvent>({
     payload: {
-      type: "session.idle",
+      type: "session.status",
       properties: {
         sessionID: sessionId,
+        status: {
+          type: "idle",
+        },
       },
     },
   });
@@ -730,6 +733,157 @@ describe("ChannelSessionsLive integration", () => {
         }),
       ])}`,
     ]);
+  });
+
+  test("keeps the active run open after the final assistant update until session.status idle arrives", async () => {
+    const assistantFinished = await Effect.runPromise(Deferred.make<void>());
+    const allowIdleStatus = await Effect.runPromise(Deferred.make<void>());
+    const harness = await makeHarness({
+      promptImpl: ({
+        callIndex,
+        completePrompt,
+        messageId,
+        publishEvent,
+        sessionId,
+        storePromptResult,
+        prompt,
+      }) =>
+        callIndex === 1
+          ? storePromptResult({
+              messageId: "assistant-1",
+              transcript: "intermediate",
+            }).pipe(
+              Effect.zipRight(
+                publishEvent(
+                  makeAssistantMessageUpdatedEvent({
+                    id: "assistant-1",
+                    sessionId,
+                    parentId: messageId,
+                  }),
+                ),
+              ),
+              Effect.zipRight(Deferred.succeed(assistantFinished, undefined).pipe(Effect.ignore)),
+              Effect.zipRight(Deferred.await(allowIdleStatus)),
+              Effect.zipRight(publishEvent(makeSessionIdleEvent(sessionId))),
+            )
+          : completePrompt({
+              messageId: "assistant-2",
+              transcript: `final:${prompt}`,
+            }),
+    });
+    const firstMessage = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    });
+    const secondMessage = harness.makeMessage({
+      id: "message-2",
+      content: "hey opencode follow up",
+    });
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions;
+          yield* sessions.submit(firstMessage, { prompt: "hello" });
+          yield* Deferred.await(assistantFinished);
+
+          expect(yield* Ref.get(harness.replies)).toEqual([]);
+          yield* sessions
+            .getActiveRunBySessionId("session-1")
+            .pipe(
+              Effect.flatMap((activeRun) =>
+                activeRun ? Effect.void : Effect.fail(new Error("active run cleared before idle")),
+              ),
+            );
+
+          yield* sessions.submit(secondMessage, { prompt: "follow up" });
+          expect(yield* Ref.get(harness.replies)).toEqual([]);
+
+          yield* Deferred.succeed(allowIdleStatus, undefined).pipe(Effect.ignore);
+          expect(yield* Queue.take(harness.replyEvents)).toBe(
+            `final:${buildQueuedFollowUpPrompt([
+              buildOpencodePrompt({
+                message: promptMessageContext(secondMessage, "follow up"),
+              }),
+            ])}`,
+          );
+        }).pipe(Effect.provide(harness.layer)),
+      ),
+    );
+
+    expect(await getRef(harness.promptCalls)).toEqual([
+      buildOpencodePrompt({
+        message: promptMessageContext(firstMessage, "hello"),
+      }),
+      buildQueuedFollowUpPrompt([
+        buildOpencodePrompt({
+          message: promptMessageContext(secondMessage, "follow up"),
+        }),
+      ]),
+    ]);
+  });
+
+  test("ignores replayed message updates from the previous prompt when running an absorbed follow-up", async () => {
+    const firstPromptStarted = await Effect.runPromise(Deferred.make<void>());
+    const allowFirstPromptToFinish = await Effect.runPromise(Deferred.make<void>());
+    const harness = await makeHarness({
+      promptImpl: ({ callIndex, publishEvent, completePrompt, sessionId }) =>
+        callIndex === 1
+          ? Deferred.succeed(firstPromptStarted, undefined).pipe(
+              Effect.zipRight(Deferred.await(allowFirstPromptToFinish)),
+              Effect.zipRight(
+                completePrompt({
+                  messageId: "assistant-1",
+                  transcript: "stale-final",
+                }),
+              ),
+            )
+          : publishEvent(
+              makeAssistantMessageUpdatedEvent({
+                id: "assistant-1",
+                sessionId,
+                parentId: "user-1",
+              }),
+            ).pipe(
+              Effect.zipRight(
+                publishEvent(
+                  makeUserMessageUpdatedEvent({
+                    id: "user-1",
+                    sessionId,
+                  }),
+                ),
+              ),
+              Effect.zipRight(
+                completePrompt({
+                  messageId: "assistant-2",
+                  transcript: "follow-up-final",
+                }),
+              ),
+            ),
+    });
+    const firstMessage = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    });
+    const secondMessage = harness.makeMessage({
+      id: "message-2",
+      content: "hey opencode follow up",
+    });
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions;
+          yield* sessions.submit(firstMessage, { prompt: "hello" });
+          yield* Deferred.await(firstPromptStarted);
+          yield* sessions.submit(secondMessage, { prompt: "follow up" });
+          yield* Deferred.succeed(allowFirstPromptToFinish, undefined).pipe(Effect.ignore);
+          yield* Queue.take(harness.replyEvents);
+        }).pipe(Effect.provide(harness.layer)),
+      ),
+    );
+
+    expect(await getRef(harness.replies)).toEqual(["follow-up-final"]);
   });
 
   test("surfaces compaction summaries as progress updates and still replies with the direct assistant result", async () => {

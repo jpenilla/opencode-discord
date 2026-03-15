@@ -34,6 +34,8 @@ const makeSession = async (withActiveRun: boolean, showCompactionSummaries = tru
         }),
         workdir: "/home/opencode/workspace",
         attachmentMessagesById: new Map(),
+        previousPromptMessageIds: new Set<string>(),
+        currentPromptMessageIds: new Set<string>(),
         currentPromptUserMessageId: null,
         assistantMessageParentIds: new Map<string, string>(),
         observedToolCallIds: new Set<string>(),
@@ -117,13 +119,13 @@ const makeQuestionRejectedEvent = (sessionId = "session-1"): Event =>
     },
   });
 
-const makeSessionStatusEvent = (sessionId = "session-1"): Event =>
+const makeSessionStatusEvent = (sessionId = "session-1", status: "busy" | "idle" = "busy"): Event =>
   unsafeStub<Event>({
     type: "session.status",
     properties: {
       sessionID: sessionId,
       status: {
-        type: "busy",
+        type: status,
       },
     },
   });
@@ -585,6 +587,11 @@ describe("createEventRuntime", () => {
       ),
     );
 
+    expect(await getRef(readPromptCalls)).toEqual(["summary-1"]);
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+
+    await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent("session-1", "idle")));
+
     expect(await getRef(readPromptCalls)).toEqual(["summary-1", "assistant-1"]);
     expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
       messageId: "assistant-1",
@@ -592,7 +599,7 @@ describe("createEventRuntime", () => {
     });
   });
 
-  test("completes on the final assistant reply even when tool progress was already observed", async () => {
+  test("completes once session.status becomes idle even when tool progress was already observed", async () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
 
@@ -633,6 +640,10 @@ describe("createEventRuntime", () => {
         part: makeToolPart("running"),
       },
     ]);
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+
+    await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent("session-1", "idle")));
+
     expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
       messageId: "assistant-1",
       transcript: "final reply",
@@ -798,6 +809,10 @@ describe("createEventRuntime", () => {
     expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual(
       [],
     );
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+
+    await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent("session-1", "idle")));
+
     expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
       messageId: "assistant-1",
       transcript: "final reply",
@@ -884,6 +899,9 @@ describe("createEventRuntime", () => {
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
 
     await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
+
+    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+    await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent("session-1", "idle")));
 
     expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
       messageId: "assistant-1",

@@ -46,6 +46,8 @@ export type ActiveRun = {
   discordMessage: Message;
   workdir: string;
   attachmentMessagesById: Map<string, Message>;
+  previousPromptMessageIds: Set<string>;
+  currentPromptMessageIds: Set<string>;
   currentPromptUserMessageId: string | null;
   assistantMessageParentIds: Map<string, string>;
   observedToolCallIds: Set<string>;
@@ -87,9 +89,17 @@ export type ChannelSession = {
 export const resetActivePromptTracking = (
   activeRun: Pick<
     ActiveRun,
-    "currentPromptUserMessageId" | "assistantMessageParentIds" | "observedToolCallIds"
+    | "previousPromptMessageIds"
+    | "currentPromptMessageIds"
+    | "currentPromptUserMessageId"
+    | "assistantMessageParentIds"
+    | "observedToolCallIds"
   >,
 ) => {
+  // Keep only the prompt that just finished as the ignore window so the next prompt binds to its
+  // own message lineage without carrying unbounded history forward.
+  activeRun.previousPromptMessageIds = activeRun.currentPromptMessageIds;
+  activeRun.currentPromptMessageIds = new Set<string>();
   activeRun.currentPromptUserMessageId = null;
   activeRun.assistantMessageParentIds.clear();
   activeRun.observedToolCallIds.clear();

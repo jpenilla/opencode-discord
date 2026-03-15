@@ -1,21 +1,91 @@
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage } from "node:http";
 import { mkdir, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { Context, Effect, Layer, Redacted } from "effect";
+import { Cause, Context, Effect, Layer, Redacted } from "effect";
 
-import { AppConfig } from "@/config.ts";
-import { ChannelSessions } from "@/sessions/registry.ts";
+import { AppConfig, type AppConfigShape } from "@/config.ts";
+import { ChannelSessions, type ChannelSessionsShape } from "@/sessions/registry.ts";
 import { ToolBridgeResponseError, classifyToolBridgeFailure } from "@/tools/bridge/errors.ts";
 import { matchToolBridgeRoute } from "@/tools/bridge/routes.ts";
 import { sendJson } from "@/tools/bridge/transport.ts";
-import { Logger } from "@/util/logging.ts";
+import { Logger, type LoggerShape } from "@/util/logging.ts";
 
 export type ToolBridgeShape = {
   socketPath: string;
 };
 
 export class ToolBridge extends Context.Tag("ToolBridge")<ToolBridge, ToolBridgeShape>() {}
+
+type ToolBridgeHttpResponse = {
+  status: number;
+  body: unknown;
+};
+
+const jsonResponse = (status: number, body: unknown): ToolBridgeHttpResponse => ({
+  status,
+  body,
+});
+
+export const handleToolBridgeRequest = (input: {
+  request: IncomingMessage;
+  pathname: string;
+  config: AppConfigShape;
+  sessions: ChannelSessionsShape;
+  logger: LoggerShape;
+}): Effect.Effect<ToolBridgeHttpResponse> => {
+  if (
+    input.request.headers["x-opencode-discord-token"] !==
+    Redacted.value(input.config.toolBridgeToken)
+  ) {
+    return Effect.succeed(jsonResponse(401, { error: "unauthorized" }));
+  }
+
+  const route = matchToolBridgeRoute(input.request.method, input.pathname);
+  if (!route) {
+    return Effect.succeed(jsonResponse(404, { error: "not found" }));
+  }
+
+  return Effect.gen(function* () {
+    const parsedRequest = yield* route.parseRequest(input.request);
+    const activeRun = yield* input.sessions.getActiveRunBySessionId(parsedRequest.sessionID);
+    if (!activeRun) {
+      return jsonResponse(409, { error: "no active run for session" });
+    }
+
+    const message = yield* route.execute({
+      activeRun,
+      request: input.request,
+      payload: parsedRequest.payload,
+    });
+    return jsonResponse(200, { ok: true, message });
+  }).pipe(
+    Effect.catchAllCause((cause) => {
+      const squashedError = Cause.squash(cause);
+      if (squashedError instanceof ToolBridgeResponseError) {
+        return Effect.succeed(jsonResponse(squashedError.status, { error: squashedError.message }));
+      }
+
+      const failure = classifyToolBridgeFailure(route.operation, squashedError);
+      return input.logger
+        .error("tool bridge request failed", {
+          pathname: input.pathname,
+          operation: route.operation,
+          kind: failure.kind,
+          error: failure.error,
+          cause: Cause.pretty(cause),
+        })
+        .pipe(
+          Effect.as(
+            jsonResponse(failure.status, {
+              error: failure.error,
+              kind: failure.kind,
+            }),
+          ),
+        );
+    }),
+  );
+};
 
 const listenServer = (server: ReturnType<typeof createServer>, socketPath: string) =>
   Effect.async<void, Error>((resume) => {
@@ -65,69 +135,19 @@ export const ToolBridgeLive = Layer.scoped(
       Effect.sync(() =>
         createServer((request, response) => {
           const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
-          let operation = "tool bridge request";
-
-          const handleRequest = Effect.gen(function* () {
-            if (
-              request.headers["x-opencode-discord-token"] !== Redacted.value(config.toolBridgeToken)
-            ) {
-              yield* Effect.sync(() => sendJson(response, { error: "unauthorized" }, 401));
-              return;
-            }
-
-            const route = matchToolBridgeRoute(request.method, pathname);
-            if (!route) {
-              yield* Effect.sync(() => sendJson(response, { error: "not found" }, 404));
-              return;
-            }
-
-            operation = route.operation;
-            const parsedRequest = yield* route.parseRequest(request);
-            const activeRun = yield* sessions.getActiveRunBySessionId(parsedRequest.sessionID);
-            if (!activeRun) {
-              yield* Effect.sync(() =>
-                sendJson(response, { error: "no active run for session" }, 409),
-              );
-              return;
-            }
-
-            const message = yield* route.execute({
-              activeRun,
+          void Effect.runPromise(
+            handleToolBridgeRequest({
               request,
-              payload: parsedRequest.payload,
-            });
-            yield* Effect.sync(() => sendJson(response, { ok: true, message }));
-          }).pipe(
-            Effect.catchIf(
-              (error): error is ToolBridgeResponseError => error instanceof ToolBridgeResponseError,
-              (error) =>
-                Effect.sync(() => sendJson(response, { error: error.message }, error.status)),
-            ),
-            Effect.catchAll((error) =>
-              Effect.gen(function* () {
-                const failure = classifyToolBridgeFailure(operation, error);
-                yield* logger.error("tool bridge request failed", {
-                  pathname,
-                  operation,
-                  kind: failure.kind,
-                  error: failure.error,
-                  cause: String(error),
-                });
-                yield* Effect.sync(() =>
-                  sendJson(
-                    response,
-                    {
-                      error: failure.error,
-                      kind: failure.kind,
-                    },
-                    failure.status,
-                  ),
-                );
-              }),
+              pathname,
+              config,
+              sessions,
+              logger,
+            }).pipe(
+              Effect.flatMap(({ status, body }) =>
+                Effect.sync(() => sendJson(response, body, status)),
+              ),
             ),
           );
-
-          void Effect.runPromise(handleRequest);
         }),
       ).pipe(Effect.tap((server) => listenServer(server, config.toolBridgeSocketPath))),
       (server) =>

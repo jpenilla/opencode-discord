@@ -11,6 +11,7 @@ import {
   isCompactionSummaryAssistant,
   isObservedAssistantMessage,
   getSessionError,
+  getSessionStatusUpdated,
   getToolPartUpdated,
   getUserMessageUpdated,
 } from "@/opencode/events.ts";
@@ -18,6 +19,8 @@ import type { OpencodeServiceShape } from "@/opencode/service.ts";
 import {
   handleAssistantMessageUpdated,
   handleSessionError as failPendingPromptFromSessionError,
+  handleSessionStatusUpdated,
+  type PromptTrackingAction,
   handleUserMessageUpdated,
   resolvePromptTrackingActions,
 } from "@/sessions/prompt-state.ts";
@@ -31,6 +34,13 @@ export type EventRuntime = {
 
 const recordPromptUserMessage = (activeRun: ActiveRun, userMessageId: string) => {
   activeRun.currentPromptUserMessageId = userMessageId;
+};
+
+const isPreviousPromptMessage = (activeRun: ActiveRun, messageId: string) =>
+  activeRun.previousPromptMessageIds.has(messageId);
+
+const recordCurrentPromptMessage = (activeRun: ActiveRun, messageId: string) => {
+  activeRun.currentPromptMessageIds.add(messageId);
 };
 
 const recordPromptAssistantMessage = (
@@ -120,6 +130,7 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
       const userMessage = getUserMessageUpdated(event);
       const assistantMessage = getAssistantMessageUpdated(event);
       const sessionError = getSessionError(event);
+      const sessionStatus = getSessionStatusUpdated(event);
       const toolPart = getToolPartUpdated(event);
       const questionAsked = getQuestionAsked(event);
       const questionReplied = getQuestionReplied(event);
@@ -190,23 +201,29 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
 
       if (activeRun) {
         if (userMessage) {
-          recordPromptUserMessage(activeRun, userMessage.id);
+          if (!isPreviousPromptMessage(activeRun, userMessage.id)) {
+            recordCurrentPromptMessage(activeRun, userMessage.id);
+            recordPromptUserMessage(activeRun, userMessage.id);
+          }
         }
 
         if (assistantMessage) {
-          recordPromptAssistantMessage(activeRun, assistantMessage);
+          if (!isPreviousPromptMessage(activeRun, assistantMessage.id)) {
+            recordCurrentPromptMessage(activeRun, assistantMessage.id);
+            recordPromptAssistantMessage(activeRun, assistantMessage);
+          }
         }
 
         const relevantToolPart = toolPart ? selectToolPartForActiveRun(activeRun, toolPart) : null;
-        const promptActions = [];
+        const promptActions: PromptTrackingAction[] = [];
 
-        if (userMessage) {
+        if (userMessage && !isPreviousPromptMessage(activeRun, userMessage.id)) {
           promptActions.push(
             ...(yield* handleUserMessageUpdated(activeRun.promptState, userMessage)),
           );
         }
 
-        if (assistantMessage) {
+        if (assistantMessage && !isPreviousPromptMessage(activeRun, assistantMessage.id)) {
           promptActions.push(
             ...(yield* handleAssistantMessageUpdated(activeRun.promptState, assistantMessage)),
           );
@@ -218,6 +235,12 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
               activeRun.promptState,
               sessionError.error ?? new Error("OpenCode session failed"),
             )),
+          );
+        }
+
+        if (sessionStatus) {
+          promptActions.push(
+            ...(yield* handleSessionStatusUpdated(activeRun.promptState, sessionStatus.status)),
           );
         }
 

@@ -3,6 +3,7 @@ import * as v from "valibot";
 
 import { normalizeReactionEmoji } from "@/discord/assets.ts";
 import { ToolBridgeResponseError } from "@/tools/bridge/errors.ts";
+import { tryBridgePromise } from "@/tools/bridge/handlers/shared.ts";
 import type { ToolBridgeHandlerContext } from "@/tools/bridge/routes.ts";
 import { getRunMessageById, resolveReactionTargetMessage } from "@/tools/bridge/run-message.ts";
 import { nonEmptyString } from "@/tools/bridge/validation.ts";
@@ -62,7 +63,7 @@ export const handleReact = (context: ToolBridgeHandlerContext<ReactPayload>) => 
       return yield* Effect.fail(new ToolBridgeResponseError(400, "invalid or unavailable emoji"));
     }
 
-    yield* Effect.tryPromise(() => targetMessage.react(emoji));
+    yield* tryBridgePromise(() => targetMessage.react(emoji));
     return `Added reaction ${emoji} to Discord message ${targetMessage.id}`;
   });
 };

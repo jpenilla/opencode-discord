@@ -2,7 +2,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import { PassThrough } from "node:stream";
 
 import { AttachmentBuilder } from "discord.js";
-import { Cause, Effect } from "effect";
+import { Effect } from "effect";
 import * as v from "valibot";
 
 import { requireSendableChannel, sendBridgeMessage } from "@/tools/bridge/handlers/shared.ts";
@@ -26,30 +26,38 @@ export const parseUploadHeaders = (headers: IncomingHttpHeaders) =>
     invalidError: "invalid upload metadata",
   });
 
-const toError = (error: unknown) => (error instanceof Error ? error : new Error(String(error)));
-
-const destroyStream = (
-  stream: {
-    destroyed?: boolean;
-    destroy: (error?: Error) => void;
-  },
-  error: unknown,
-) => {
+const destroyStream = (stream: { destroyed?: boolean; destroy: (error?: Error) => void }) => {
   if (!stream.destroyed) {
-    stream.destroy(toError(error));
+    stream.destroy();
   }
 };
 
+const stopReadingRequestBody = (
+  request: Pick<ToolBridgeHandlerContext<UploadPayload>["request"], "pause" | "unpipe">,
+) =>
+  Effect.sync(() => {
+    request.unpipe();
+    request.pause();
+  });
+
 export const cleanupFailedUpload = (
+  request: Pick<ToolBridgeHandlerContext<UploadPayload>["request"], "pause" | "unpipe">,
   uploadStream: {
     destroyed?: boolean;
     destroy: (error?: Error) => void;
   },
-  error: unknown,
 ) =>
-  Effect.sync(() => {
-    destroyStream(uploadStream, error);
-  });
+  Effect.all(
+    [
+      stopReadingRequestBody(request),
+      Effect.sync(() => {
+        // The bridge already reports the primary failure. Tear down the outgoing upload stream
+        // without re-emitting that same failure as a second stream error.
+        destroyStream(uploadStream);
+      }),
+    ],
+    { discard: true },
+  );
 
 const handleUpload = (context: ToolBridgeHandlerContext<UploadPayload>, kind: "file" | "image") => {
   return Effect.gen(function* () {
@@ -69,7 +77,7 @@ const handleUpload = (context: ToolBridgeHandlerContext<UploadPayload>, kind: "f
         ),
       ],
       { concurrency: "unbounded", discard: true },
-    ).pipe(Effect.onError((cause) => cleanupFailedUpload(uploadStream, Cause.squash(cause))));
+    ).pipe(Effect.onError(() => cleanupFailedUpload(context.request, uploadStream)));
 
     return `Sent ${kind} ${displayPath ?? filename}`;
   });

@@ -1,4 +1,4 @@
-import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2";
+import type { AssistantMessage, SessionStatus, UserMessage } from "@opencode-ai/sdk/v2";
 import { Deferred, Effect, Ref } from "effect";
 
 import { isCompactionSummaryAssistant, isObservedAssistantMessage } from "@/opencode/events.ts";
@@ -8,6 +8,7 @@ export type PendingPrompt = {
   userMessageId: string | null;
   deferred: Deferred.Deferred<PromptResult, unknown>;
   assistantMessagesById: Map<string, AssistantMessage>;
+  idleObserved: boolean;
 };
 
 export type PromptTrackingAction =
@@ -66,7 +67,7 @@ const evaluatePromptActions = (prompt: PendingPrompt): ReadonlyArray<PromptTrack
     return actions;
   }
 
-  if (candidate) {
+  if (candidate && prompt.idleObserved) {
     actions.push({
       type: "complete-prompt",
       messageId: candidate.messageId,
@@ -171,6 +172,7 @@ export const beginPendingPrompt = (
       userMessageId: null,
       deferred,
       assistantMessagesById: new Map<string, AssistantMessage>(),
+      idleObserved: false,
     });
     return deferred;
   });
@@ -215,3 +217,14 @@ export const handleAssistantMessageUpdated = (
     nextPrompt.assistantMessagesById.set(message.id, message);
     return nextPrompt;
   });
+
+export const handleSessionStatusUpdated = (
+  stateRef: Ref.Ref<PendingPrompt | null>,
+  status: SessionStatus,
+): Effect.Effect<ReadonlyArray<PromptTrackingAction>> =>
+  status.type === "idle"
+    ? updatePendingPrompt(stateRef, (current) => ({
+        ...current,
+        idleObserved: true,
+      }))
+    : Effect.succeed([]);

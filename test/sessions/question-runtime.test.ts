@@ -75,6 +75,8 @@ const makeHarness = async (options?: {
     discordMessage,
     workdir: "/home/opencode/workspace",
     attachmentMessagesById: new Map(),
+    previousPromptMessageIds: new Set<string>(),
+    currentPromptMessageIds: new Set<string>(),
     currentPromptUserMessageId: null,
     assistantMessageParentIds: new Map<string, string>(),
     observedToolCallIds: new Set<string>(),
