@@ -8,6 +8,7 @@ import type { LoggerShape } from "@/util/logging.ts";
 export type GuildCommandRuntimeDeps = {
   getSession: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
   getLiveSession: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
+  invalidateSession: (channelId: string, reason: string) => Effect.Effect<void, unknown>;
   getChannelSettings: (
     channelId: string,
   ) => Effect.Effect<PersistedChannelSettings | null, unknown>;

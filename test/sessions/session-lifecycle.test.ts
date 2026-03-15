@@ -184,6 +184,7 @@ const makeHarness = async (options?: {
     started,
     removedRoots,
     closed,
+    persisted,
   };
 };
 
@@ -359,6 +360,21 @@ describe("createSessionLifecycle", () => {
     await Effect.runPromise(lifecycle.shutdownSessions());
 
     expect(await Effect.runPromise(Ref.get(closed))).toEqual(["session-1", "session-2"]);
+    expect(await Effect.runPromise(Ref.get(removedRoots))).toEqual([]);
+  });
+
+  test("invalidates the live session without deleting the session root", async () => {
+    const { lifecycle, closed, removedRoots, persisted } = await makeHarness();
+    const message = makeMessage("channel-1");
+    const session = await Effect.runPromise(lifecycle.createOrGetSession(message));
+
+    await Effect.runPromise(
+      lifecycle.invalidateSession("channel-1", "user requested /new-session"),
+    );
+
+    expect(await Effect.runPromise(Ref.get(closed))).toEqual([session.opencode.sessionId]);
+    expect(await Effect.runPromise(lifecycle.getSession("channel-1"))).toBeUndefined();
+    expect(await Effect.runPromise(Ref.get(persisted))).toEqual(new Map());
     expect(await Effect.runPromise(Ref.get(removedRoots))).toEqual([]);
   });
 

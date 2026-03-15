@@ -3,6 +3,7 @@ import { SlashCommandBuilder, type Guild } from "discord.js";
 import { compactCommand } from "./commands/compact.ts";
 import { type GuildCommand } from "./commands/definition.ts";
 import { interruptCommand } from "./commands/interrupt.ts";
+import { newSessionCommand } from "./commands/new-session.ts";
 import {
   toggleCompactionSummariesCommand,
   toggleThinkingCommand,
@@ -17,6 +18,7 @@ export type {
 export const GUILD_COMMANDS = [
   compactCommand,
   interruptCommand,
+  newSessionCommand,
   toggleThinkingCommand,
   toggleCompactionSummariesCommand,
 ] as const;

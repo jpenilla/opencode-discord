@@ -731,6 +731,39 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
       ),
     );
 
+  const invalidateSession = (channelId: string, reason: string) =>
+    Effect.gen(function* () {
+      const live = yield* getSession(channelId);
+      const persisted = yield* runtime.getPersistedSession(channelId);
+
+      if (live) {
+        yield* deleteSession(live);
+        yield* Queue.shutdown(live.queue).pipe(Effect.ignore);
+        yield* live.opencode.close().pipe(Effect.ignore);
+      }
+
+      yield* runtime.deletePersistedSession(channelId).pipe(Effect.ignore);
+
+      if (live) {
+        yield* runtime.logger.info("invalidated live channel session", {
+          channelId,
+          sessionId: live.opencode.sessionId,
+          workdir: live.workdir,
+          reason,
+        });
+        return;
+      }
+
+      if (persisted) {
+        yield* runtime.logger.info("invalidated persisted channel session", {
+          channelId,
+          sessionId: persisted.opencodeSessionId,
+          workdir: sessionWorkdirFromRoot(persisted.rootDir),
+          reason,
+        });
+      }
+    });
+
   const shutdownSessions = () =>
     Ref.get(runtime.stateRef).pipe(
       Effect.flatMap((state) =>
@@ -762,6 +795,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     createOrGetSession,
     getOrRestoreSession,
     ensureSessionHealth,
+    invalidateSession,
     closeExpiredSessions,
     shutdownSessions,
   } as const;

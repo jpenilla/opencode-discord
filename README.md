@@ -13,7 +13,7 @@ What the bot does:
 - Reuses the same channel session across messages and lazily reattaches it after bot restarts.
 - Bridges a small set of Discord-native actions back into OpenCode as tools.
 - Supports interactive OpenCode question prompts with Discord components and modals.
-- Exposes slash commands for compaction and interruption.
+- Exposes slash commands for compaction, interruption, and starting a fresh session.
 
 Current scope:
 
@@ -86,6 +86,8 @@ The bot syncs these guild commands on startup and when it joins a new guild:
   Compact the current channel session when no run is active.
 - `/interrupt`
   Interrupt the active run in the current channel.
+- `/new-session`
+  Drop the current channel session so the next triggered message starts a fresh OpenCode thread on the same workspace files.
 - `/toggle-thinking`
   Toggle whether thinking progress messages are shown in the current channel.
 - `/toggle-compaction-summaries`
@@ -96,8 +98,9 @@ Command behavior:
 - All commands acknowledge privately to the caller.
 - `/compact` also posts in-channel compaction status.
 - `/interrupt` also posts an in-channel interruption card.
+- `/new-session` only affects the next triggered message; it does not delete the channel workspace.
 - The visibility toggle commands persist per Discord channel, not per OpenCode session.
-- Both commands are restricted to standard guild text channels.
+- All slash commands are restricted to standard guild text channels.
 
 ## Discord Tools Exposed To OpenCode
 

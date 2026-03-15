@@ -69,6 +69,39 @@ export const decideInterruptEntry = (input: {
   };
 };
 
+export const decideNewSessionEntry = (input: {
+  inGuildTextChannel: boolean;
+  hasActiveRun: boolean;
+  hasIdleCompaction: boolean;
+  hasQueuedWork: boolean;
+}): CommandRejection | { type: "defer-and-invalidate" } => {
+  if (!input.inGuildTextChannel) {
+    return { type: "reject", message: GUILD_TEXT_COMMAND_ONLY_MESSAGE };
+  }
+  if (input.hasActiveRun) {
+    return {
+      type: "reject",
+      message:
+        "OpenCode is busy in this channel right now. Wait for the current run to finish or use /interrupt before starting a fresh session.",
+    };
+  }
+  if (input.hasIdleCompaction) {
+    return {
+      type: "reject",
+      message:
+        "OpenCode is compacting this channel right now. Wait for compaction to finish or use /interrupt before starting a fresh session.",
+    };
+  }
+  if (input.hasQueuedWork) {
+    return {
+      type: "reject",
+      message:
+        "OpenCode still has queued work for this channel. Wait for it to finish before starting a fresh session.",
+    };
+  }
+  return { type: "defer-and-invalidate" };
+};
+
 export const decideRunCompletion = (input: {
   transcript: string;
   questionOutcome: QuestionOutcome;

@@ -1,12 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { ChannelType, type Interaction, type Message, type SendableChannels } from "discord.js";
-import { Deferred, Effect, Ref } from "effect";
+import { Deferred, Effect, Queue, Ref } from "effect";
 
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { createCommandRuntime } from "@/sessions/command-runtime.ts";
 import { QUESTION_PENDING_INTERRUPT_MESSAGE } from "@/sessions/command-lifecycle.ts";
 import { createPromptState } from "@/sessions/prompt-state.ts";
-import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
+import {
+  noQuestionOutcome,
+  type ActiveRun,
+  type ChannelSession,
+  type RunRequest,
+} from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import { unsafeStub } from "../support/stub.ts";
 
@@ -19,6 +24,7 @@ const makeHarness = async (options?: {
   hasPendingQuestions?: boolean;
   hasPendingQuestionsSequence?: boolean[];
   hasSession?: boolean;
+  hasQueuedWork?: boolean;
   initialChannelSettings?: PersistedChannelSettings | null;
 }) => {
   const replies = await Effect.runPromise(Ref.make<string[]>([]));
@@ -37,6 +43,9 @@ const makeHarness = async (options?: {
   const idleInterruptRequested = await Effect.runPromise(Ref.make(false));
   const persistedSettings = await Effect.runPromise(
     Ref.make<Map<string, PersistedChannelSettings>>(new Map()),
+  );
+  const invalidatedSessions = await Effect.runPromise(
+    Ref.make<Array<{ channelId: string; reason: string }>>([]),
   );
   const compactStarted = await Effect.runPromise(Deferred.make<void, never>());
   const compactFinish = await Effect.runPromise(Deferred.make<void, never>());
@@ -89,6 +98,11 @@ const makeHarness = async (options?: {
     interruptRequested: false,
   };
 
+  const sessionQueue = await Effect.runPromise(Queue.unbounded<RunRequest>());
+  if (options?.hasQueuedWork) {
+    await Effect.runPromise(Queue.offer(sessionQueue, {} as RunRequest));
+  }
+
   const session: ChannelSession = {
     channelId: "channel-1",
     opencode: {
@@ -112,7 +126,7 @@ const makeHarness = async (options?: {
     progressChannel: null,
     progressMentionContext: null,
     emittedCompactionSummaryMessageIds: new Set<string>(),
-    queue: {} as ChannelSession["queue"],
+    queue: sessionQueue,
     activeRun: (options?.hasActiveRun ?? false) ? activeRun : null,
   };
 
@@ -151,6 +165,8 @@ const makeHarness = async (options?: {
       Effect.succeed(
         (options?.hasSession ?? true) && channelId === session.channelId ? session : null,
       ),
+    invalidateSession: (channelId, reason) =>
+      Ref.update(invalidatedSessions, (current) => [...current, { channelId, reason }]),
     getChannelSettings: (channelId) =>
       Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(channelId) ?? null)),
     upsertChannelSettings: (settings) =>
@@ -235,6 +251,7 @@ const makeHarness = async (options?: {
     loggedWarnings,
     typingStopCount,
     idleCardRef,
+    invalidatedSessions,
     persistedSettings,
     compactStarted,
     compactFinish,
@@ -371,6 +388,65 @@ describe("createCommandRuntime", () => {
     expect(await getRef(harness.edits)).toEqual([
       "Requested interruption of the active OpenCode compaction.",
     ]);
+  });
+
+  test("clears the channel session for the next triggered message", async () => {
+    const harness = await makeHarness({
+      hasSession: false,
+    });
+    harness.interaction.commandName = "new-session";
+
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+
+    expect(handled).toBe(true);
+    expect(await getRef(harness.defers)).toBe(1);
+    expect(await getRef(harness.invalidatedSessions)).toEqual([
+      {
+        channelId: "channel-1",
+        reason: "requested a fresh session via /new-session",
+      },
+    ]);
+    expect(await getRef(harness.upsertedInfoCards)).toEqual([
+      {
+        title: "🆕 Fresh session ready",
+        body: "The next triggered message in this channel will start a new OpenCode session with fresh chat history. Workspace files were left in place.",
+      },
+    ]);
+    expect(await getRef(harness.edits)).toEqual([
+      "Cleared this channel's current OpenCode session. The next triggered message here will start a new session with fresh chat history. Workspace files were left in place.",
+    ]);
+  });
+
+  test("rejects /new-session while a run is active", async () => {
+    const harness = await makeHarness({
+      hasActiveRun: true,
+    });
+    harness.interaction.commandName = "new-session";
+
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+
+    expect(handled).toBe(true);
+    expect(await getRef(harness.defers)).toBe(0);
+    expect(await getRef(harness.replies)).toEqual([
+      "OpenCode is busy in this channel right now. Wait for the current run to finish or use /interrupt before starting a fresh session.",
+    ]);
+    expect(await getRef(harness.invalidatedSessions)).toEqual([]);
+  });
+
+  test("rejects /new-session while queued work is still pending", async () => {
+    const harness = await makeHarness({
+      hasQueuedWork: true,
+    });
+    harness.interaction.commandName = "new-session";
+
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+
+    expect(handled).toBe(true);
+    expect(await getRef(harness.defers)).toBe(0);
+    expect(await getRef(harness.replies)).toEqual([
+      "OpenCode still has queued work for this channel. Wait for it to finish before starting a fresh session.",
+    ]);
+    expect(await getRef(harness.invalidatedSessions)).toEqual([]);
   });
 
   test("toggles thinking visibility for a channel without requiring a session", async () => {

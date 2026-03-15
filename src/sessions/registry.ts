@@ -128,6 +128,7 @@ export const ChannelSessionsLive = Layer.scoped(
       createOrGetSession,
       getOrRestoreSession,
       ensureSessionHealth,
+      invalidateSession,
       closeExpiredSessions,
       shutdownSessions,
     } = sessionLifecycle;
@@ -365,6 +366,7 @@ export const ChannelSessionsLive = Layer.scoped(
       getSession: getOrRestoreSession,
       getLiveSession: (channelId) =>
         sessionLifecycle.getSession(channelId).pipe(Effect.map((session) => session ?? null)),
+      invalidateSession,
       getChannelSettings: sessionStore.getChannelSettings,
       upsertChannelSettings: sessionStore.upsertChannelSettings,
       channelSettingsDefaults,

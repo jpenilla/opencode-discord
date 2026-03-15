@@ -417,7 +417,12 @@ const makeHarness = async (options: {
     });
 
   const makeCommandInteraction = (
-    commandName: "compact" | "interrupt" | "toggle-thinking" | "toggle-compaction-summaries",
+    commandName:
+      | "compact"
+      | "interrupt"
+      | "new-session"
+      | "toggle-thinking"
+      | "toggle-compaction-summaries",
   ) => {
     const interactionReplies = Ref.unsafeMake<unknown[]>([]);
     const interactionEdits = Ref.unsafeMake<unknown[]>([]);
@@ -1300,6 +1305,55 @@ describe("ChannelSessionsLive integration", () => {
     );
     expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
       "**🗜️ Session compacted**\nOpenCode summarized earlier context for this session.",
+    );
+  });
+
+  test("runs /new-session through the live layer and recreates the next message on the same workdir", async () => {
+    const harness = await makeHarness({
+      promptImpl: ({ callIndex, completePrompt }) =>
+        completePrompt({
+          messageId: `assistant-${callIndex}`,
+          transcript: callIndex === 1 ? "first" : "second",
+        }),
+    });
+    const firstMessage = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode first",
+    });
+    const secondMessage = harness.makeMessage({
+      id: "message-2",
+      content: "hey opencode second",
+    });
+    const command = harness.makeCommandInteraction("new-session");
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions;
+          yield* sessions.submit(firstMessage, { prompt: "first" });
+          expect(yield* Queue.take(harness.replyEvents)).toBe("first");
+          yield* waitForNoActiveRun(sessions, "session-1");
+
+          yield* sessions.handleInteraction(command.interaction);
+          yield* sessions.submit(secondMessage, { prompt: "second" });
+          expect(yield* Queue.take(harness.replyEvents)).toBe("second");
+        }).pipe(Effect.provide(harness.layer)),
+      ),
+    );
+
+    const createSessionCalls = await getRef(harness.createSessionCalls);
+    expect(createSessionCalls).toHaveLength(2);
+    expect(createSessionCalls[0]?.workdir).toBe(createSessionCalls[1]?.workdir);
+    expect(await getRef(command.interactionDefers)).toBe(1);
+    expect(await getRef(command.interactionEdits)).toEqual([
+      {
+        content:
+          "Cleared this channel's current OpenCode session. The next triggered message here will start a new session with fresh chat history. Workspace files were left in place.",
+        allowedMentions: { parse: [] },
+      },
+    ]);
+    expect((await getRef(harness.sentPayloads)).map(cardText)).toContain(
+      "**🆕 Fresh session ready**\nThe next triggered message in this channel will start a new OpenCode session with fresh chat history. Workspace files were left in place.",
     );
   });
 
