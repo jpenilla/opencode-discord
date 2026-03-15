@@ -1,10 +1,10 @@
 import type { Message } from "discord.js";
 
 import { buildBatchedOpencodePrompt, buildQueuedFollowUpPrompt } from "@/discord/messages.ts";
+import type { AdmittedPromptContext, ActiveRunBatchKind } from "@/sessions/prompt-context.ts";
 import type { RunRequest } from "@/sessions/session.ts";
 
 export type NonEmptyRunRequestBatch = readonly [RunRequest, ...RunRequest[]];
-export type ActiveRunBatchKind = "initial" | "follow-up";
 
 export const mergeAttachmentMessages = (
   target: Map<string, Message>,
@@ -21,10 +21,15 @@ export const admitRequestBatchToActiveRun = (
   attachmentMessagesById: Map<string, Message>,
   requests: NonEmptyRunRequestBatch,
   kind: ActiveRunBatchKind,
-) => {
+): AdmittedPromptContext => {
   mergeAttachmentMessages(attachmentMessagesById, requests);
   const prompts = requests.map((request) => request.prompt);
-  return kind === "initial"
-    ? buildBatchedOpencodePrompt(prompts)
-    : buildQueuedFollowUpPrompt(prompts);
+  return {
+    kind,
+    prompt:
+      kind === "initial" ? buildBatchedOpencodePrompt(prompts) : buildQueuedFollowUpPrompt(prompts),
+    replyTargetMessage:
+      kind === "initial" ? requests[0]!.message : requests[requests.length - 1]!.message,
+    requestMessages: requests.map((request) => request.message),
+  };
 };

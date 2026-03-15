@@ -4,6 +4,7 @@ import type { Message } from "discord.js";
 
 import { buildQueuedFollowUpPrompt } from "@/discord/messages.ts";
 import { coordinateActiveRunPrompts } from "@/sessions/prompt-coordinator.ts";
+import type { AdmittedPromptContext } from "@/sessions/prompt-context.ts";
 import { createPromptState } from "@/sessions/prompt-state.ts";
 import { enqueueRunRequest } from "@/sessions/request-routing.ts";
 import type { RunRequest } from "@/sessions/session.ts";
@@ -61,6 +62,7 @@ const resolveCurrentPrompt = (
 
 const makeActiveRunState = async () => ({
   attachmentMessagesById: new Map<string, Message>(),
+  currentPromptContext: null as AdmittedPromptContext | null,
   previousPromptMessageIds: new Set<string>(["user-old", "assistant-old"]),
   currentPromptMessageIds: new Set<string>(),
   currentPromptUserMessageId: "stale-user",
@@ -109,6 +111,12 @@ describe("coordinateActiveRunPrompts", () => {
       transcript: "reply-2",
     });
     expect([...activeRun.attachmentMessagesById.keys()]).toEqual(["m-1", "m-2", "m-3", "m-4"]);
+    expect(activeRun.currentPromptContext?.kind).toBe("follow-up");
+    expect(activeRun.currentPromptContext?.replyTargetMessage.id).toBe("m-4");
+    expect(activeRun.currentPromptContext?.requestMessages.map((message) => message.id)).toEqual([
+      "m-2",
+      "m-4",
+    ]);
   });
 
   test("reopens follow-up intake before the follow-up prompt and leaves it closed on exit", async () => {
@@ -195,6 +203,8 @@ describe("coordinateActiveRunPrompts", () => {
       userMessageId: string | null;
       assistantCount: number;
       toolCallCount: number;
+      promptKind: "initial" | "follow-up" | null;
+      replyTargetMessageId: string | null;
     }> = [];
     const submitPrompt = (_session: SessionHandle, _value: string) =>
       Effect.gen(function* () {
@@ -202,6 +212,8 @@ describe("coordinateActiveRunPrompts", () => {
           userMessageId: activeRun.currentPromptUserMessageId,
           assistantCount: activeRun.assistantMessageParentIds.size,
           toolCallCount: activeRun.observedToolCallIds.size,
+          promptKind: activeRun.currentPromptContext?.kind ?? null,
+          replyTargetMessageId: activeRun.currentPromptContext?.replyTargetMessage.id ?? null,
         });
         yield* resolveCurrentPrompt(activeRun, {
           messageId: `msg-${snapshots.length}`,
@@ -228,11 +240,15 @@ describe("coordinateActiveRunPrompts", () => {
         userMessageId: null,
         assistantCount: 0,
         toolCallCount: 0,
+        promptKind: "initial",
+        replyTargetMessageId: "m-1",
       },
       {
         userMessageId: null,
         assistantCount: 0,
         toolCallCount: 0,
+        promptKind: "follow-up",
+        replyTargetMessageId: "m-2",
       },
     ]);
   });

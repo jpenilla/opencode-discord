@@ -15,7 +15,7 @@ export const tryBridgePromise = <A>(promise: () => Promise<A>) =>
   });
 
 export const requireSendableChannel = (activeRun: ActiveRun) => {
-  const channel = activeRun.discordMessage.channel;
+  const channel = activeRun.originMessage.channel;
   if (!channel.isSendable()) {
     return Effect.fail(new ToolBridgeResponseError(409, "channel not sendable"));
   }

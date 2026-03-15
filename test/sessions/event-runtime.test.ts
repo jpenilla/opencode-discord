@@ -26,7 +26,7 @@ const makeSession = async (withActiveRun: boolean, showCompactionSummaries = tru
   const promptState = await Effect.runPromise(createPromptState());
   const activeRun = withActiveRun
     ? unsafeStub<ActiveRun>({
-        discordMessage: unsafeStub<Message>({
+        originMessage: unsafeStub<Message>({
           id: "discord-message",
           channelId: "channel-1",
           channel: { id: "channel-1" },
@@ -34,6 +34,7 @@ const makeSession = async (withActiveRun: boolean, showCompactionSummaries = tru
         }),
         workdir: "/home/opencode/workspace",
         attachmentMessagesById: new Map(),
+        currentPromptContext: null,
         previousPromptMessageIds: new Set<string>(),
         currentPromptMessageIds: new Set<string>(),
         currentPromptUserMessageId: null,

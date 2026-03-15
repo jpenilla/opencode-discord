@@ -83,7 +83,7 @@ const makeSessions = (activeRun: ActiveRun | null): ChannelSessionsShape => ({
 
 const makeActiveRun = (send: (payload: MessageCreateOptions) => Promise<unknown>): ActiveRun =>
   unsafeStub<ActiveRun>({
-    discordMessage: {
+    originMessage: {
       channel: unsafeStub<SendableChannels>({
         isSendable: () => true,
         send,

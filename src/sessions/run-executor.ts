@@ -6,6 +6,7 @@ import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
 import type { PendingPrompt } from "@/sessions/prompt-state.ts";
 import type { NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts";
 import {
+  currentPromptReplyTargetMessage,
   noQuestionOutcome,
   type ActiveRun,
   type ChannelSession,
@@ -91,16 +92,17 @@ export const executeRunBatch =
       const promptState = yield* Ref.make<PendingPrompt | null>(null);
       const followUpQueue = yield* Queue.unbounded<RunRequest>();
       const acceptFollowUps = yield* Ref.make(true);
-      const responseMessage = initialRequests[0]!.message;
+      const originMessage = initialRequests[0]!.message;
       const progressFiber = yield* runtime
-        .runProgressWorker(session, responseMessage, session.workdir, progressQueue)
+        .runProgressWorker(session, originMessage, session.workdir, progressQueue)
         .pipe(Effect.fork);
       const finalizeProgress = (reason?: RunFinalizationReason) =>
         finishProgressWorker(runtime, session, progressQueue, progressFiber, reason);
       const activeRun: ActiveRun = {
-        discordMessage: responseMessage,
+        originMessage,
         workdir: session.workdir,
         attachmentMessagesById: new Map<string, Message>(),
+        currentPromptContext: null,
         previousPromptMessageIds: new Set<string>(),
         currentPromptMessageIds: new Set<string>(),
         currentPromptUserMessageId: null,
@@ -110,7 +112,7 @@ export const executeRunBatch =
         promptState,
         followUpQueue,
         acceptFollowUps,
-        typing: runtime.startTyping(responseMessage),
+        typing: runtime.startTyping(originMessage),
         finalizeProgress,
         questionOutcome: noQuestionOutcome(),
         interruptRequested: false,
@@ -144,12 +146,13 @@ export const executeRunBatch =
 
         yield* stopTyping;
         yield* finalizeProgress();
+        const replyTargetMessage = currentPromptReplyTargetMessage(activeRun);
         switch (completion.type) {
           case "send-final-response":
-            yield* runtime.sendFinalResponse(responseMessage, result.transcript);
+            yield* runtime.sendFinalResponse(replyTargetMessage, result.transcript);
             break;
           case "send-question-ui-failure":
-            yield* runtime.sendQuestionUiFailure(responseMessage, completion.message);
+            yield* runtime.sendQuestionUiFailure(replyTargetMessage, completion.message);
             break;
           case "suppress-response":
             break;
@@ -171,7 +174,7 @@ export const executeRunBatch =
           });
           yield* stopTyping;
           yield* finalizeProgress("interrupted");
-          yield* runtime.sendRunInterruptedInfo(responseMessage);
+          yield* runtime.sendRunInterruptedInfo(originMessage);
         } else {
           yield* runtime.logger.error("run failed", {
             channelId: session.channelId,
@@ -179,7 +182,7 @@ export const executeRunBatch =
             error: runtime.formatError(error),
           });
           yield* stopTyping;
-          yield* runtime.sendRunFailure(responseMessage, error);
+          yield* runtime.sendRunFailure(currentPromptReplyTargetMessage(activeRun), error);
           failed = true;
         }
       }
@@ -190,8 +193,6 @@ export const executeRunBatch =
       yield* Fiber.interrupt(progressFiber);
 
       if (failed) {
-        yield* runtime
-          .ensureSessionHealthAfterFailure(session, responseMessage)
-          .pipe(Effect.ignore);
+        yield* runtime.ensureSessionHealthAfterFailure(session, originMessage).pipe(Effect.ignore);
       }
     });

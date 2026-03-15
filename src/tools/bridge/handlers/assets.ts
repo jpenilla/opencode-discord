@@ -60,17 +60,17 @@ const listContextStickers = (message: Message) =>
   tryBridgePromise(() => listUsableStickers(message));
 
 export const handleListCustomEmojis = (context: ToolBridgeHandlerContext<void>) => {
-  return Effect.succeed(formatEmojiList(context.activeRun.discordMessage));
+  return Effect.succeed(formatEmojiList(context.activeRun.originMessage));
 };
 
 export const handleListStickers = (context: ToolBridgeHandlerContext<void>) => {
-  return formatStickerList(context.activeRun.discordMessage);
+  return formatStickerList(context.activeRun.originMessage);
 };
 
 export const handleSendSticker = (context: ToolBridgeHandlerContext<SendStickerPayload>) => {
   return Effect.gen(function* () {
     const { caption, stickerID } = context.payload;
-    const stickers = yield* listContextStickers(context.activeRun.discordMessage);
+    const stickers = yield* listContextStickers(context.activeRun.originMessage);
     const sticker = stickers.find((candidate) => candidate.sticker.id === stickerID);
     if (!sticker) {
       return yield* Effect.fail(

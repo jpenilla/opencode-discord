@@ -2,6 +2,7 @@ import { Chunk, Deferred, Effect, Queue, Ref } from "effect";
 
 import type { PromptResult, SessionHandle, OpencodeServiceShape } from "@/opencode/service.ts";
 import { beginPendingPrompt, failPendingPrompt } from "@/sessions/prompt-state.ts";
+import type { AdmittedPromptContext } from "@/sessions/prompt-context.ts";
 import {
   admitRequestBatchToActiveRun,
   type NonEmptyRunRequestBatch,
@@ -12,6 +13,7 @@ import type { LoggerShape } from "@/util/logging.ts";
 type PromptCoordinatorActiveRun = Pick<
   ActiveRun,
   | "attachmentMessagesById"
+  | "currentPromptContext"
   | "previousPromptMessageIds"
   | "currentPromptMessageIds"
   | "promptState"
@@ -47,13 +49,14 @@ export const coordinateActiveRunPrompts = (
   input: ActiveRunPromptCoordinatorInput,
 ): Effect.Effect<PromptResult, unknown> =>
   Effect.gen(function* () {
-    const runPrompt = (value: string) =>
+    const runPrompt = (promptContext: AdmittedPromptContext) =>
       Effect.gen(function* () {
         resetActivePromptTracking(input.activeRun);
+        input.activeRun.currentPromptContext = promptContext;
         const completion = yield* beginPendingPrompt(input.activeRun.promptState);
 
         yield* input
-          .submitPrompt(input.session, value)
+          .submitPrompt(input.session, promptContext.prompt)
           .pipe(
             Effect.catchAll((error) =>
               failPendingPrompt(input.activeRun.promptState, error).pipe(

@@ -303,6 +303,7 @@ const makeHarness = async (options: {
 }) => {
   const replies = await Effect.runPromise(Ref.make<string[]>([]));
   const replyPayloads = await Effect.runPromise(Ref.make<unknown[]>([]));
+  const replyTargetIds = await Effect.runPromise(Ref.make<string[]>([]));
   const sentPayloads = await Effect.runPromise(Ref.make<unknown[]>([]));
   const editedPayloads = await Effect.runPromise(Ref.make<unknown[]>([]));
   const typing = await Effect.runPromise(Ref.make(0));
@@ -400,19 +401,22 @@ const makeHarness = async (options: {
       guild: null,
       channel: messageChannel,
       reply: (payload: MessageCreateOptions) =>
-        Effect.runPromise(Ref.update(replyPayloads, (current) => [...current, payload])).then(
-          async () => {
-            if (options.failComponentReplies && payload.components?.length) {
-              throw new Error("question post failed");
-            }
-            if (payload.content) {
-              await Effect.runPromise(
-                Ref.update(replies, (current) => [...current, String(payload.content)]),
-              );
-              await Effect.runPromise(Queue.offer(replyEvents, String(payload.content)));
-            }
-            return makePostedMessage(`reply-${input.id}`);
-          },
+        Effect.runPromise(Ref.update(replyTargetIds, (current) => [...current, input.id])).then(
+          () =>
+            Effect.runPromise(Ref.update(replyPayloads, (current) => [...current, payload])).then(
+              async () => {
+                if (options.failComponentReplies && payload.components?.length) {
+                  throw new Error("question post failed");
+                }
+                if (payload.content) {
+                  await Effect.runPromise(
+                    Ref.update(replies, (current) => [...current, String(payload.content)]),
+                  );
+                  await Effect.runPromise(Queue.offer(replyEvents, String(payload.content)));
+                }
+                return makePostedMessage(`reply-${input.id}`);
+              },
+            ),
         ),
     });
 
@@ -627,6 +631,7 @@ const makeHarness = async (options: {
   return {
     replies,
     replyPayloads,
+    replyTargetIds,
     replyEvents,
     sentPayloads,
     editedPayloads,
@@ -738,6 +743,7 @@ describe("ChannelSessionsLive integration", () => {
         }),
       ])}`,
     ]);
+    expect(await getRef(harness.replyTargetIds)).toEqual(["message-2"]);
   });
 
   test("keeps the active run open after the final assistant update until session.status idle arrives", async () => {
@@ -826,6 +832,7 @@ describe("ChannelSessionsLive integration", () => {
         }),
       ]),
     ]);
+    expect(await getRef(harness.replyTargetIds)).toEqual(["message-2"]);
   });
 
   test("ignores replayed message updates from the previous prompt when running an absorbed follow-up", async () => {
@@ -889,6 +896,7 @@ describe("ChannelSessionsLive integration", () => {
     );
 
     expect(await getRef(harness.replies)).toEqual(["follow-up-final"]);
+    expect(await getRef(harness.replyTargetIds)).toEqual(["message-2"]);
   });
 
   test("surfaces compaction summaries as progress updates and still replies with the direct assistant result", async () => {

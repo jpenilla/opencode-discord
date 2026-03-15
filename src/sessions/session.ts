@@ -13,6 +13,7 @@ import type { Ref } from "effect/Ref";
 
 import type { TypingLoop } from "@/discord/messages.ts";
 import type { SessionHandle } from "@/opencode/service.ts";
+import type { AdmittedPromptContext } from "@/sessions/prompt-context.ts";
 import type { ChannelSettings } from "@/state/channel-settings.ts";
 import type { PendingPrompt } from "@/sessions/prompt-state.ts";
 
@@ -43,9 +44,10 @@ export const questionUiFailureOutcome = (message: string, notified = false): Que
 export type RunFinalizationReason = "interrupted" | "shutdown";
 
 export type ActiveRun = {
-  discordMessage: Message;
+  originMessage: Message;
   workdir: string;
   attachmentMessagesById: Map<string, Message>;
+  currentPromptContext: AdmittedPromptContext | null;
   previousPromptMessageIds: Set<string>;
   currentPromptMessageIds: Set<string>;
   currentPromptUserMessageId: string | null;
@@ -60,6 +62,10 @@ export type ActiveRun = {
   questionOutcome: QuestionOutcome;
   interruptRequested: boolean;
 };
+
+export const currentPromptReplyTargetMessage = (
+  activeRun: Pick<ActiveRun, "currentPromptContext" | "originMessage">,
+) => activeRun.currentPromptContext?.replyTargetMessage ?? activeRun.originMessage;
 
 export type RunProgressEvent =
   | { type: "run-finalizing"; ack: Deferred<void>; reason?: RunFinalizationReason }

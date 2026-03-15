@@ -71,7 +71,7 @@ const makeHarness = async (options?: {
   });
 
   const activeRun: ActiveRun = {
-    discordMessage: unsafeStub<Message>({
+    originMessage: unsafeStub<Message>({
       id: "discord-message",
       channelId: "channel-1",
       channel: { id: "channel-1" },
@@ -79,6 +79,7 @@ const makeHarness = async (options?: {
     }),
     workdir: "/home/opencode/workspace",
     attachmentMessagesById: new Map(),
+    currentPromptContext: null,
     previousPromptMessageIds: new Set<string>(),
     currentPromptMessageIds: new Set<string>(),
     currentPromptUserMessageId: null,

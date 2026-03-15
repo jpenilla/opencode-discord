@@ -26,6 +26,7 @@ const makeHarness = async (options?: {
   postQuestionResult?: "success" | "failure";
   rejectResult?: "success" | "failure";
   blockQuestionPost?: boolean;
+  replyTargetId?: string;
 }) => {
   const postedPayloads = await Effect.runPromise(Ref.make<MessageCreateOptions[]>([]));
   const editedPayloads = await Effect.runPromise(Ref.make<MessageEditOptions[]>([]));
@@ -33,6 +34,8 @@ const makeHarness = async (options?: {
     Ref.make<Array<{ content?: string | null }>>([]),
   );
   const sentQuestionUiFailures = await Effect.runPromise(Ref.make<string[]>([]));
+  const questionReplyTargetIds = await Effect.runPromise(Ref.make<string[]>([]));
+  const questionUiFailureTargetIds = await Effect.runPromise(Ref.make<string[]>([]));
   const replyCalls = await Effect.runPromise(Ref.make<string[]>([]));
   const rejectCalls = await Effect.runPromise(Ref.make<string[]>([]));
   const typingPauseCount = await Effect.runPromise(Ref.make(0));
@@ -50,31 +53,47 @@ const makeHarness = async (options?: {
       ),
   });
 
-  const discordMessage = unsafeStub<Message>({
-    id: "discord-message",
-    channelId: "channel-1",
-    author: { id: "owner", tag: "owner#0001" },
-    reply: (payload: MessageCreateOptions) =>
-      Effect.runPromise(Ref.update(postedPayloads, (current) => [...current, payload])).then(
-        async () => {
-          if (options?.blockQuestionPost) {
-            await Effect.runPromise(
-              Deferred.succeed(questionPostStarted, undefined).pipe(Effect.ignore),
-            );
-            await Effect.runPromise(Deferred.await(allowQuestionPost));
-          }
-          if (options?.postQuestionResult === "failure") {
-            throw new Error("post failed");
-          }
-          return questionMessage;
-        },
-      ),
-  });
+  const makeReplyTargetMessage = (id: string) =>
+    unsafeStub<Message>({
+      id,
+      channelId: "channel-1",
+      author: { id: "owner", tag: "owner#0001" },
+      reply: (payload: MessageCreateOptions) =>
+        Effect.runPromise(Ref.update(questionReplyTargetIds, (current) => [...current, id])).then(
+          () =>
+            Effect.runPromise(Ref.update(postedPayloads, (current) => [...current, payload])).then(
+              async () => {
+                if (options?.blockQuestionPost) {
+                  await Effect.runPromise(
+                    Deferred.succeed(questionPostStarted, undefined).pipe(Effect.ignore),
+                  );
+                  await Effect.runPromise(Deferred.await(allowQuestionPost));
+                }
+                if (options?.postQuestionResult === "failure") {
+                  throw new Error("post failed");
+                }
+                return questionMessage;
+              },
+            ),
+        ),
+    });
+
+  const originMessage = makeReplyTargetMessage("origin-message");
+  const replyTargetMessage =
+    options?.replyTargetId && options.replyTargetId !== originMessage.id
+      ? makeReplyTargetMessage(options.replyTargetId)
+      : originMessage;
 
   const activeRun: ActiveRun = {
-    discordMessage,
+    originMessage,
     workdir: "/home/opencode/workspace",
     attachmentMessagesById: new Map(),
+    currentPromptContext: {
+      kind: replyTargetMessage.id === originMessage.id ? "initial" : "follow-up",
+      prompt: "prompt",
+      replyTargetMessage,
+      requestMessages: [replyTargetMessage],
+    },
     previousPromptMessageIds: new Set<string>(),
     currentPromptMessageIds: new Set<string>(),
     currentPromptUserMessageId: null,
@@ -135,8 +154,12 @@ const makeHarness = async (options?: {
               : Effect.void,
           ),
         ),
-      sendQuestionUiFailure: (_message, error) =>
-        Ref.update(sentQuestionUiFailures, (current) => [...current, String(error)]),
+      sendQuestionUiFailure: (message, error) =>
+        Ref.update(questionUiFailureTargetIds, (current) => [...current, message.id]).pipe(
+          Effect.zipRight(
+            Ref.update(sentQuestionUiFailures, (current) => [...current, String(error)]),
+          ),
+        ),
       logger: {
         info: () => Effect.void,
         warn: () => Effect.void,
@@ -225,6 +248,8 @@ const makeHarness = async (options?: {
     editedPayloads,
     interactionReplies,
     sentQuestionUiFailures,
+    questionReplyTargetIds,
+    questionUiFailureTargetIds,
     replyCalls,
     rejectCalls,
     typingPauseCount,
@@ -258,6 +283,7 @@ describe("createQuestionRuntime", () => {
     );
 
     expect((await getRef(harness.postedPayloads)).length).toBe(1);
+    expect(await getRef(harness.questionReplyTargetIds)).toEqual(["origin-message"]);
     expect(await getRef(harness.typingPauseCount)).toBe(1);
 
     await Effect.runPromise(
@@ -277,6 +303,7 @@ describe("createQuestionRuntime", () => {
     const harness = await makeHarness({
       postQuestionResult: "failure",
       rejectResult: "failure",
+      replyTargetId: "follow-up-message",
     });
 
     await Effect.runPromise(
@@ -289,6 +316,7 @@ describe("createQuestionRuntime", () => {
 
     expect(await getRef(harness.rejectCalls)).toEqual([harness.request.id]);
     expect(await getRef(harness.sentQuestionUiFailures)).toEqual(["post failed"]);
+    expect(await getRef(harness.questionUiFailureTargetIds)).toEqual(["follow-up-message"]);
     expect(await getRef(harness.typingStopCount)).toBe(1);
     expect(harness.activeRun.questionOutcome).toEqual({
       _tag: "ui-failure",
@@ -368,6 +396,22 @@ describe("createQuestionRuntime", () => {
     expect(await getRef(harness.rejectCalls)).toEqual([]);
     expect(await getRef(harness.postedPayloads)).toHaveLength(1);
     expect(await getRef(harness.editedPayloads)).toHaveLength(0);
+  });
+
+  test("anchors question cards to the current prompt reply target", async () => {
+    const harness = await makeHarness({
+      replyTargetId: "follow-up-message",
+    });
+
+    await Effect.runPromise(
+      harness.runtime.handleEvent({
+        type: "asked",
+        sessionId: harness.session.opencode.sessionId,
+        request: harness.request,
+      }),
+    );
+
+    expect(await getRef(harness.questionReplyTargetIds)).toEqual(["follow-up-message"]);
   });
 
   test("expires a question batch even when shutdown lands while the Discord card post is in flight", async () => {

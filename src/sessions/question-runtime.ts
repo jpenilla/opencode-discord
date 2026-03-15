@@ -23,6 +23,7 @@ import { setQuestionBatchStatus, terminateQuestionBatch } from "@/sessions/quest
 import { rejectQuestionBatch, submitQuestionBatch } from "@/sessions/question-submission.ts";
 import type { SessionContext } from "@/sessions/session-lifecycle.ts";
 import {
+  currentPromptReplyTargetMessage,
   questionUiFailureOutcome,
   type ActiveRun,
   type ChannelSession,
@@ -235,7 +236,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
                       : deps.logger.warn(
                           "typing pause timed out while question prompt was active",
                           {
-                            channelId: activeRun.discordMessage.channelId,
+                            channelId: activeRun.originMessage.channelId,
                             sessionId,
                           },
                         ),
@@ -359,9 +360,10 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
           return;
         }
 
+        const replyTargetMessage = currentPromptReplyTargetMessage(activeRun);
         const questionMessage = yield* Effect.tryPromise({
           try: () =>
-            activeRun.discordMessage.reply({
+            replyTargetMessage.reply({
               ...createQuestionMessageCreate(questionBatchView(batch)),
               allowedMentions: { repliedUser: true, parse: ["users", "roles", "everyone"] },
             }),
@@ -439,7 +441,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
 
           yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore);
           const failureReply = yield* deps
-            .sendQuestionUiFailure(activeRun.discordMessage, questionUiFailure)
+            .sendQuestionUiFailure(replyTargetMessage, questionUiFailure)
             .pipe(Effect.either);
           if (failureReply._tag === "Right") {
             activeRun.questionOutcome = questionUiFailureOutcome(questionUiFailure, true);

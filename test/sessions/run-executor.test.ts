@@ -57,11 +57,15 @@ const makeRuntime = async (options?: {
 }) => {
   const calls = await Effect.runPromise(Ref.make<string[]>([]));
   const finalResponseMessageIds = await Effect.runPromise(Ref.make<string[]>([]));
+  const questionUiFailureMessageIds = await Effect.runPromise(Ref.make<string[]>([]));
+  const runFailureMessageIds = await Effect.runPromise(Ref.make<string[]>([]));
   const record = (entry: string) => Ref.update(calls, (current) => [...current, entry]);
 
   return {
     calls,
     finalResponseMessageIds,
+    questionUiFailureMessageIds,
+    runFailureMessageIds,
     runtime: {
       runPrompts: ({ activeRun }: { activeRun: ActiveRun }) =>
         Effect.gen(function* () {
@@ -118,10 +122,16 @@ const makeRuntime = async (options?: {
         Ref.update(finalResponseMessageIds, (current) => [...current, message.id]).pipe(
           Effect.zipRight(record(`sendFinalResponse:${text}`)),
         ),
-      sendRunFailure: (_message: Message, error: unknown) =>
-        record(`sendRunFailure:${error instanceof Error ? error.message : String(error)}`),
-      sendQuestionUiFailure: (_message: Message, error: unknown) =>
-        record(`sendQuestionUiFailure:${String(error)}`),
+      sendRunFailure: (message: Message, error: unknown) =>
+        Ref.update(runFailureMessageIds, (current) => [...current, message.id]).pipe(
+          Effect.zipRight(
+            record(`sendRunFailure:${error instanceof Error ? error.message : String(error)}`),
+          ),
+        ),
+      sendQuestionUiFailure: (message: Message, error: unknown) =>
+        Ref.update(questionUiFailureMessageIds, (current) => [...current, message.id]).pipe(
+          Effect.zipRight(record(`sendQuestionUiFailure:${String(error)}`)),
+        ),
       logger: {
         info: (message: string) => record(`info:${message}`),
         warn: (message: string) => record(`warn:${message}`),
@@ -156,29 +166,47 @@ describe("executeRunBatch", () => {
     expect(session.activeRun).toBeNull();
   });
 
-  test("always sends the final Discord reply against the original trigger message", async () => {
+  test("sends the final Discord reply against the current prompt reply target", async () => {
     const session = makeSession();
-    const responseMessage = makeMessage("trigger-message");
-    const initialRequests = makeInitialRequests(responseMessage);
+    const originMessage = makeMessage("trigger-message");
+    const replyTargetMessage = makeMessage("follow-up-message");
+    const initialRequests = makeInitialRequests(originMessage);
     const { runtime, finalResponseMessageIds } = await makeRuntime({
       promptResult: {
         messageId: "assistant-after-auto-compaction",
         transcript: "final transcript",
       },
+      configureActiveRun: (activeRun) => {
+        activeRun.currentPromptContext = {
+          kind: "follow-up",
+          prompt: "follow-up",
+          replyTargetMessage,
+          requestMessages: [replyTargetMessage],
+        };
+      },
     });
 
     await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
 
-    expect(await Effect.runPromise(Ref.get(finalResponseMessageIds))).toEqual(["trigger-message"]);
+    expect(await Effect.runPromise(Ref.get(finalResponseMessageIds))).toEqual([
+      "follow-up-message",
+    ]);
   });
 
   test("sends the question UI failure reply for empty transcripts with an unnotified UI failure", async () => {
     const session = makeSession();
     const responseMessage = makeMessage("m-1");
     const initialRequests = makeInitialRequests(responseMessage);
-    const { runtime, calls } = await makeRuntime({
+    const replyTargetMessage = makeMessage("question-target");
+    const { runtime, calls, questionUiFailureMessageIds } = await makeRuntime({
       promptResult: { messageId: "msg-1", transcript: "" },
       configureActiveRun: (activeRun) => {
+        activeRun.currentPromptContext = {
+          kind: "follow-up",
+          prompt: "follow-up",
+          replyTargetMessage,
+          requestMessages: [replyTargetMessage],
+        };
         activeRun.questionOutcome = {
           _tag: "ui-failure",
           message: "question failed",
@@ -192,14 +220,26 @@ describe("executeRunBatch", () => {
     const seen = await Effect.runPromise(Ref.get(calls));
     expect(seen).toContain("sendQuestionUiFailure:question failed");
     expect(seen.some((entry) => entry.startsWith("sendFinalResponse:"))).toBe(false);
+    expect(await Effect.runPromise(Ref.get(questionUiFailureMessageIds))).toEqual([
+      "question-target",
+    ]);
   });
 
   test("sends a run failure and triggers health recovery after non-interrupt errors", async () => {
     const session = makeSession();
     const responseMessage = makeMessage("m-1");
     const initialRequests = makeInitialRequests(responseMessage);
-    const { runtime, calls } = await makeRuntime({
+    const replyTargetMessage = makeMessage("failure-target");
+    const { runtime, calls, runFailureMessageIds } = await makeRuntime({
       promptFailure: new Error("boom"),
+      configureActiveRun: (activeRun) => {
+        activeRun.currentPromptContext = {
+          kind: "follow-up",
+          prompt: "follow-up",
+          replyTargetMessage,
+          requestMessages: [replyTargetMessage],
+        };
+      },
     });
 
     await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
@@ -216,6 +256,7 @@ describe("executeRunBatch", () => {
       "setActiveRun:null",
       "ensureSessionHealthAfterFailure",
     ]);
+    expect(await Effect.runPromise(Ref.get(runFailureMessageIds))).toEqual(["failure-target"]);
   });
 
   test("suppresses run failure and health recovery when the run was intentionally interrupted", async () => {

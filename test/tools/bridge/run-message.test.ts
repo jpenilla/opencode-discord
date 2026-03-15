@@ -15,7 +15,7 @@ describe("getRunMessageById", () => {
     expect(
       getRunMessageById(
         {
-          discordMessage: primary,
+          originMessage: primary,
           attachmentMessagesById: new Map(),
         },
         "m-1",
@@ -30,7 +30,7 @@ describe("getRunMessageById", () => {
     expect(
       getRunMessageById(
         {
-          discordMessage: primary,
+          originMessage: primary,
           attachmentMessagesById: new Map([["m-2", referenced]]),
         },
         "m-2",
@@ -42,7 +42,7 @@ describe("getRunMessageById", () => {
     expect(
       getRunMessageById(
         {
-          discordMessage: makeMessage("m-1"),
+          originMessage: makeMessage("m-1"),
           attachmentMessagesById: new Map([["m-2", makeMessage("m-2")]]),
         },
         "m-3",
@@ -67,7 +67,7 @@ describe("resolveReactionTargetMessage", () => {
     const result = await Effect.runPromise(
       resolveReactionTargetMessage(
         {
-          discordMessage: primary,
+          originMessage: primary,
           attachmentMessagesById: new Map([["m-2", referenced]]),
         },
         "m-2",
@@ -93,7 +93,7 @@ describe("resolveReactionTargetMessage", () => {
     const result = await Effect.runPromise(
       resolveReactionTargetMessage(
         {
-          discordMessage: primary,
+          originMessage: primary,
           attachmentMessagesById: new Map(),
         },
         "m-9",
@@ -117,7 +117,7 @@ describe("resolveReactionTargetMessage", () => {
     const result = await Effect.runPromise(
       resolveReactionTargetMessage(
         {
-          discordMessage: primary,
+          originMessage: primary,
           attachmentMessagesById: new Map(),
         },
         "missing",

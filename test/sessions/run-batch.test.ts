@@ -23,57 +23,88 @@ const makeRequest = (prompt: string, attachmentMessages: ReadonlyArray<Message>)
 });
 
 describe("admitRequestBatchToActiveRun", () => {
-  test("returns the single initial prompt unchanged and tracks all known messages", () => {
+  test("returns the single initial prompt context and tracks all known messages", () => {
     const current = new Map<string, Message>();
     const main = makeMessage("m-1");
     const referenced = makeMessage("m-2");
 
-    const prompt = admitRequestBatchToActiveRun(
+    const admitted = admitRequestBatchToActiveRun(
       current,
       [makeRequest("prompt one", [main, referenced])],
       "initial",
     );
 
-    expect(prompt).toBe("prompt one");
+    expect(admitted).toEqual({
+      kind: "initial",
+      prompt: "prompt one",
+      replyTargetMessage: main,
+      requestMessages: [main],
+    });
     expect([...current.keys()]).toEqual(["m-1", "m-2"]);
   });
 
-  test("wraps multiple initial prompts in order", () => {
+  test("wraps multiple initial prompts in order and keeps the first reply target", () => {
     const current = new Map<string, Message>();
+    const first = makeMessage("m-1");
+    const second = makeMessage("m-2");
 
-    const prompt = admitRequestBatchToActiveRun(
+    const admitted = admitRequestBatchToActiveRun(
       current,
-      [makeRequest("first", [makeMessage("m-1")]), makeRequest("second", [makeMessage("m-2")])],
+      [makeRequest("first", [first]), makeRequest("second", [second])],
       "initial",
     );
 
-    expect(prompt).toBe(
+    expect(admitted.kind).toBe("initial");
+    expect(admitted.prompt).toBe(
       [
         "Multiple Discord messages arrived before you responded. Read all of them and address them together in order.",
         '<discord-message index="1">\nfirst\n</discord-message>',
         '<discord-message index="2">\nsecond\n</discord-message>',
       ].join("\n\n"),
     );
+    expect(admitted.replyTargetMessage).toBe(first);
+    expect(admitted.requestMessages).toEqual([first, second]);
   });
 
-  test("wraps follow-up prompts and tracks newly introduced message ids", () => {
+  test("wraps follow-up prompts, tracks newly introduced message ids, and uses the last reply target", () => {
     const current = new Map<string, Message>([["m-1", makeMessage("m-1")]]);
     const followUp = makeMessage("m-2");
     const referenced = makeMessage("m-3");
 
-    const prompt = admitRequestBatchToActiveRun(
+    const admitted = admitRequestBatchToActiveRun(
       current,
       [makeRequest("later", [followUp, referenced])],
       "follow-up",
     );
 
-    expect(prompt).toBe(
+    expect(admitted.kind).toBe("follow-up");
+    expect(admitted.prompt).toBe(
       [
         "Additional Discord messages arrived while you were working. Read all of them, address them, and continue the task.",
         '<discord-message index="1">\nlater\n</discord-message>',
       ].join("\n\n"),
     );
+    expect(admitted.replyTargetMessage).toBe(followUp);
+    expect(admitted.requestMessages).toEqual([followUp]);
     expect([...current.keys()]).toEqual(["m-1", "m-2", "m-3"]);
+  });
+
+  test("uses the last queued message as the follow-up reply target", () => {
+    const current = new Map<string, Message>();
+    const firstFollowUp = makeMessage("m-2");
+    const secondFollowUp = makeMessage("m-4");
+
+    const admitted = admitRequestBatchToActiveRun(
+      current,
+      [
+        makeRequest("follow-1", [firstFollowUp, makeMessage("m-3")]),
+        makeRequest("follow-2", [secondFollowUp]),
+      ],
+      "follow-up",
+    );
+
+    expect(admitted.replyTargetMessage).toBe(secondFollowUp);
+    expect(admitted.requestMessages).toEqual([firstFollowUp, secondFollowUp]);
   });
 
   test("dedupes repeated message ids across batches", () => {

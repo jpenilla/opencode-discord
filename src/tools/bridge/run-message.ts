@@ -2,13 +2,13 @@ import type { Message as DiscordMessage } from "discord.js";
 import { Effect } from "effect";
 
 type RunMessageSource = {
-  discordMessage: DiscordMessage;
+  originMessage: DiscordMessage;
   attachmentMessagesById: Map<string, DiscordMessage>;
 };
 
 export const getRunMessageById = (source: RunMessageSource, messageId: string) =>
   source.attachmentMessagesById.get(messageId) ??
-  (source.discordMessage.id === messageId ? source.discordMessage : null);
+  (source.originMessage.id === messageId ? source.originMessage : null);
 
 export const resolveReactionTargetMessage = (
   source: RunMessageSource,
@@ -19,7 +19,7 @@ export const resolveReactionTargetMessage = (
     return Effect.succeed(known);
   }
 
-  const channel = source.discordMessage.channel;
+  const channel = source.originMessage.channel;
   if (
     !("messages" in channel) ||
     !channel.messages ||
