@@ -1,12 +1,17 @@
-import { readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
-export type BridgeUploadPayload = {
+export const bridgeUploadHeaderName = "x-opencode-discord-upload";
+
+export type BridgeUploadMetadata = {
   sessionID: string;
   filename: string;
   displayPath: string;
-  dataBase64: string;
   caption?: string;
+};
+
+export type BridgeUpload = {
+  resolvedPath: string;
+  metadata: BridgeUploadMetadata;
 };
 
 export const resolveUploadPath = (candidate: string, cwd = process.cwd()) => {
@@ -18,21 +23,26 @@ export const resolveUploadPath = (candidate: string, cwd = process.cwd()) => {
   return resolve(cwd, trimmed);
 };
 
-export const buildBridgeUploadPayload = async (input: {
+export const prepareBridgeUpload = (input: {
   sessionID: string;
   path: string;
   caption?: string;
   cwd?: string;
-}): Promise<BridgeUploadPayload> => {
+}): BridgeUpload => {
   const displayPath = input.path.trim();
   const resolvedPath = resolveUploadPath(input.path, input.cwd);
-  const data = await readFile(resolvedPath);
 
   return {
-    sessionID: input.sessionID,
-    filename: basename(resolvedPath),
-    displayPath,
-    dataBase64: data.toString("base64"),
-    ...(input.caption !== undefined ? { caption: input.caption } : {}),
+    resolvedPath,
+    metadata: {
+      sessionID: input.sessionID,
+      filename: basename(resolvedPath),
+      displayPath,
+      ...(input.caption !== undefined ? { caption: input.caption } : {}),
+    },
   };
+};
+
+export const encodeBridgeUploadMetadata = (metadata: BridgeUploadMetadata) => {
+  return Buffer.from(JSON.stringify(metadata), "utf8").toString("base64url");
 };

@@ -1,6 +1,6 @@
 import { tool } from "@opencode-ai/plugin";
-import { sendBridgeRequest } from "./lib/bridge.ts";
-import { buildBridgeUploadPayload } from "./lib/upload.ts";
+import { sendBridgeUpload } from "./lib/bridge.ts";
+import { prepareBridgeUpload } from "./lib/upload.ts";
 
 export default tool({
   description: "Send an image to Discord.",
@@ -13,9 +13,9 @@ export default tool({
     caption: tool.schema.string().optional().describe("Optional Discord caption."),
   },
   async execute(args, context) {
-    return sendBridgeRequest(
+    return sendBridgeUpload(
       "/tool/send-image",
-      await buildBridgeUploadPayload({
+      prepareBridgeUpload({
         sessionID: context.sessionID,
         path: args.path,
         caption: args.caption,

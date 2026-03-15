@@ -52,7 +52,8 @@ const formatStickerList = (message: Message) => {
   );
 };
 
-const listContextStickers = (message: Message) => Effect.tryPromise(() => listUsableStickers(message));
+const listContextStickers = (message: Message) =>
+  Effect.tryPromise(() => listUsableStickers(message));
 
 export const handleListCustomEmojis = (context: ToolBridgeHandlerContext<void>) => {
   return Effect.succeed(formatEmojiList(context.activeRun.discordMessage));

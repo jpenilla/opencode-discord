@@ -1,3 +1,5 @@
+import type { IncomingMessage } from "node:http";
+
 import { Effect } from "effect";
 import * as v from "valibot";
 
@@ -12,30 +14,37 @@ import {
   handleListAttachments,
   handleReact,
   listAttachmentsPayloadSchema,
-  messageRoutePayloadSchema,
   reactPayloadSchema,
 } from "@/tools/bridge/handlers/messages.ts";
 import {
   handleSendFile,
   handleSendImage,
-  uploadPayloadSchema,
+  parseUploadHeaders,
+  type UploadPayload,
 } from "@/tools/bridge/handlers/uploads.ts";
-import { parseBridgePayload } from "@/tools/bridge/validation.ts";
+import { readJsonBody } from "@/tools/bridge/transport.ts";
+import { parseBridgePayload, parseSessionPayload } from "@/tools/bridge/validation.ts";
 
-type ToolBridgeRouteExecutionContext = {
-  activeRun: ActiveRun;
-  body: unknown;
+type ParsedToolBridgeRequest<TPayload> = {
+  sessionID: string;
+  payload: TPayload;
 };
 
 export type ToolBridgeHandlerContext<TPayload> = {
   activeRun: ActiveRun;
+  request: IncomingMessage;
   payload: TPayload;
 };
+
+type ToolBridgeRouteExecutionContext = ToolBridgeHandlerContext<unknown>;
 
 export type ToolBridgeRoute = {
   method: "POST";
   pathname: string;
   operation: string;
+  parseRequest: (
+    request: IncomingMessage,
+  ) => Effect.Effect<ParsedToolBridgeRequest<unknown>, unknown>;
   execute: (context: ToolBridgeRouteExecutionContext) => Effect.Effect<unknown, unknown>;
 };
 
@@ -43,7 +52,9 @@ type ToolBridgeRouteConfig<TPayload> = {
   method: "POST";
   pathname: string;
   operation: string;
-  parse: (body: unknown) => Effect.Effect<TPayload, unknown>;
+  parseRequest: (
+    request: IncomingMessage,
+  ) => Effect.Effect<ParsedToolBridgeRequest<TPayload>, unknown>;
   handle: (context: ToolBridgeHandlerContext<TPayload>) => Effect.Effect<unknown, unknown>;
 };
 
@@ -52,62 +63,83 @@ const createRoute = <TPayload>(config: ToolBridgeRouteConfig<TPayload>): ToolBri
     method: config.method,
     pathname: config.pathname,
     operation: config.operation,
-    execute: ({ activeRun, body }) =>
-      Effect.flatMap(config.parse(body), (payload) =>
-        config.handle({
-          activeRun,
-          payload,
-        }),
-      ),
+    parseRequest: config.parseRequest as ToolBridgeRoute["parseRequest"],
+    execute: ({ activeRun, request, payload }) =>
+      config.handle({
+        activeRun,
+        request,
+        payload: payload as TPayload,
+      }),
   };
 };
 
+const parseJsonRequest = <TPayload>(
+  request: IncomingMessage,
+  parse: (body: unknown) => Effect.Effect<TPayload, unknown>,
+) =>
+  Effect.gen(function* () {
+    const body = yield* readJsonBody(request);
+    const session = yield* parseSessionPayload(body);
+    const payload = yield* parse(body);
+    return {
+      sessionID: session.sessionID,
+      payload,
+    };
+  });
+
 const createSchemaRoute = <TSchema extends v.GenericSchema>(
-  config: Omit<ToolBridgeRouteConfig<v.InferOutput<TSchema>>, "parse"> & {
-    schema: TSchema;
-    error: string;
-  },
+  config: Omit<ToolBridgeRouteConfig<v.InferOutput<TSchema>>, "parseRequest"> & { schema: TSchema },
 ): ToolBridgeRoute => {
   return createRoute({
     method: config.method,
     pathname: config.pathname,
     operation: config.operation,
-    parse: (body) => parseBridgePayload(config.schema, body, config.error),
+    parseRequest: (request) =>
+      parseJsonRequest(request, (body) => parseBridgePayload(config.schema, body)),
     handle: config.handle,
   });
 };
 
 const noPayload = () => Effect.succeed(undefined);
 
+const parseUploadRequest = (
+  request: IncomingMessage,
+): Effect.Effect<ParsedToolBridgeRequest<UploadPayload>, unknown> =>
+  Effect.gen(function* () {
+    const payload = yield* parseUploadHeaders(request.headers);
+    return {
+      sessionID: payload.sessionID,
+      payload,
+    };
+  });
+
 const toolBridgeRoutes = [
-  createSchemaRoute({
+  createRoute({
     method: "POST",
     pathname: "/tool/send-file",
     operation: "file upload",
-    schema: uploadPayloadSchema,
-    error: "missing upload data",
+    parseRequest: parseUploadRequest,
     handle: handleSendFile,
   }),
-  createSchemaRoute({
+  createRoute({
     method: "POST",
     pathname: "/tool/send-image",
     operation: "image upload",
-    schema: uploadPayloadSchema,
-    error: "missing upload data",
+    parseRequest: parseUploadRequest,
     handle: handleSendImage,
   }),
   createRoute({
     method: "POST",
     pathname: "/tool/list-custom-emojis",
     operation: "custom emoji listing",
-    parse: noPayload,
+    parseRequest: (request) => parseJsonRequest(request, noPayload),
     handle: handleListCustomEmojis,
   }),
   createRoute({
     method: "POST",
     pathname: "/tool/list-stickers",
     operation: "sticker listing",
-    parse: noPayload,
+    parseRequest: (request) => parseJsonRequest(request, noPayload),
     handle: handleListStickers,
   }),
   createSchemaRoute({
@@ -115,17 +147,14 @@ const toolBridgeRoutes = [
     pathname: "/tool/send-sticker",
     operation: "sticker send",
     schema: sendStickerPayloadSchema,
-    error: "missing stickerID",
     handle: handleSendSticker,
   }),
   createRoute({
     method: "POST",
     pathname: "/tool/react",
     operation: "reaction",
-    parse: (body) =>
-      parseBridgePayload(messageRoutePayloadSchema, body, "missing messageId").pipe(
-        Effect.zipRight(parseBridgePayload(reactPayloadSchema, body, "missing emoji")),
-      ),
+    parseRequest: (request) =>
+      parseJsonRequest(request, (body) => parseBridgePayload(reactPayloadSchema, body)),
     handle: handleReact,
   }),
   createSchemaRoute({
@@ -133,7 +162,6 @@ const toolBridgeRoutes = [
     pathname: "/tool/list-attachments",
     operation: "attachment listing",
     schema: listAttachmentsPayloadSchema,
-    error: "missing messageId",
     handle: handleListAttachments,
   }),
 ] satisfies ToolBridgeRoute[];

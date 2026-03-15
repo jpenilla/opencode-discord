@@ -17,10 +17,7 @@ export const requireSendableChannel = (activeRun: ActiveRun) => {
   return Effect.succeed(channel);
 };
 
-export const sendBridgeMessage = (
-  channel: SendableChannels,
-  body: MessageCreateOptions,
-) => {
+export const sendBridgeMessage = (channel: SendableChannels, body: MessageCreateOptions) => {
   return Effect.tryPromise(() =>
     Promise.resolve(
       channel.send({

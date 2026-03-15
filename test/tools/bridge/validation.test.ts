@@ -9,10 +9,15 @@ import {
 } from "@/tools/bridge/validation.ts";
 
 describe("parseSessionPayload", () => {
-  test("throws when sessionID is missing or blank", async () => {
-    await expect(Effect.runPromise(parseSessionPayload({}))).rejects.toThrow("missing sessionID");
+  test("formats missing sessionID from the valibot result", async () => {
+    await expect(Effect.runPromise(parseSessionPayload({}))).rejects.toThrow(
+      'invalid request: sessionID: Invalid key: Expected "sessionID" but received undefined',
+    );
+  });
+
+  test("formats blank sessionID from the valibot result", async () => {
     await expect(Effect.runPromise(parseSessionPayload({ sessionID: "" }))).rejects.toThrow(
-      "missing sessionID",
+      "invalid request: sessionID: Invalid length: Expected >=1 but received 0",
     );
   });
 
@@ -27,17 +32,28 @@ describe("parseSessionPayload", () => {
 });
 
 describe("parseBridgePayload", () => {
-  test("throws the provided error when validation fails", async () => {
+  test("formats validation failures from valibot issues", async () => {
     const schema = v.object({
       sessionID: nonEmptyString,
       messageId: nonEmptyString,
     });
 
     await expect(
-      Effect.runPromise(
-        parseBridgePayload(schema, { sessionID: "session-1" }, "missing messageId"),
-      ),
-    ).rejects.toThrow("missing messageId");
+      Effect.runPromise(parseBridgePayload(schema, { sessionID: "session-1" })),
+    ).rejects.toThrow(
+      'invalid request: messageId: Invalid key: Expected "messageId" but received undefined',
+    );
+  });
+
+  test("includes multiple issue paths when validation fails in more than one place", async () => {
+    const schema = v.object({
+      sessionID: nonEmptyString,
+      messageId: nonEmptyString,
+    });
+
+    await expect(Effect.runPromise(parseBridgePayload(schema, { sessionID: "" }))).rejects.toThrow(
+      'invalid request: sessionID: Invalid length: Expected >=1 but received 0; messageId: Invalid key: Expected "messageId" but received undefined',
+    );
   });
 
   test("returns typed output when validation succeeds", async () => {
@@ -48,11 +64,7 @@ describe("parseBridgePayload", () => {
 
     await expect(
       Effect.runPromise(
-        parseBridgePayload(
-          schema,
-          { sessionID: "session-1", messageId: "m-1", extra: true },
-          "bad",
-        ),
+        parseBridgePayload(schema, { sessionID: "session-1", messageId: "m-1", extra: true }),
       ),
     ).resolves.toEqual({
       sessionID: "session-1",

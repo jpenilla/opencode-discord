@@ -3,7 +3,14 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildBridgeUploadPayload, resolveUploadPath } from "../tools/lib/upload.ts";
+import { Effect } from "effect";
+
+import { raceBridgeUploadWithResponse } from "../tools/lib/bridge.ts";
+import {
+  encodeBridgeUploadMetadata,
+  prepareBridgeUpload,
+  resolveUploadPath,
+} from "../tools/lib/upload.ts";
 
 const tempDirs: string[] = [];
 
@@ -35,43 +42,144 @@ describe("resolveUploadPath", () => {
   });
 });
 
-describe("buildBridgeUploadPayload", () => {
-  test("reads upload bytes relative to the provided cwd and preserves caption metadata", async () => {
+describe("prepareBridgeUpload", () => {
+  test("builds upload metadata relative to the provided cwd and preserves caption metadata", async () => {
     const cwd = await makeTempDir();
     await mkdir(join(cwd, "assets"), { recursive: true });
     await writeFile(join(cwd, "assets", "image.png"), "png-data");
 
-    await expect(
-      buildBridgeUploadPayload({
+    expect(
+      prepareBridgeUpload({
         sessionID: "session-1",
         path: "./assets/image.png",
         caption: "caption text",
         cwd,
       }),
-    ).resolves.toEqual({
-      sessionID: "session-1",
-      filename: "image.png",
-      displayPath: "./assets/image.png",
-      dataBase64: Buffer.from("png-data").toString("base64"),
-      caption: "caption text",
+    ).toEqual({
+      resolvedPath: join(cwd, "assets", "image.png"),
+      metadata: {
+        sessionID: "session-1",
+        filename: "image.png",
+        displayPath: "./assets/image.png",
+        caption: "caption text",
+      },
     });
   });
 
-  test("reads upload bytes from an absolute path", async () => {
+  test("builds upload metadata from an absolute path", async () => {
     const directory = await makeTempDir();
     const filePath = join(directory, "report.txt");
     await writeFile(filePath, "report");
 
-    await expect(
-      buildBridgeUploadPayload({
+    expect(
+      prepareBridgeUpload({
         sessionID: "session-2",
         path: filePath,
       }),
-    ).resolves.toEqual({
-      sessionID: "session-2",
-      filename: "report.txt",
-      displayPath: filePath,
-      dataBase64: Buffer.from("report").toString("base64"),
+    ).toEqual({
+      resolvedPath: filePath,
+      metadata: {
+        sessionID: "session-2",
+        filename: "report.txt",
+        displayPath: filePath,
+      },
     });
+  });
+});
+
+describe("encodeBridgeUploadMetadata", () => {
+  test("encodes upload metadata as base64url JSON", () => {
+    const encoded = encodeBridgeUploadMetadata({
+      sessionID: "session-1",
+      filename: "image.png",
+      displayPath: "./assets/image.png",
+      caption: "caption text",
+    });
+
+    expect(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"))).toEqual({
+      sessionID: "session-1",
+      filename: "image.png",
+      displayPath: "./assets/image.png",
+      caption: "caption text",
+    });
+  });
+});
+
+describe("raceBridgeUploadWithResponse", () => {
+  test("interrupts the upload when the response wins", async () => {
+    let uploadInterrupted = false;
+
+    await expect(
+      Effect.runPromise(
+        raceBridgeUploadWithResponse(
+          Effect.never.pipe(
+            Effect.onInterrupt(() =>
+              Effect.sync(() => {
+                uploadInterrupted = true;
+              }),
+            ),
+          ),
+          Effect.succeed("ok"),
+        ),
+      ),
+    ).resolves.toBe("ok");
+    expect(uploadInterrupted).toBe(true);
+  });
+
+  test("waits for the response after the upload completes", async () => {
+    let didResolveResponse = false;
+
+    await expect(
+      Effect.runPromise(
+        raceBridgeUploadWithResponse(
+          Effect.void,
+          Effect.sync(() => {
+            didResolveResponse = true;
+            return "ok";
+          }),
+        ),
+      ),
+    ).resolves.toBe("ok");
+    expect(didResolveResponse).toBe(true);
+  });
+
+  test("interrupts the response when the upload fails", async () => {
+    let responseInterrupted = false;
+
+    await expect(
+      Effect.runPromise(
+        raceBridgeUploadWithResponse(
+          Effect.fail(new Error("upload failed")),
+          Effect.never.pipe(
+            Effect.onInterrupt(() =>
+              Effect.sync(() => {
+                responseInterrupted = true;
+              }),
+            ),
+          ),
+        ),
+      ),
+    ).rejects.toThrow("upload failed");
+    expect(responseInterrupted).toBe(true);
+  });
+
+  test("interrupts the upload and surfaces a response failure", async () => {
+    let uploadInterrupted = false;
+
+    await expect(
+      Effect.runPromise(
+        raceBridgeUploadWithResponse(
+          Effect.never.pipe(
+            Effect.onInterrupt(() =>
+              Effect.sync(() => {
+                uploadInterrupted = true;
+              }),
+            ),
+          ),
+          Effect.fail(new Error("bridge failed")),
+        ),
+      ),
+    ).rejects.toThrow("bridge failed");
+    expect(uploadInterrupted).toBe(true);
   });
 });

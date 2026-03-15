@@ -8,8 +8,7 @@ import { AppConfig } from "@/config.ts";
 import { ChannelSessions } from "@/sessions/registry.ts";
 import { ToolBridgeResponseError, classifyToolBridgeFailure } from "@/tools/bridge/errors.ts";
 import { matchToolBridgeRoute } from "@/tools/bridge/routes.ts";
-import { readJsonBody, sendJson } from "@/tools/bridge/transport.ts";
-import { parseSessionPayload } from "@/tools/bridge/validation.ts";
+import { sendJson } from "@/tools/bridge/transport.ts";
 import { Logger } from "@/util/logging.ts";
 
 export type ToolBridgeShape = {
@@ -76,14 +75,6 @@ export const ToolBridgeLive = Layer.scoped(
               return;
             }
 
-            const body = yield* readJsonBody(request);
-            const payload = yield* parseSessionPayload(body);
-            const activeRun = yield* sessions.getActiveRunBySessionId(payload.sessionID);
-            if (!activeRun) {
-              yield* Effect.sync(() => sendJson(response, { error: "no active run for session" }, 409));
-              return;
-            }
-
             const route = matchToolBridgeRoute(request.method, pathname);
             if (!route) {
               yield* Effect.sync(() => sendJson(response, { error: "not found" }, 404));
@@ -91,9 +82,19 @@ export const ToolBridgeLive = Layer.scoped(
             }
 
             operation = route.operation;
+            const parsedRequest = yield* route.parseRequest(request);
+            const activeRun = yield* sessions.getActiveRunBySessionId(parsedRequest.sessionID);
+            if (!activeRun) {
+              yield* Effect.sync(() =>
+                sendJson(response, { error: "no active run for session" }, 409),
+              );
+              return;
+            }
+
             const message = yield* route.execute({
               activeRun,
-              body,
+              request,
+              payload: parsedRequest.payload,
             });
             yield* Effect.sync(() => sendJson(response, { ok: true, message }));
           }).pipe(
@@ -128,14 +129,14 @@ export const ToolBridgeLive = Layer.scoped(
 
           void Effect.runPromise(handleRequest);
         }),
-      ).pipe(
-        Effect.tap((server) => listenServer(server, config.toolBridgeSocketPath)),
-      ),
+      ).pipe(Effect.tap((server) => listenServer(server, config.toolBridgeSocketPath))),
       (server) =>
         Effect.all(
           [
             closeServer(server).pipe(Effect.ignore),
-            Effect.promise(() => rm(config.toolBridgeSocketPath, { force: true })).pipe(Effect.ignore),
+            Effect.promise(() => rm(config.toolBridgeSocketPath, { force: true })).pipe(
+              Effect.ignore,
+            ),
           ],
           { discard: true },
         ),
