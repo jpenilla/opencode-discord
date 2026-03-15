@@ -3,8 +3,6 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { Effect } from "effect";
-
 import { raceBridgeUploadWithResponse } from "../tools/lib/bridge.ts";
 import {
   encodeBridgeUploadMetadata,
@@ -107,79 +105,69 @@ describe("encodeBridgeUploadMetadata", () => {
 
 describe("raceBridgeUploadWithResponse", () => {
   test("interrupts the upload when the response wins", async () => {
-    let uploadInterrupted = false;
+    let uploadAborted = false;
 
     await expect(
-      Effect.runPromise(
-        raceBridgeUploadWithResponse(
-          Effect.never.pipe(
-            Effect.onInterrupt(() =>
-              Effect.sync(() => {
-                uploadInterrupted = true;
-              }),
-            ),
-          ),
-          Effect.succeed("ok"),
-        ),
-      ),
+      raceBridgeUploadWithResponse({
+        upload: new Promise<void>(() => undefined),
+        response: Promise.resolve("ok"),
+        abortUpload: () => {
+          uploadAborted = true;
+        },
+        abortResponse: () => {},
+      }),
     ).resolves.toBe("ok");
-    expect(uploadInterrupted).toBe(true);
+    expect(uploadAborted).toBe(true);
   });
 
   test("waits for the response after the upload completes", async () => {
     let didResolveResponse = false;
 
     await expect(
-      Effect.runPromise(
-        raceBridgeUploadWithResponse(
-          Effect.void,
-          Effect.sync(() => {
+      raceBridgeUploadWithResponse({
+        upload: Promise.resolve(),
+        response: new Promise<string>((resolve) => {
+          queueMicrotask(() => {
             didResolveResponse = true;
-            return "ok";
-          }),
-        ),
-      ),
+            resolve("ok");
+          });
+        }),
+        abortUpload: () => {},
+        abortResponse: () => {},
+      }),
     ).resolves.toBe("ok");
     expect(didResolveResponse).toBe(true);
   });
 
   test("interrupts the response when the upload fails", async () => {
-    let responseInterrupted = false;
+    let responseAborted = false;
 
     await expect(
-      Effect.runPromise(
-        raceBridgeUploadWithResponse(
-          Effect.fail(new Error("upload failed")),
-          Effect.never.pipe(
-            Effect.onInterrupt(() =>
-              Effect.sync(() => {
-                responseInterrupted = true;
-              }),
-            ),
-          ),
-        ),
-      ),
+      raceBridgeUploadWithResponse({
+        upload: Promise.reject(new Error("upload failed")),
+        response: new Promise<string>(() => undefined),
+        abortUpload: () => {},
+        abortResponse: () => {
+          responseAborted = true;
+        },
+      }),
     ).rejects.toThrow("upload failed");
-    expect(responseInterrupted).toBe(true);
+    expect(responseAborted).toBe(true);
   });
 
   test("interrupts the upload and surfaces a response failure", async () => {
-    let uploadInterrupted = false;
+    let uploadAborted = false;
 
     await expect(
-      Effect.runPromise(
-        raceBridgeUploadWithResponse(
-          Effect.never.pipe(
-            Effect.onInterrupt(() =>
-              Effect.sync(() => {
-                uploadInterrupted = true;
-              }),
-            ),
-          ),
-          Effect.fail(new Error("bridge failed")),
-        ),
-      ),
+      raceBridgeUploadWithResponse({
+        upload: new Promise<void>(() => undefined),
+        response: Promise.reject(new Error("bridge failed")),
+        abortUpload: () => {
+          uploadAborted = true;
+        },
+        abortResponse: () => {},
+      }),
     ).rejects.toThrow("bridge failed");
-    expect(uploadInterrupted).toBe(true);
+    expect(uploadAborted).toBe(true);
   });
 });

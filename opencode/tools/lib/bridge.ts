@@ -1,7 +1,6 @@
 import { createReadStream } from "node:fs";
 import { request, type ClientRequest, type IncomingMessage } from "node:http";
-
-import { Cause, Effect, Exit, Fiber, Stream } from "effect";
+import { pipeline } from "node:stream/promises";
 
 import { bridgeUploadHeaderName, encodeBridgeUploadMetadata, type BridgeUpload } from "./upload.ts";
 
@@ -31,17 +30,16 @@ const stopBridgeUpload = (
   req: ClientRequest,
   file: { destroy: (error?: Error) => void },
   error?: unknown,
-) =>
-  Effect.sync(() => {
-    const cause = error === undefined ? undefined : asError(error);
-    file.destroy(cause);
-    if (cause) {
-      req.destroy(cause);
-      return;
-    }
+) => {
+  const cause = error === undefined ? undefined : asError(error);
+  file.destroy(cause);
+  if (cause) {
+    req.destroy(cause);
+    return;
+  }
 
-    abortRequest(req);
-  });
+  abortRequest(req);
+};
 
 const waitForBridgeResponse = (req: ClientRequest) => {
   return new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
@@ -75,102 +73,6 @@ const waitForBridgeResponse = (req: ClientRequest) => {
   });
 };
 
-const waitForBridgeResponseEffect = (req: ClientRequest) =>
-  Effect.tryPromise({
-    try: () => waitForBridgeResponse(req),
-    catch: asError,
-  });
-
-const writeChunk = (req: ClientRequest, chunk: Uint8Array) =>
-  Effect.async<void, Error>((resume) => {
-    const onError = (error: Error) => {
-      cleanup();
-      resume(Effect.fail(error));
-    };
-
-    const onDrain = () => {
-      cleanup();
-      resume(Effect.void);
-    };
-
-    const cleanup = () => {
-      req.off("error", onError);
-      req.off("drain", onDrain);
-    };
-
-    req.once("error", onError);
-    try {
-      if (req.write(chunk)) {
-        cleanup();
-        resume(Effect.void);
-        return Effect.void;
-      }
-
-      req.once("drain", onDrain);
-      return Effect.sync(cleanup);
-    } catch (error) {
-      cleanup();
-      resume(Effect.fail(asError(error)));
-      return Effect.void;
-    }
-  });
-
-const endRequest = (req: ClientRequest) =>
-  Effect.async<void, Error>((resume) => {
-    const onError = (error: Error) => {
-      cleanup();
-      resume(Effect.fail(error));
-    };
-
-    const cleanup = () => {
-      req.off("error", onError);
-    };
-
-    req.once("error", onError);
-    try {
-      req.end(() => {
-        cleanup();
-        resume(Effect.void);
-      });
-      return Effect.sync(cleanup);
-    } catch (error) {
-      cleanup();
-      resume(Effect.fail(asError(error)));
-      return Effect.void;
-    }
-  });
-
-const streamReadableToRequest = (
-  readable: AsyncIterable<string | Uint8Array>,
-  req: ClientRequest,
-) => {
-  return Stream.fromAsyncIterable(readable, asError).pipe(
-    Stream.runForEach((chunk) =>
-      writeChunk(req, typeof chunk === "string" ? Buffer.from(chunk) : chunk),
-    ),
-    Effect.tap(() => endRequest(req)),
-  );
-};
-
-export const raceBridgeUploadWithResponse = <A>(
-  upload: Effect.Effect<void, Error>,
-  response: Effect.Effect<A, Error>,
-) =>
-  Effect.raceWith(upload, response, {
-    onSelfDone: (exit, responseFiber) =>
-      Exit.matchEffect(exit, {
-        onFailure: (cause) =>
-          Fiber.interrupt(responseFiber).pipe(Effect.zipRight(Effect.failCause(cause))),
-        onSuccess: () => Fiber.join(responseFiber),
-      }),
-    onOtherDone: (exit, uploadFiber) =>
-      Exit.matchEffect(exit, {
-        onFailure: (cause) =>
-          Fiber.interrupt(uploadFiber).pipe(Effect.zipRight(Effect.failCause(cause))),
-        onSuccess: (value) => Fiber.interrupt(uploadFiber).pipe(Effect.as(value)),
-      }),
-  });
-
 const parseBridgeResponse = <T>(response: { statusCode: number; body: string }) => {
   const data =
     response.body.length > 0
@@ -181,6 +83,43 @@ const parseBridgeResponse = <T>(response: { statusCode: number; body: string }) 
   }
 
   return data;
+};
+
+export const raceBridgeUploadWithResponse = async <A>(input: {
+  upload: Promise<void>;
+  response: Promise<A>;
+  abortUpload: (error?: unknown) => void;
+  abortResponse: (error?: unknown) => void;
+}) => {
+  let responseSettled = false;
+  const responsePromise = input.response.then(
+    (value) => {
+      responseSettled = true;
+      input.abortUpload();
+      return value;
+    },
+    (error) => {
+      responseSettled = true;
+      input.abortUpload(error);
+      throw asError(error);
+    },
+  );
+  const uploadPromise = input.upload.then(
+    () => responsePromise,
+    (error) => {
+      if (responseSettled) {
+        return undefined as never;
+      }
+
+      input.abortResponse(error);
+      throw asError(error);
+    },
+  );
+
+  void responsePromise.catch(() => undefined);
+  void uploadPromise.catch(() => undefined);
+
+  return await Promise.race([responsePromise, uploadPromise]);
 };
 
 const bridgeRequest = async <T>(path: string, body: Record<string, unknown>): Promise<T> => {
@@ -236,19 +175,17 @@ export const sendBridgeUpload = async (path: string, upload: BridgeUpload) => {
       [bridgeUploadHeaderName]: encodeBridgeUploadMetadata(upload.metadata),
     },
   });
-  const uploadEffect = streamReadableToRequest(file, req).pipe(
-    Effect.onInterrupt(() => stopBridgeUpload(req, file)),
-    Effect.onError((cause) => stopBridgeUpload(req, file, Cause.squash(cause))),
-  );
-  const responseEffect = waitForBridgeResponseEffect(req).pipe(
-    Effect.flatMap((response) =>
-      Effect.try({
-        try: () => parseBridgeResponse<{ message?: string }>(response),
-        catch: asError,
-      }),
+  const data = await raceBridgeUploadWithResponse({
+    upload: pipeline(file, req),
+    response: waitForBridgeResponse(req).then((response) =>
+      parseBridgeResponse<{ message?: string }>(response),
     ),
-  );
-
-  const data = await Effect.runPromise(raceBridgeUploadWithResponse(uploadEffect, responseEffect));
+    abortUpload: (error) => stopBridgeUpload(req, file, error),
+    abortResponse: (error) => {
+      if (!req.destroyed) {
+        req.destroy(asError(error));
+      }
+    },
+  });
   return data.message ?? "ok";
 };
