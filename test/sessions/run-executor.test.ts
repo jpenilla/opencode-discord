@@ -3,6 +3,7 @@ import type { Message } from "discord.js";
 import { Deferred, Effect, Queue, Ref } from "effect";
 
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
+import type { AdmittedPromptContext } from "@/sessions/prompt-context.ts";
 import { executeRunBatch } from "@/sessions/run-executor.ts";
 import type { NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts";
 import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
@@ -67,14 +68,38 @@ const makeRuntime = async (options?: {
     questionUiFailureMessageIds,
     runFailureMessageIds,
     runtime: {
-      runPrompts: ({ activeRun }: { activeRun: ActiveRun }) =>
+      runPrompts: ({
+        activeRun,
+        initialRequests,
+        handlePromptCompleted,
+      }: {
+        activeRun: ActiveRun;
+        initialRequests: NonEmptyRunRequestBatch;
+        handlePromptCompleted: (
+          promptContext: AdmittedPromptContext,
+          result: PromptResult,
+        ) => Effect.Effect<void, unknown>;
+      }) =>
         Effect.gen(function* () {
           yield* record("runPrompts");
           options?.configureActiveRun?.(activeRun);
           if (options?.promptFailure) {
             return yield* Effect.fail(options.promptFailure);
           }
-          return options?.promptResult ?? { messageId: "msg-1", transcript: "final transcript" };
+          const result = options?.promptResult ?? {
+            messageId: "msg-1",
+            transcript: "final transcript",
+          };
+          yield* handlePromptCompleted(
+            activeRun.currentPromptContext ?? {
+              kind: "initial",
+              prompt: initialRequests[0]!.prompt,
+              replyTargetMessage: initialRequests[0]!.message,
+              requestMessages: [initialRequests[0]!.message],
+            },
+            result,
+          );
+          return result;
         }),
       runProgressWorker: (
         _session: ChannelSession,
@@ -155,9 +180,9 @@ describe("executeRunBatch", () => {
       "typing:start",
       "setActiveRun:active",
       "runPrompts",
+      "sendFinalResponse:final transcript",
       "typing:stop",
       "progress:run-finalizing",
-      "sendFinalResponse:final transcript",
       "info:completed run",
       "typing:stop",
       "terminateQuestionBatches:session-1:expired",
@@ -302,10 +327,10 @@ describe("executeRunBatch", () => {
       "typing:start",
       "setActiveRun:active",
       "runPrompts",
+      "sendFinalResponse:final transcript",
       "warn:interrupt request did not stop run",
       "typing:stop",
       "progress:run-finalizing",
-      "sendFinalResponse:final transcript",
       "info:completed run",
       "typing:stop",
       "terminateQuestionBatches:session-1:expired",
@@ -327,14 +352,130 @@ describe("executeRunBatch", () => {
       "typing:start",
       "setActiveRun:active",
       "runPrompts",
+      "sendFinalResponse:final transcript",
       "typing:stop",
       "progress:exit",
       "warn:progress worker exited before finalization",
-      "sendFinalResponse:final transcript",
       "info:completed run",
       "typing:stop",
       "terminateQuestionBatches:session-1:expired",
       "setActiveRun:null",
+    ]);
+  });
+
+  test("sends a Discord reply for each completed prompt round in the same run", async () => {
+    const session = makeSession();
+    const originMessage = makeMessage("trigger-message");
+    const followUpMessage = makeMessage("follow-up-message");
+    const initialRequests = makeInitialRequests(originMessage);
+    const calls = await Effect.runPromise(Ref.make<string[]>([]));
+    const finalResponseMessageIds = await Effect.runPromise(Ref.make<string[]>([]));
+    const record = (entry: string) => Ref.update(calls, (current) => [...current, entry]);
+
+    const runtime = {
+      ...(await makeRuntime()).runtime,
+      runPrompts: ({
+        handlePromptCompleted,
+      }: {
+        handlePromptCompleted: (
+          promptContext: AdmittedPromptContext,
+          result: PromptResult,
+        ) => Effect.Effect<void, unknown>;
+      }) =>
+        Effect.gen(function* () {
+          yield* record("runPrompts");
+          yield* handlePromptCompleted(
+            {
+              kind: "initial",
+              prompt: "initial",
+              replyTargetMessage: originMessage,
+              requestMessages: [originMessage],
+            },
+            { messageId: "msg-1", transcript: "first reply" },
+          );
+          yield* handlePromptCompleted(
+            {
+              kind: "follow-up",
+              prompt: "follow-up",
+              replyTargetMessage: followUpMessage,
+              requestMessages: [followUpMessage],
+            },
+            { messageId: "msg-2", transcript: "second reply" },
+          );
+          return { messageId: "msg-2", transcript: "second reply" };
+        }),
+      sendFinalResponse: (message: Message, text: string) =>
+        Ref.update(finalResponseMessageIds, (current) => [...current, message.id]).pipe(
+          Effect.zipRight(record(`sendFinalResponse:${text}`)),
+        ),
+    } as const;
+
+    await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
+
+    expect(await Effect.runPromise(Ref.get(finalResponseMessageIds))).toEqual([
+      "trigger-message",
+      "follow-up-message",
+    ]);
+  });
+
+  test("sends replies in order across multiple chained follow-up rounds", async () => {
+    const session = makeSession();
+    const originMessage = makeMessage("trigger-message");
+    const followUpMessageOne = makeMessage("follow-up-message-1");
+    const followUpMessageTwo = makeMessage("follow-up-message-2");
+    const initialRequests = makeInitialRequests(originMessage);
+    const finalResponseMessageIds = await Effect.runPromise(Ref.make<string[]>([]));
+
+    const runtime = {
+      ...(await makeRuntime()).runtime,
+      runPrompts: ({
+        handlePromptCompleted,
+      }: {
+        handlePromptCompleted: (
+          promptContext: AdmittedPromptContext,
+          result: PromptResult,
+        ) => Effect.Effect<void, unknown>;
+      }) =>
+        Effect.gen(function* () {
+          yield* handlePromptCompleted(
+            {
+              kind: "initial",
+              prompt: "initial",
+              replyTargetMessage: originMessage,
+              requestMessages: [originMessage],
+            },
+            { messageId: "msg-1", transcript: "first reply" },
+          );
+          yield* handlePromptCompleted(
+            {
+              kind: "follow-up",
+              prompt: "follow-up-1",
+              replyTargetMessage: followUpMessageOne,
+              requestMessages: [followUpMessageOne],
+            },
+            { messageId: "msg-2", transcript: "second reply" },
+          );
+          yield* handlePromptCompleted(
+            {
+              kind: "follow-up",
+              prompt: "follow-up-2",
+              replyTargetMessage: followUpMessageTwo,
+              requestMessages: [followUpMessageTwo],
+            },
+            { messageId: "msg-3", transcript: "third reply" },
+          );
+          return { messageId: "msg-3", transcript: "third reply" };
+        }),
+      sendFinalResponse: (message: Message, text: string) =>
+        Ref.update(finalResponseMessageIds, (current) => [...current, `${message.id}:${text}`]),
+    } as const;
+
+    await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
+
+    expect(await Effect.runPromise(Ref.get(finalResponseMessageIds))).toEqual([
+      "trigger-message:first reply",
+      "follow-up-message-1:second reply",
+      "follow-up-message-2:third reply",
     ]);
   });
 });

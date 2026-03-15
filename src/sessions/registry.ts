@@ -298,7 +298,7 @@ export const ChannelSessionsLive = Layer.scoped(
     );
 
     const runExecutor = executeRunBatch({
-      runPrompts: ({ channelId, session, activeRun, initialRequests }) =>
+      runPrompts: ({ channelId, session, activeRun, initialRequests, handlePromptCompleted }) =>
         coordinateActiveRunPrompts({
           channelId,
           session,
@@ -306,6 +306,7 @@ export const ChannelSessionsLive = Layer.scoped(
           initialRequests,
           awaitIdleCompaction,
           submitPrompt: opencode.submitPrompt,
+          handlePromptCompleted,
           logger,
         }),
       runProgressWorker,

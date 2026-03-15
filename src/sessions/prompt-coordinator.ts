@@ -14,6 +14,7 @@ type PromptCoordinatorActiveRun = Pick<
   ActiveRun,
   | "attachmentMessagesById"
   | "currentPromptContext"
+  | "interruptRequested"
   | "previousPromptMessageIds"
   | "currentPromptMessageIds"
   | "promptState"
@@ -31,6 +32,10 @@ export type ActiveRunPromptCoordinatorInput = {
   initialRequests: NonEmptyRunRequestBatch;
   awaitIdleCompaction: (sessionId: string) => Effect.Effect<void, unknown>;
   submitPrompt: OpencodeServiceShape["submitPrompt"];
+  handlePromptCompleted: (
+    promptContext: AdmittedPromptContext,
+    result: PromptResult,
+  ) => Effect.Effect<void, unknown>;
   logger: LoggerShape;
 };
 
@@ -51,6 +56,10 @@ export const coordinateActiveRunPrompts = (
   Effect.gen(function* () {
     const runPrompt = (promptContext: AdmittedPromptContext) =>
       Effect.gen(function* () {
+        if (input.activeRun.interruptRequested) {
+          return yield* Effect.fail(new Error("interrupted"));
+        }
+
         resetActivePromptTracking(input.activeRun);
         input.activeRun.currentPromptContext = promptContext;
         const completion = yield* beginPendingPrompt(input.activeRun.promptState);
@@ -75,6 +84,7 @@ export const coordinateActiveRunPrompts = (
     );
     yield* input.awaitIdleCompaction(input.session.sessionId);
     let result = yield* runPrompt(initialPrompt);
+    yield* input.handlePromptCompleted(initialPrompt, result);
 
     while (true) {
       const followUpBatch = yield* drainQueuedFollowUps(input.activeRun);
@@ -95,6 +105,7 @@ export const coordinateActiveRunPrompts = (
       );
       yield* Ref.set(input.activeRun.acceptFollowUps, true);
       result = yield* runPrompt(followUpPrompt);
+      yield* input.handlePromptCompleted(followUpPrompt, result);
     }
 
     return result;

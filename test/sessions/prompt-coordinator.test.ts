@@ -71,12 +71,14 @@ const makeActiveRunState = async () => ({
   promptState: await Effect.runPromise(createPromptState()),
   followUpQueue: await Effect.runPromise(Queue.unbounded<RunRequest>()),
   acceptFollowUps: await Effect.runPromise(Ref.make(true)),
+  interruptRequested: false,
 });
 
 describe("coordinateActiveRunPrompts", () => {
   test("prompts the initial batch, absorbs queued follow-ups, and returns the last result", async () => {
     const activeRun = await makeActiveRunState();
     const submitCalls: string[] = [];
+    const completedPrompts: Array<{ kind: "initial" | "follow-up"; transcript: string }> = [];
     const submitPrompt = (_session: SessionHandle, value: string) =>
       Effect.gen(function* () {
         const callIndex = submitCalls.push(value);
@@ -101,6 +103,13 @@ describe("coordinateActiveRunPrompts", () => {
         initialRequests: [makeRequest("m-1", "initial", ["m-1"])],
         awaitIdleCompaction: () => Effect.void,
         submitPrompt,
+        handlePromptCompleted: (promptContext, result) =>
+          Effect.sync(() => {
+            completedPrompts.push({
+              kind: promptContext.kind,
+              transcript: result.transcript,
+            });
+          }),
         logger: makeLogger(),
       }),
     );
@@ -116,6 +125,16 @@ describe("coordinateActiveRunPrompts", () => {
     expect(activeRun.currentPromptContext?.requestMessages.map((message) => message.id)).toEqual([
       "m-2",
       "m-4",
+    ]);
+    expect(completedPrompts).toEqual([
+      {
+        kind: "initial",
+        transcript: "reply-1",
+      },
+      {
+        kind: "follow-up",
+        transcript: "reply-2",
+      },
     ]);
   });
 
@@ -146,6 +165,7 @@ describe("coordinateActiveRunPrompts", () => {
         initialRequests: [makeRequest("m-1", "initial")],
         awaitIdleCompaction: () => Effect.void,
         submitPrompt,
+        handlePromptCompleted: () => Effect.void,
         logger: makeLogger(),
       }),
     );
@@ -185,6 +205,7 @@ describe("coordinateActiveRunPrompts", () => {
         initialRequests: [makeRequest("m-1", "initial", ["m-1"])],
         awaitIdleCompaction: () => Effect.void,
         submitPrompt,
+        handlePromptCompleted: () => Effect.void,
         logger: makeLogger(),
       }),
     );
@@ -192,6 +213,52 @@ describe("coordinateActiveRunPrompts", () => {
     expect(submitCalls).toEqual(["initial", buildQueuedFollowUpPrompt(["later"])]);
     expect(result.messageId).toBe("msg-2");
     expect([...activeRun.attachmentMessagesById.keys()]).toEqual(["m-1", "m-2", "m-3"]);
+    expect(
+      await Effect.runPromise(Queue.takeAll(sessionQueue).pipe(Effect.map((items) => [...items]))),
+    ).toEqual([]);
+  });
+
+  test("does not start an absorbed follow-up after interrupt is requested", async () => {
+    const activeRun = await makeActiveRunState();
+    const sessionQueue = await Effect.runPromise(Queue.unbounded<RunRequest>());
+    const session = {
+      queue: sessionQueue,
+      activeRun,
+    } satisfies Parameters<typeof enqueueRunRequest>[0];
+    const submitCalls: string[] = [];
+
+    const submitPrompt = (_session: SessionHandle, value: string) =>
+      Effect.gen(function* () {
+        const callIndex = submitCalls.push(value);
+        if (callIndex === 1) {
+          const destination = yield* enqueueRunRequest(session, makeRequest("m-2", "follow-up"));
+          expect(destination).toBe("follow-up");
+        }
+        yield* resolveCurrentPrompt(activeRun, {
+          messageId: `msg-${callIndex}`,
+          transcript: `reply-${callIndex}`,
+        });
+      });
+
+    await expect(
+      Effect.runPromise(
+        coordinateActiveRunPrompts({
+          channelId: "c-1",
+          session: makeSessionHandle(),
+          activeRun,
+          initialRequests: [makeRequest("m-1", "initial")],
+          awaitIdleCompaction: () => Effect.void,
+          submitPrompt,
+          handlePromptCompleted: () =>
+            Effect.sync(() => {
+              activeRun.interruptRequested = true;
+            }),
+          logger: makeLogger(),
+        }),
+      ),
+    ).rejects.toThrow("interrupted");
+
+    expect(submitCalls).toEqual(["initial"]);
     expect(
       await Effect.runPromise(Queue.takeAll(sessionQueue).pipe(Effect.map((items) => [...items]))),
     ).toEqual([]);
@@ -231,6 +298,7 @@ describe("coordinateActiveRunPrompts", () => {
         initialRequests: [makeRequest("m-1", "initial")],
         awaitIdleCompaction: () => Effect.void,
         submitPrompt,
+        handlePromptCompleted: () => Effect.void,
         logger: makeLogger(),
       }),
     );
@@ -297,6 +365,7 @@ describe("coordinateActiveRunPrompts", () => {
         initialRequests: [makeRequest("m-1", "initial")],
         awaitIdleCompaction: () => Effect.void,
         submitPrompt,
+        handlePromptCompleted: () => Effect.void,
         logger: makeLogger(),
       }),
     );
@@ -334,6 +403,7 @@ describe("coordinateActiveRunPrompts", () => {
           initialRequests: [makeRequest("m-1", "initial")],
           awaitIdleCompaction: () => Effect.void,
           submitPrompt: () => Effect.fail(new Error("submit failed")),
+          handlePromptCompleted: () => Effect.void,
           logger: makeLogger(),
         }),
       ),

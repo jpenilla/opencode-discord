@@ -721,7 +721,14 @@ describe("ChannelSessionsLive integration", () => {
           yield* Deferred.await(firstPromptStarted);
           yield* sessions.submit(secondMessage, { prompt: "follow up" });
           yield* Deferred.succeed(allowFirstPromptToFinish, undefined).pipe(Effect.ignore);
-          yield* Queue.take(harness.replyEvents);
+          expect(yield* Queue.take(harness.replyEvents)).toBe("intermediate");
+          expect(yield* Queue.take(harness.replyEvents)).toBe(
+            `final:${buildQueuedFollowUpPrompt([
+              buildOpencodePrompt({
+                message: promptMessageContext(secondMessage, "follow up"),
+              }),
+            ])}`,
+          );
         }).pipe(Effect.provide(harness.layer)),
       ),
     );
@@ -737,13 +744,14 @@ describe("ChannelSessionsLive integration", () => {
       ]),
     ]);
     expect(await getRef(harness.replies)).toEqual([
+      "intermediate",
       `final:${buildQueuedFollowUpPrompt([
         buildOpencodePrompt({
           message: promptMessageContext(secondMessage, "follow up"),
         }),
       ])}`,
     ]);
-    expect(await getRef(harness.replyTargetIds)).toEqual(["message-2"]);
+    expect(await getRef(harness.replyTargetIds)).toEqual(["message-1", "message-2"]);
   });
 
   test("keeps the active run open after the final assistant update until session.status idle arrives", async () => {
@@ -811,6 +819,7 @@ describe("ChannelSessionsLive integration", () => {
           expect(yield* Ref.get(harness.replies)).toEqual([]);
 
           yield* Deferred.succeed(allowIdleStatus, undefined).pipe(Effect.ignore);
+          expect(yield* Queue.take(harness.replyEvents)).toBe("intermediate");
           expect(yield* Queue.take(harness.replyEvents)).toBe(
             `final:${buildQueuedFollowUpPrompt([
               buildOpencodePrompt({
@@ -832,7 +841,7 @@ describe("ChannelSessionsLive integration", () => {
         }),
       ]),
     ]);
-    expect(await getRef(harness.replyTargetIds)).toEqual(["message-2"]);
+    expect(await getRef(harness.replyTargetIds)).toEqual(["message-1", "message-2"]);
   });
 
   test("ignores replayed message updates from the previous prompt when running an absorbed follow-up", async () => {
@@ -890,13 +899,14 @@ describe("ChannelSessionsLive integration", () => {
           yield* Deferred.await(firstPromptStarted);
           yield* sessions.submit(secondMessage, { prompt: "follow up" });
           yield* Deferred.succeed(allowFirstPromptToFinish, undefined).pipe(Effect.ignore);
-          yield* Queue.take(harness.replyEvents);
+          expect(yield* Queue.take(harness.replyEvents)).toBe("stale-final");
+          expect(yield* Queue.take(harness.replyEvents)).toBe("follow-up-final");
         }).pipe(Effect.provide(harness.layer)),
       ),
     );
 
-    expect(await getRef(harness.replies)).toEqual(["follow-up-final"]);
-    expect(await getRef(harness.replyTargetIds)).toEqual(["message-2"]);
+    expect(await getRef(harness.replies)).toEqual(["stale-final", "follow-up-final"]);
+    expect(await getRef(harness.replyTargetIds)).toEqual(["message-1", "message-2"]);
   });
 
   test("surfaces compaction summaries as progress updates and still replies with the direct assistant result", async () => {
@@ -963,6 +973,7 @@ describe("ChannelSessionsLive integration", () => {
           const sessions = yield* ChannelSessions;
           yield* sessions.submit(message, { prompt: "hello" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("final reply");
+          yield* waitForNoActiveRun(sessions, "session-1");
           yield* Effect.promise(() =>
             harness.storePromptResult({
               messageId: "summary-1",

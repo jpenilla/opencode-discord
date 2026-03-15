@@ -4,6 +4,7 @@ import { Deferred, Effect, Fiber, Queue, Ref } from "effect";
 import { decideRunCompletion } from "@/sessions/command-lifecycle.ts";
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
 import type { PendingPrompt } from "@/sessions/prompt-state.ts";
+import type { AdmittedPromptContext } from "@/sessions/prompt-context.ts";
 import type { NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts";
 import {
   currentPromptReplyTargetMessage,
@@ -22,6 +23,10 @@ type RunExecutorPromptInput = {
   session: SessionHandle;
   activeRun: ActiveRun;
   initialRequests: NonEmptyRunRequestBatch;
+  handlePromptCompleted: (
+    promptContext: AdmittedPromptContext,
+    result: PromptResult,
+  ) => Effect.Effect<void, unknown>;
 };
 
 type RunExecutorRuntime = {
@@ -121,6 +126,30 @@ export const executeRunBatch =
 
       const stopTyping = Effect.promise(() => activeRun.typing.stop());
       let failed = false;
+      const handlePromptCompleted = (promptContext: AdmittedPromptContext, result: PromptResult) =>
+        Effect.gen(function* () {
+          const completion = decideRunCompletion({
+            transcript: result.transcript,
+            questionOutcome: activeRun.questionOutcome,
+            interruptRequested: activeRun.interruptRequested,
+          });
+
+          switch (completion.type) {
+            case "send-final-response":
+              yield* runtime.sendFinalResponse(promptContext.replyTargetMessage, result.transcript);
+              break;
+            case "send-question-ui-failure":
+              yield* runtime.sendQuestionUiFailure(
+                promptContext.replyTargetMessage,
+                completion.message,
+              );
+              break;
+            case "suppress-response":
+              break;
+          }
+
+          activeRun.questionOutcome = noQuestionOutcome();
+        });
 
       const runResult = yield* Effect.gen(function* () {
         const result = yield* runtime.runPrompts({
@@ -128,6 +157,7 @@ export const executeRunBatch =
           session: session.opencode,
           activeRun,
           initialRequests,
+          handlePromptCompleted,
         });
 
         if (activeRun.interruptRequested) {
@@ -138,25 +168,8 @@ export const executeRunBatch =
           });
         }
 
-        const completion = decideRunCompletion({
-          transcript: result.transcript,
-          questionOutcome: activeRun.questionOutcome,
-          interruptRequested: activeRun.interruptRequested,
-        });
-
         yield* stopTyping;
         yield* finalizeProgress();
-        const replyTargetMessage = currentPromptReplyTargetMessage(activeRun);
-        switch (completion.type) {
-          case "send-final-response":
-            yield* runtime.sendFinalResponse(replyTargetMessage, result.transcript);
-            break;
-          case "send-question-ui-failure":
-            yield* runtime.sendQuestionUiFailure(replyTargetMessage, completion.message);
-            break;
-          case "suppress-response":
-            break;
-        }
         yield* runtime.logger.info("completed run", {
           channelId: session.channelId,
           sessionId: session.opencode.sessionId,
