@@ -9,6 +9,8 @@
   signatures, or compatibility layers. Do not make config or database or disk migrations.
 - If changes result in *unexpected* test breakage or behavior changes, consult the user. When tests or documented
   behavior is *intentionally being changed* as requested, confirmation is not needed.
+- Put/use locally-persistent planning data like markdown files in .plans/<unique plan name>/<files>. Only do this when
+  the user says to use or create a plan document.
 
 # btca MCP Usage Instructions
 
