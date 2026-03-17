@@ -365,7 +365,7 @@ const makeHarness = async (options?: HarnessOptions) => {
         yield* Ref.update(compactionUpdates, (current) => [
           ...current,
           {
-            title: "‼️ Interrupting compaction",
+            title: "🛑 Interrupting compaction",
             body: "OpenCode is stopping session compaction.",
           },
         ]);
@@ -577,7 +577,7 @@ describe("createCommandHandler", () => {
     expect(await getRef(harness.typingStopCount)).toBe(0);
     expect(await getRef(harness.compactionUpdates)).toEqual([
       {
-        title: "‼️ Interrupting compaction",
+        title: "🛑 Interrupting compaction",
         body: "OpenCode is stopping session compaction.",
       },
     ]);
@@ -602,7 +602,7 @@ describe("createCommandHandler", () => {
     expect(await getRef(harness.idleInterruptRequested)).toBe(false);
     expect(await getRef(harness.compactionUpdates)).toEqual([
       {
-        title: "‼️ Interrupting compaction",
+        title: "🛑 Interrupting compaction",
         body: "OpenCode is stopping session compaction.",
       },
       {

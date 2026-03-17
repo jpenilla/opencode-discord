@@ -72,7 +72,7 @@ export const formatStatus = (part: ToolPart, terminalState?: ToolCardTerminalSta
 
 export const statusEmoji = (part: ToolPart, terminalState?: ToolCardTerminalState) => {
   if (terminalState === "interrupted") {
-    return "‼️";
+    return "🛑";
   }
 
   switch (part.state.status) {
