@@ -6,14 +6,14 @@ import {
 } from "discord.js";
 import { Effect } from "effect";
 
-import { getGuildCommand, type GuildCommandRuntimeDeps } from "@/discord/commands.ts";
+import { getGuildCommand, type GuildCommandDeps } from "@/discord/commands.ts";
 import type { ChannelSession } from "@/sessions/session.ts";
 
-export type CommandRuntime = {
+export type CommandHandler = {
   handleInteraction: (interaction: Interaction) => Effect.Effect<boolean, unknown>;
 };
 
-type CommandRuntimeDeps = GuildCommandRuntimeDeps;
+type CommandHandlerDeps = GuildCommandDeps;
 
 const attachProgressChannel = (
   interaction: ChatInputCommandInteraction,
@@ -24,7 +24,7 @@ const attachProgressChannel = (
   }
 };
 
-export const createCommandRuntime = (deps: CommandRuntimeDeps): CommandRuntime => ({
+export const createCommandHandler = (deps: CommandHandlerDeps): CommandHandler => ({
   handleInteraction: (interaction) =>
     Effect.gen(function* () {
       if (!interaction.isChatInputCommand()) {

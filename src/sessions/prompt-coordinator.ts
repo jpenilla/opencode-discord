@@ -1,4 +1,4 @@
-import { Chunk, Deferred, Effect, Queue, Ref } from "effect";
+import { Deferred, Effect, Queue, Ref } from "effect";
 
 import type { PromptResult, SessionHandle, OpencodeServiceShape } from "@/opencode/service.ts";
 import { beginPendingPrompt, failPendingPrompt } from "@/sessions/prompt-state.ts";
@@ -44,10 +44,8 @@ const drainQueuedFollowUps = (
 ): Effect.Effect<NonEmptyRunRequestBatch | null> =>
   Effect.gen(function* () {
     yield* Ref.set(activeRun.acceptFollowUps, false);
-    const followUps = yield* Queue.takeAll(activeRun.followUpQueue).pipe(
-      Effect.map(Chunk.toReadonlyArray),
-    );
-    return followUps.length > 0 ? (followUps as NonEmptyRunRequestBatch) : null;
+    const followUps = yield* Queue.clear(activeRun.followUpQueue);
+    return followUps.length > 0 ? [followUps[0]!, ...followUps.slice(1)] : null;
   });
 
 export const coordinateActiveRunPrompts = (
@@ -67,9 +65,9 @@ export const coordinateActiveRunPrompts = (
         yield* input
           .submitPrompt(input.session, promptContext.prompt)
           .pipe(
-            Effect.catchAll((error) =>
+            Effect.catch((error) =>
               failPendingPrompt(input.activeRun.promptState, error).pipe(
-                Effect.zipRight(Effect.fail(error)),
+                Effect.andThen(Effect.fail(error)),
               ),
             ),
           );

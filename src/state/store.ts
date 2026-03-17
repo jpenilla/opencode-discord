@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 
 import { Database } from "bun:sqlite";
-import { Context, Effect, Layer } from "effect";
+import { Effect, Layer, ServiceMap } from "effect";
 
 import { AppConfig } from "@/config.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
@@ -25,7 +25,7 @@ export type SessionStoreShape = {
   upsertChannelSettings: (settings: PersistedChannelSettings) => Effect.Effect<void>;
 };
 
-export class SessionStore extends Context.Tag("SessionStore")<SessionStore, SessionStoreShape>() {}
+export class SessionStore extends ServiceMap.Service<SessionStore, SessionStoreShape>()("SessionStore") {}
 
 type PersistedChannelSessionRow = {
   channel_id: string;
@@ -85,7 +85,7 @@ const fromChannelSettingsRow = (row: PersistedChannelSettingsRow): PersistedChan
     row.show_compaction_summaries === null ? undefined : row.show_compaction_summaries === 1,
 });
 
-export const SessionStoreLive = Layer.scoped(
+export const SessionStoreLayer = Layer.effect(
   SessionStore,
   Effect.gen(function* () {
     const config = yield* AppConfig;

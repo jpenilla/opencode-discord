@@ -1,6 +1,6 @@
-import { Chunk, Deferred, Effect, Queue } from "effect";
+import { Deferred, Effect, Queue } from "effect";
 import type { Message, SendableChannels } from "discord.js";
-import type { Event, ToolPart } from "@opencode-ai/sdk/v2";
+import type { ToolPart } from "@opencode-ai/sdk/v2";
 
 import { compactionCardContent } from "@/discord/compaction-card.ts";
 import { editInfoCard, upsertInfoCard } from "@/discord/info-card.ts";
@@ -11,19 +11,16 @@ import {
   formatSessionStatus,
   formatThinkingCompleted,
 } from "@/discord/progress.ts";
-import {
-  getCompactionPart,
-  getPatchPart,
-  getReasoningPart,
-  getSessionCompacted,
-  getSessionStatusUpdated,
-  getToolPartUpdated,
-} from "@/opencode/events.ts";
 import type {
   ChannelSession,
   RunFinalizationReason,
   RunProgressEvent,
 } from "@/sessions/session.ts";
+
+export const maxProgressBatchSize = 65;
+
+export const takeProgressBatch = (queue: Queue.Queue<RunProgressEvent>) =>
+  Queue.takeBetween(queue, 1, maxProgressBatchSize);
 
 const SKIPPED_TOOL_CARD_NAMES = new Set([
   "send-file",
@@ -291,61 +288,6 @@ const finalizeLiveCards = (
     state.compactionCard = null;
   });
 
-export const collectProgressEvents = (event: Event): ReadonlyArray<RunProgressEvent> => {
-  const progressEvents: RunProgressEvent[] = [];
-
-  const toolPart = getToolPartUpdated(event);
-  if (toolPart) {
-    progressEvents.push({
-      type: "tool-updated",
-      part: toolPart,
-    });
-  }
-
-  const patchPart = getPatchPart(event);
-  if (patchPart) {
-    progressEvents.push({
-      type: "patch-updated",
-      part: patchPart,
-    });
-  }
-
-  const sessionStatus = getSessionStatusUpdated(event);
-  if (sessionStatus) {
-    progressEvents.push({
-      type: "session-status",
-      status: sessionStatus.status,
-    });
-  }
-
-  const compactionPart = getCompactionPart(event);
-  if (compactionPart) {
-    progressEvents.push({
-      type: "session-compacting",
-      part: compactionPart,
-    });
-  }
-
-  const compacted = getSessionCompacted(event);
-  if (compacted) {
-    progressEvents.push({
-      type: "session-compacted",
-      compacted,
-    });
-  }
-
-  const reasoningPart = getReasoningPart(event);
-  if (reasoningPart?.time.end) {
-    progressEvents.push({
-      type: "reasoning-completed",
-      partId: reasoningPart.id,
-      text: reasoningPart.text,
-    });
-  }
-
-  return progressEvents;
-};
-
 export const runProgressWorker = (
   session: Pick<ChannelSession, "channelSettings" | "opencode">,
   message: Message,
@@ -360,9 +302,7 @@ export const runProgressWorker = (
     } as const;
 
     while (true) {
-      const first = yield* Queue.take(queue);
-      const rest = yield* Queue.takeUpTo(queue, 64);
-      const batch = [first, ...Chunk.toReadonlyArray(rest)];
+      const batch = yield* takeProgressBatch(queue);
 
       for (const event of batch) {
         if (event.type === "run-finalizing") {

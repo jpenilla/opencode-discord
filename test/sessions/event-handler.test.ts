@@ -6,10 +6,10 @@ import type {
   ToolPart,
   UserMessage,
 } from "@opencode-ai/sdk/v2";
-import { Chunk, Deferred, Effect, Option, Queue, Ref } from "effect";
+import { Deferred, Effect, Option, Queue, Ref } from "effect";
 import type { Message } from "discord.js";
 
-import { createEventRuntime } from "@/sessions/event-runtime.ts";
+import { createEventHandler } from "@/sessions/event-handler.ts";
 import { beginPendingPrompt, createPromptState } from "@/sessions/prompt-state.ts";
 import {
   noQuestionOutcome,
@@ -272,12 +272,12 @@ const makeToolEvent = (
     },
   });
 
-describe("createEventRuntime", () => {
-  test("routes question asked events to the question runtime", async () => {
+describe("createEventHandler", () => {
+  test("routes question asked events to the question coordinator", async () => {
     const { session } = await makeSession(false);
     const questionEvents = await Effect.runPromise(Ref.make<unknown[]>([]));
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(
           sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
@@ -305,11 +305,11 @@ describe("createEventRuntime", () => {
     ]);
   });
 
-  test("routes question reply and rejection events to the question runtime", async () => {
+  test("routes question reply and rejection events to the question coordinator", async () => {
     const { session } = await makeSession(false);
     const questionEvents = await Effect.runPromise(Ref.make<unknown[]>([]));
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(
           sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
@@ -347,7 +347,7 @@ describe("createEventRuntime", () => {
   test("enqueues progress events for active runs", async () => {
     const { session, activeRun, progressQueue } = await makeSession(true);
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
@@ -364,7 +364,7 @@ describe("createEventRuntime", () => {
 
     await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent()));
 
-    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([
+    expect(await Effect.runPromise(Queue.takeAll(progressQueue))).toEqual([
       {
         type: "session-status",
         status: { type: "busy" },
@@ -378,7 +378,7 @@ describe("createEventRuntime", () => {
       Ref.make<Array<{ sessionId: string; title: string; body: string }>>([]),
     );
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(
           sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
@@ -411,7 +411,7 @@ describe("createEventRuntime", () => {
     const questionEvents = await Effect.runPromise(Ref.make(0));
     const idleUpdates = await Effect.runPromise(Ref.make(0));
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: () => Effect.succeed(null),
       handleQuestionEvent: () => Ref.update(questionEvents, (count) => count + 1),
       finalizeIdleCompactionCard: () => Ref.update(idleUpdates, (count) => count + 1),
@@ -437,7 +437,7 @@ describe("createEventRuntime", () => {
     const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]));
     const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]));
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(
           sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
@@ -481,7 +481,7 @@ describe("createEventRuntime", () => {
     const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]));
     const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]));
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(
           sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
@@ -528,7 +528,7 @@ describe("createEventRuntime", () => {
     const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]));
     const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]));
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
@@ -572,7 +572,7 @@ describe("createEventRuntime", () => {
 
     expect(await getRef(readPromptCalls)).toEqual(["summary-1"]);
     expect(await getRef(sentSummaries)).toEqual(["summary text"]);
-    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual(
+    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual(
       [],
     );
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
@@ -604,7 +604,7 @@ describe("createEventRuntime", () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
@@ -635,7 +635,7 @@ describe("createEventRuntime", () => {
       ),
     );
 
-    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([
+    expect(await Effect.runPromise(Queue.takeAll(progressQueue))).toEqual([
       {
         type: "tool-updated",
         part: makeToolPart("running"),
@@ -655,7 +655,7 @@ describe("createEventRuntime", () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
@@ -693,7 +693,7 @@ describe("createEventRuntime", () => {
       ),
     );
 
-    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual(
+    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual(
       [],
     );
     expect(activeRun?.observedToolCallIds.size).toBe(0);
@@ -704,7 +704,7 @@ describe("createEventRuntime", () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
@@ -741,7 +741,7 @@ describe("createEventRuntime", () => {
       ),
     );
 
-    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual(
+    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual(
       [],
     );
     expect(activeRun?.observedToolCallIds.size).toBe(0);
@@ -749,7 +749,7 @@ describe("createEventRuntime", () => {
 
     await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
 
-    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual(
+    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual(
       [],
     );
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
@@ -759,7 +759,7 @@ describe("createEventRuntime", () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
@@ -796,7 +796,7 @@ describe("createEventRuntime", () => {
       ),
     );
 
-    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual([
+    expect(await Effect.runPromise(Queue.takeAll(progressQueue))).toEqual([
       {
         type: "tool-updated",
         part: makeToolPart("running"),
@@ -807,7 +807,7 @@ describe("createEventRuntime", () => {
 
     await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
 
-    expect(Chunk.toReadonlyArray(await Effect.runPromise(Queue.takeAll(progressQueue)))).toEqual(
+    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual(
       [],
     );
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
@@ -825,7 +825,7 @@ describe("createEventRuntime", () => {
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
     const readPromptCalls = await Effect.runPromise(Ref.make(0));
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
@@ -869,7 +869,7 @@ describe("createEventRuntime", () => {
     const { session, activeRun, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
 
-    const runtime = createEventRuntime({
+    const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,

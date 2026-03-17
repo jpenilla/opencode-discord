@@ -1,8 +1,8 @@
-import { createServer, type IncomingMessage } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdir, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { Cause, Context, Effect, Layer, Redacted } from "effect";
+import { Cause, Effect, Layer, Redacted } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
 import { ChannelSessions, type ChannelSessionsShape } from "@/sessions/registry.ts";
@@ -10,12 +10,6 @@ import { ToolBridgeResponseError, classifyToolBridgeFailure } from "@/tools/brid
 import { matchToolBridgeRoute } from "@/tools/bridge/routes.ts";
 import { sendJson } from "@/tools/bridge/transport.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
-
-export type ToolBridgeShape = {
-  socketPath: string;
-};
-
-export class ToolBridge extends Context.Tag("ToolBridge")<ToolBridge, ToolBridgeShape>() {}
 
 type ToolBridgeHttpResponse = {
   status: number;
@@ -60,7 +54,7 @@ export const handleToolBridgeRequest = (input: {
     });
     return jsonResponse(200, { ok: true, message });
   }).pipe(
-    Effect.catchAllCause((cause) => {
+    Effect.catchCause((cause) => {
       const squashedError = Cause.squash(cause);
       if (squashedError instanceof ToolBridgeResponseError) {
         return Effect.succeed(jsonResponse(squashedError.status, { error: squashedError.message }));
@@ -87,8 +81,28 @@ export const handleToolBridgeRequest = (input: {
   );
 };
 
+export const runToolBridgeHttpRequest = (input: {
+  request: IncomingMessage;
+  response: ServerResponse;
+  pathname: string;
+  config: AppConfigShape;
+  sessions: ChannelSessionsShape;
+  logger: LoggerShape;
+}) =>
+  handleToolBridgeRequest(input).pipe(
+    Effect.flatMap(({ status, body }) => Effect.sync(() => sendJson(input.response, body, status))),
+    Effect.catchCause((cause) =>
+      input.logger
+        .error("tool bridge response failed", {
+          pathname: input.pathname,
+          cause: Cause.pretty(cause),
+        })
+        .pipe(Effect.orElseSucceed(() => undefined)),
+    ),
+  );
+
 const listenServer = (server: ReturnType<typeof createServer>, socketPath: string) =>
-  Effect.async<void, Error>((resume) => {
+  Effect.callback<void, Error>((resume) => {
     const onError = (error: Error) => {
       cleanup();
       resume(Effect.fail(error));
@@ -111,7 +125,7 @@ const listenServer = (server: ReturnType<typeof createServer>, socketPath: strin
   });
 
 const closeServer = (server: ReturnType<typeof createServer>) =>
-  Effect.async<void, Error>((resume) => {
+  Effect.callback<void, Error>((resume) => {
     server.close((error) => {
       if (error) {
         resume(Effect.fail(error));
@@ -121,8 +135,7 @@ const closeServer = (server: ReturnType<typeof createServer>) =>
     });
   });
 
-export const ToolBridgeLive = Layer.scoped(
-  ToolBridge,
+export const ToolBridgeLayer = Layer.effectDiscard(
   Effect.gen(function* () {
     const config = yield* AppConfig;
     const logger = yield* Logger;
@@ -135,18 +148,15 @@ export const ToolBridgeLive = Layer.scoped(
       Effect.sync(() =>
         createServer((request, response) => {
           const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
-          void Effect.runPromise(
-            handleToolBridgeRequest({
+          Effect.runFork(
+            runToolBridgeHttpRequest({
               request,
+              response,
               pathname,
               config,
               sessions,
               logger,
-            }).pipe(
-              Effect.flatMap(({ status, body }) =>
-                Effect.sync(() => sendJson(response, body, status)),
-              ),
-            ),
+            }),
           );
         }),
       ).pipe(Effect.tap((server) => listenServer(server, config.toolBridgeSocketPath))),
@@ -165,9 +175,5 @@ export const ToolBridgeLive = Layer.scoped(
     yield* logger.info("started tool bridge", {
       socketPath: config.toolBridgeSocketPath,
     });
-
-    return {
-      socketPath: config.toolBridgeSocketPath,
-    } satisfies ToolBridgeShape;
   }),
 );

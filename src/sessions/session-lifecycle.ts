@@ -52,7 +52,7 @@ type IdleCompaction = {
   completed: Deferred.Deferred<void>;
 };
 
-type SessionLifecycleRuntime<State extends SessionLifecycleState> = {
+type SessionLifecycleDeps<State extends SessionLifecycleState> = {
   stateRef: Ref.Ref<State>;
   createOpencodeSession: (
     workdir: string,
@@ -103,33 +103,33 @@ const defaultDeleteSessionRoot = (rootDir: string) =>
   Effect.promise(() => rm(resolve(rootDir), { recursive: true, force: true })).pipe(Effect.ignore);
 
 export const createSessionLifecycle = <State extends SessionLifecycleState>(
-  runtime: SessionLifecycleRuntime<State>,
+  deps: SessionLifecycleDeps<State>,
 ) => {
   const createSessionPaths =
-    runtime.createSessionPaths ??
-    ((channelId: string) => defaultCreateSessionPaths(runtime.sessionsRootDir, channelId));
-  const deleteSessionRoot = runtime.deleteSessionRoot ?? defaultDeleteSessionRoot;
+    deps.createSessionPaths ??
+    ((channelId: string) => defaultCreateSessionPaths(deps.sessionsRootDir, channelId));
+  const deleteSessionRoot = deps.deleteSessionRoot ?? defaultDeleteSessionRoot;
   const loadChannelSettings = (channelId: string) =>
-    runtime
+    deps
       .getPersistedChannelSettings(channelId)
       .pipe(
         Effect.map((persisted) =>
           persisted
-            ? resolveChannelSettings(runtime.channelSettingsDefaults, persisted)
-            : { ...runtime.channelSettingsDefaults },
+            ? resolveChannelSettings(deps.channelSettingsDefaults, persisted)
+            : { ...deps.channelSettingsDefaults },
         ),
       );
 
   const getSession = (channelId: string) =>
-    Ref.get(runtime.stateRef).pipe(Effect.map((state) => state.sessionsByChannelId.get(channelId)));
+    Ref.get(deps.stateRef).pipe(Effect.map((state) => state.sessionsByChannelId.get(channelId)));
 
   const getActiveRunBySessionId = (sessionId: string) =>
-    Ref.get(runtime.stateRef).pipe(
+    Ref.get(deps.stateRef).pipe(
       Effect.map((state) => state.activeRunsBySessionId.get(sessionId) ?? null),
     );
 
   const getSessionContext = (sessionId: string) =>
-    Ref.get(runtime.stateRef).pipe(
+    Ref.get(deps.stateRef).pipe(
       Effect.map((state): SessionContext | null => {
         const session = state.sessionsBySessionId.get(sessionId);
         if (!session) {
@@ -143,7 +143,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     );
 
   const getIdleCompaction = (sessionId: string) =>
-    Ref.get(runtime.stateRef).pipe(
+    Ref.get(deps.stateRef).pipe(
       Effect.map((state) => state.idleCompactionsBySessionId.get(sessionId) ?? null),
     );
 
@@ -151,7 +151,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     getIdleCompaction(sessionId).pipe(Effect.map(Boolean));
 
   const getIdleCompactionCard = (sessionId: string) =>
-    Ref.get(runtime.stateRef).pipe(
+    Ref.get(deps.stateRef).pipe(
       Effect.map((state) => state.idleCompactionsBySessionId.get(sessionId)?.card ?? null),
     );
 
@@ -163,7 +163,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     );
 
   const getIdleCompactionInterruptRequested = (sessionId: string) =>
-    Ref.get(runtime.stateRef).pipe(
+    Ref.get(deps.stateRef).pipe(
       Effect.map(
         (state) => state.idleCompactionsBySessionId.get(sessionId)?.interruptRequested ?? false,
       ),
@@ -179,7 +179,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
   });
 
   const putSession = (session: ChannelSession) =>
-    Ref.update(runtime.stateRef, (current) => {
+    Ref.update(deps.stateRef, (current) => {
       const sessionsByChannelId = new Map(current.sessionsByChannelId);
       sessionsByChannelId.set(session.channelId, session);
       const sessionsBySessionId = new Map(current.sessionsBySessionId);
@@ -192,7 +192,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     });
 
   const deleteSession = (session: ChannelSession) =>
-    Ref.update(runtime.stateRef, (current) => {
+    Ref.update(deps.stateRef, (current) => {
       const sessionsByChannelId = new Map(current.sessionsByChannelId);
       sessionsByChannelId.delete(session.channelId);
       const sessionsBySessionId = new Map(current.sessionsBySessionId);
@@ -211,7 +211,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     });
 
   const setActiveRun = (session: ChannelSession, activeRun: ActiveRun | null) =>
-    Ref.update(runtime.stateRef, (current) => {
+    Ref.update(deps.stateRef, (current) => {
       session.activeRun = activeRun;
 
       const sessionsByChannelId = new Map(current.sessionsByChannelId);
@@ -235,7 +235,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     });
 
   const replaceSessionHandle = (session: ChannelSession, replacement: ChannelSession["opencode"]) =>
-    Ref.update(runtime.stateRef, (current) => {
+    Ref.update(deps.stateRef, (current) => {
       const previousSessionId = session.opencode.sessionId;
       session.opencode = replacement;
 
@@ -272,7 +272,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
       }
 
       const completed = yield* Deferred.make<void>();
-      yield* Ref.update(runtime.stateRef, (current) => {
+      yield* Ref.update(deps.stateRef, (current) => {
         const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId);
         idleCompactionsBySessionId.set(sessionId, {
           card: null,
@@ -287,7 +287,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     });
 
   const setIdleCompactionCard = (sessionId: string, message: Message | null) =>
-    Ref.update(runtime.stateRef, (current) => {
+    Ref.update(deps.stateRef, (current) => {
       const existing = current.idleCompactionsBySessionId.get(sessionId);
       if (!existing || existing.card === message) {
         return current;
@@ -307,7 +307,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
   const completeIdleCompaction = (sessionId: string) =>
     Effect.gen(function* () {
       const idleCompaction = yield* Ref.modify(
-        runtime.stateRef,
+        deps.stateRef,
         (current): readonly [IdleCompaction | null, State] => {
           const existing = current.idleCompactionsBySessionId.get(sessionId) ?? null;
           if (!existing) {
@@ -334,7 +334,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     });
 
   const setIdleCompactionInterruptRequested = (sessionId: string, interruptRequested: boolean) =>
-    Ref.update(runtime.stateRef, (current) => {
+    Ref.update(deps.stateRef, (current) => {
       const existing = current.idleCompactionsBySessionId.get(sessionId);
       if (!existing || existing.interruptRequested === interruptRequested) {
         return current;
@@ -352,7 +352,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     });
 
   const clearSessionGate = (channelId: string, gate: SessionGate) =>
-    Ref.update(runtime.stateRef, (current) => {
+    Ref.update(deps.stateRef, (current) => {
       if (current.gatesByChannelId.get(channelId) !== gate) {
         return current;
       }
@@ -372,7 +372,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     Effect.gen(function* () {
       const gate = yield* Deferred.make<ChannelSession, unknown>();
       const { gate: currentGate, owner } = yield* Ref.modify(
-        runtime.stateRef,
+        deps.stateRef,
         (current): readonly [SessionGateDecision, State] => {
           const existing = current.gatesByChannelId.get(channelId);
           if (existing) {
@@ -405,7 +405,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
   const touchSessionActivity = (session: ChannelSession, at = Date.now()) =>
     Effect.gen(function* () {
       session.lastActivityAt = at;
-      yield* runtime.touchPersistedSession(session.channelId, at);
+      yield* deps.touchPersistedSession(session.channelId, at);
     });
 
   const activateSession = (
@@ -415,9 +415,9 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     },
   ): Effect.Effect<ChannelSession, unknown> =>
     Effect.gen(function* () {
-      yield* runtime.upsertPersistedSession(toPersistedSession(session));
+      yield* deps.upsertPersistedSession(toPersistedSession(session));
       yield* putSession(session);
-      yield* runtime.startWorker(session);
+      yield* deps.startWorker(session);
       return session;
     }).pipe(
       Effect.onError(() =>
@@ -425,7 +425,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
           yield* deleteSession(session);
           yield* session.opencode.close().pipe(Effect.ignore);
           if (options?.removePersistedOnFailure) {
-            yield* runtime.deletePersistedSession(session.channelId).pipe(Effect.ignore);
+            yield* deps.deletePersistedSession(session.channelId).pipe(Effect.ignore);
           }
         }).pipe(Effect.ignore),
       ),
@@ -450,7 +450,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
         systemPromptAppend: input.systemPromptAppend,
       });
 
-      const opencodeSession = yield* runtime.createOpencodeSession(
+      const opencodeSession = yield* deps.createOpencodeSession(
         sessionCreateSpec.workdir,
         sessionCreateSpec.title,
         sessionCreateSpec.systemPromptAppend,
@@ -477,12 +477,12 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
         removePersistedOnFailure: input.removePersistedOnActivationFailure,
       });
 
-      yield* runtime.logger.info("created channel session", {
+      yield* deps.logger.info("created channel session", {
         channelId: input.channelId,
         sessionId: opencodeSession.sessionId,
         backend: opencodeSession.backend,
         workdir: input.workdir,
-        triggerPhrase: runtime.triggerPhrase,
+        triggerPhrase: deps.triggerPhrase,
         reason: input.logReason,
       });
 
@@ -499,7 +499,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     Effect.gen(function* () {
       const systemPromptAppend = buildSessionSystemAppend({
         message,
-        additionalInstructions: runtime.sessionInstructions,
+        additionalInstructions: deps.sessionInstructions,
       });
       const { rootDir, workdir } = yield* createSessionPaths(message.channelId);
       const channelSettings = yield* loadChannelSettings(message.channelId);
@@ -527,7 +527,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
       const workdir = sessionWorkdirFromRoot(persisted.rootDir);
       const channelSettings = yield* loadChannelSettings(channelId);
 
-      const opencodeSession = yield* runtime.attachOpencodeSession(
+      const opencodeSession = yield* deps.attachOpencodeSession(
         workdir,
         persisted.opencodeSessionId,
         persisted.systemPromptAppend,
@@ -550,7 +550,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
       };
 
       yield* activateSession(session);
-      yield* runtime.logger.info("attached channel session", {
+      yield* deps.logger.info("attached channel session", {
         channelId,
         sessionId: opencodeSession.sessionId,
         backend: opencodeSession.backend,
@@ -561,24 +561,24 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
 
   const restoreOrCreateSession = (message: Message): Effect.Effect<ChannelSession, unknown> =>
     Effect.gen(function* () {
-      const persisted = yield* runtime.getPersistedSession(message.channelId);
+      const persisted = yield* deps.getPersistedSession(message.channelId);
       if (!persisted) {
         return yield* createSession(message);
       }
 
       const now = Date.now();
       const attached = yield* attachPersistedSession(message.channelId, persisted, now).pipe(
-        Effect.either,
+        Effect.result,
       );
-      if (attached._tag === "Right") {
-        return attached.right;
+      if (attached._tag === "Success") {
+        return attached.success;
       }
 
-      yield* runtime.logger.warn("failed to attach persisted channel session", {
+      yield* deps.logger.warn("failed to attach persisted channel session", {
         channelId: message.channelId,
         sessionId: persisted.opencodeSessionId,
         rootDir: persisted.rootDir,
-        error: attached.left instanceof Error ? attached.left.message : String(attached.left),
+        error: attached.failure instanceof Error ? attached.failure.message : String(attached.failure),
       });
 
       return yield* createSessionAt({
@@ -624,7 +624,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
         return existing;
       }
 
-      const persisted = yield* runtime.getPersistedSession(channelId);
+      const persisted = yield* deps.getPersistedSession(channelId);
       if (!persisted) {
         return null;
       }
@@ -665,15 +665,15 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
           workdir: current.workdir,
           systemPromptAppend: current.systemPromptAppend,
         });
-        const replacement = yield* runtime.createOpencodeSession(
+        const replacement = yield* deps.createOpencodeSession(
           sessionCreateSpec.workdir,
           sessionCreateSpec.title,
           sessionCreateSpec.systemPromptAppend,
         );
         yield* replaceSessionHandle(current, replacement);
-        yield* runtime.upsertPersistedSession(toPersistedSession(current));
+        yield* deps.upsertPersistedSession(toPersistedSession(current));
         yield* previous.close().pipe(Effect.ignore);
-        yield* runtime.logger.warn("recovered channel session", {
+        yield* deps.logger.warn("recovered channel session", {
           channelId: current.channelId,
           previousSessionId: previous.sessionId,
           sessionId: replacement.sessionId,
@@ -696,7 +696,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
         return session;
       }
 
-      const healthy = yield* runtime.isSessionHealthy(session.opencode);
+      const healthy = yield* deps.isSessionHealthy(session.opencode);
       if (healthy) {
         return session;
       }
@@ -705,21 +705,21 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     });
 
   const closeExpiredSessions = (now = Date.now()) =>
-    Ref.get(runtime.stateRef).pipe(
+    Ref.get(deps.stateRef).pipe(
       Effect.flatMap((state) =>
         Effect.forEach(
           state.sessionsByChannelId.values(),
           (session) =>
             session.activeRun ||
             state.idleCompactionsBySessionId.has(session.opencode.sessionId) ||
-            !runtime.idleTimeoutMs ||
-            now - session.lastActivityAt < runtime.idleTimeoutMs
+            !deps.idleTimeoutMs ||
+            now - session.lastActivityAt < deps.idleTimeoutMs
               ? Effect.void
               : Effect.gen(function* () {
                   yield* deleteSession(session);
                   yield* Queue.shutdown(session.queue).pipe(Effect.ignore);
                   yield* session.opencode.close().pipe(Effect.ignore);
-                  yield* runtime.logger.info("closed idle channel session", {
+                  yield* deps.logger.info("closed idle channel session", {
                     channelId: session.channelId,
                     sessionId: session.opencode.sessionId,
                     idleForMs: now - session.lastActivityAt,
@@ -733,29 +733,29 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
 
   const invalidateSession = (channelId: string, reason: string) =>
     Effect.gen(function* () {
-      const live = yield* getSession(channelId);
-      const persisted = yield* runtime.getPersistedSession(channelId);
+      const loadedSession = yield* getSession(channelId);
+      const persisted = yield* deps.getPersistedSession(channelId);
 
-      if (live) {
-        yield* deleteSession(live);
-        yield* Queue.shutdown(live.queue).pipe(Effect.ignore);
-        yield* live.opencode.close().pipe(Effect.ignore);
+      if (loadedSession) {
+        yield* deleteSession(loadedSession);
+        yield* Queue.shutdown(loadedSession.queue).pipe(Effect.ignore);
+        yield* loadedSession.opencode.close().pipe(Effect.ignore);
       }
 
-      yield* runtime.deletePersistedSession(channelId).pipe(Effect.ignore);
+      yield* deps.deletePersistedSession(channelId).pipe(Effect.ignore);
 
-      if (live) {
-        yield* runtime.logger.info("invalidated live channel session", {
+      if (loadedSession) {
+        yield* deps.logger.info("invalidated loaded channel session", {
           channelId,
-          sessionId: live.opencode.sessionId,
-          workdir: live.workdir,
+          sessionId: loadedSession.opencode.sessionId,
+          workdir: loadedSession.workdir,
           reason,
         });
         return;
       }
 
       if (persisted) {
-        yield* runtime.logger.info("invalidated persisted channel session", {
+        yield* deps.logger.info("invalidated persisted channel session", {
           channelId,
           sessionId: persisted.opencodeSessionId,
           workdir: sessionWorkdirFromRoot(persisted.rootDir),
@@ -765,14 +765,14 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     });
 
   const shutdownSessions = () =>
-    Ref.get(runtime.stateRef).pipe(
+    Ref.get(deps.stateRef).pipe(
       Effect.flatMap((state) =>
         Effect.forEach(
           state.sessionsByChannelId.values(),
           (session) =>
             deleteSession(session).pipe(
-              Effect.zipRight(Queue.shutdown(session.queue).pipe(Effect.ignore)),
-              Effect.zipRight(session.opencode.close().pipe(Effect.ignore)),
+              Effect.andThen(Queue.shutdown(session.queue).pipe(Effect.ignore)),
+              Effect.andThen(session.opencode.close().pipe(Effect.ignore)),
             ),
           { concurrency: "unbounded", discard: true },
         ),

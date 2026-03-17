@@ -55,7 +55,7 @@ const resolveCurrentPrompt = (
 
       return Deferred.succeed(prompt.deferred, result).pipe(
         Effect.ignore,
-        Effect.zipRight(Ref.set(activeRun.promptState, null)),
+        Effect.andThen(Ref.set(activeRun.promptState, null)),
       );
     }),
   );
@@ -214,7 +214,7 @@ describe("coordinateActiveRunPrompts", () => {
     expect(result.messageId).toBe("msg-2");
     expect([...activeRun.attachmentMessagesById.keys()]).toEqual(["m-1", "m-2", "m-3"]);
     expect(
-      await Effect.runPromise(Queue.takeAll(sessionQueue).pipe(Effect.map((items) => [...items]))),
+      await Effect.runPromise(Queue.clear(sessionQueue).pipe(Effect.map((items) => [...items]))),
     ).toEqual([]);
   });
 
@@ -260,7 +260,7 @@ describe("coordinateActiveRunPrompts", () => {
 
     expect(submitCalls).toEqual(["initial"]);
     expect(
-      await Effect.runPromise(Queue.takeAll(sessionQueue).pipe(Effect.map((items) => [...items]))),
+      await Effect.runPromise(Queue.clear(sessionQueue).pipe(Effect.map((items) => [...items]))),
     ).toEqual([]);
   });
 
@@ -387,7 +387,7 @@ describe("coordinateActiveRunPrompts", () => {
     expect([...activeRun.previousPromptMessageIds]).toEqual(["user-2", "assistant-2"]);
     expect([...activeRun.currentPromptMessageIds]).toEqual(["user-3", "assistant-3"]);
     expect(
-      await Effect.runPromise(Queue.takeAll(sessionQueue).pipe(Effect.map((items) => [...items]))),
+      await Effect.runPromise(Queue.clear(sessionQueue).pipe(Effect.map((items) => [...items]))),
     ).toEqual([]);
   });
 

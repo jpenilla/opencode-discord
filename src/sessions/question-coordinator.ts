@@ -43,7 +43,7 @@ type PendingQuestionBatch = {
   resolvedAnswers?: Array<QuestionAnswer>;
 };
 
-export type QuestionRuntimeEvent =
+export type QuestionCoordinatorEvent =
   | {
       type: "asked";
       sessionId: string;
@@ -61,15 +61,15 @@ export type QuestionRuntimeEvent =
       requestId: string;
     };
 
-export type QuestionRuntime = {
-  handleEvent: (event: QuestionRuntimeEvent) => Effect.Effect<void, unknown>;
+export type QuestionCoordinator = {
+  handleEvent: (event: QuestionCoordinatorEvent) => Effect.Effect<void, unknown>;
   handleInteraction: (interaction: Interaction) => Effect.Effect<boolean, unknown>;
   hasPendingQuestionsForSession: (sessionId: string) => Effect.Effect<boolean>;
   terminateForSession: (sessionId: string) => Effect.Effect<void, unknown>;
   shutdown: () => Effect.Effect<void, unknown>;
 };
 
-type QuestionRuntimeDeps = {
+type QuestionCoordinatorDeps = {
   getSessionContext: (sessionId: string) => Effect.Effect<SessionContext | null>;
   replyToQuestion: (
     session: ChannelSession["opencode"],
@@ -95,7 +95,7 @@ const questionBatchView = (batch: PendingQuestionBatch) => ({
   resolvedAnswers: batch.resolvedAnswers,
 });
 
-export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<QuestionRuntime> =>
+export const createQuestionCoordinator = (deps: QuestionCoordinatorDeps): Effect.Effect<QuestionCoordinator> =>
   Effect.gen(function* () {
     const batchesRef = yield* Ref.make(new Map<string, PendingQuestionBatch>());
     const detachedFinalizedBatchesRef = yield* Ref.make(new Map<string, PendingQuestionBatch>());
@@ -369,15 +369,15 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
             }),
           catch: (error) => error,
         }).pipe(
-          Effect.timeoutFail({
+          Effect.timeoutOrElse({
             duration: "5 seconds",
-            onTimeout: () => new Error("Timed out sending question batch to Discord"),
+            onTimeout: () => Effect.fail(new Error("Timed out sending question batch to Discord")),
           }),
-          Effect.either,
+          Effect.result,
         );
 
-        if (questionMessage._tag === "Right") {
-          const attached = yield* attachQuestionMessage(request.id, questionMessage.right);
+        if (questionMessage._tag === "Success") {
+          const attached = yield* attachQuestionMessage(request.id, questionMessage.success);
           if (attached.type === "attached") {
             yield* syncTypingForSession(session.opencode.sessionId);
             return;
@@ -385,7 +385,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
 
           if (attached.type === "finalized") {
             yield* editQuestionMessage(attached.batch).pipe(
-              Effect.catchAll((error) =>
+              Effect.catch((error) =>
                 deps.logger.warn("failed to edit finalized question batch after late post", {
                   channelId: session.channelId,
                   sessionId: session.opencode.sessionId,
@@ -418,39 +418,39 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
           return;
         }
 
-        const questionUiFailure = deps.formatError(questionMessage.left);
+        const questionUiFailure = deps.formatError(questionMessage.failure);
         activeRun.questionOutcome = questionUiFailureOutcome(questionUiFailure);
 
         yield* deps.logger.error("failed to post question batch", {
           channelId: session.channelId,
           sessionId: session.opencode.sessionId,
           requestId: request.id,
-          error: deps.formatError(questionMessage.left),
+          error: deps.formatError(questionMessage.failure),
         });
 
         const rejectResult = yield* deps
           .rejectQuestion(session.opencode, request.id)
-          .pipe(Effect.either);
-        if (rejectResult._tag === "Left") {
+          .pipe(Effect.result);
+        if (rejectResult._tag === "Failure") {
           yield* deps.logger.error("failed to reject question batch after UI failure", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
             requestId: request.id,
-            error: deps.formatError(rejectResult.left),
+            error: deps.formatError(rejectResult.failure),
           });
 
           yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore);
           const failureReply = yield* deps
             .sendQuestionUiFailure(replyTargetMessage, questionUiFailure)
-            .pipe(Effect.either);
-          if (failureReply._tag === "Right") {
+            .pipe(Effect.result);
+          if (failureReply._tag === "Success") {
             activeRun.questionOutcome = questionUiFailureOutcome(questionUiFailure, true);
           } else {
             yield* deps.logger.error("failed to send question UI failure message", {
               channelId: session.channelId,
               sessionId: session.opencode.sessionId,
               requestId: request.id,
-              error: deps.formatError(failureReply.left),
+              error: deps.formatError(failureReply.failure),
             });
           }
           return;
@@ -473,7 +473,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
         }
 
         yield* editQuestionMessage(batch).pipe(
-          Effect.catchAll((error) =>
+          Effect.catch((error) =>
             deps.logger.warn("failed to edit finalized question batch", {
               channelId: batch.session.channelId,
               sessionId: batch.session.opencode.sessionId,
@@ -496,7 +496,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
       );
     };
 
-    const questionSubmissionRuntime = {
+    const questionSubmissionDeps = {
       tryPersistBatch: tryPersistQuestionBatch,
       restoreBatch: updateQuestionBatch,
       updateInteraction,
@@ -789,7 +789,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
               }
 
               yield* editQuestionMessage(updated.batch).pipe(
-                Effect.catchAll((error) =>
+                Effect.catch((error) =>
                   deps.logger.warn("failed to edit question batch after modal submit", {
                     channelId: updated.batch.session.channelId,
                     sessionId: updated.batch.session.opencode.sessionId,
@@ -806,7 +806,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
               return false;
             }
 
-            return yield* submitQuestionBatch(questionSubmissionRuntime)({
+            return yield* submitQuestionBatch(questionSubmissionDeps)({
               interaction,
               requestId: action.requestID,
               expectedVersion: action.version,
@@ -818,7 +818,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
               return false;
             }
 
-            return yield* rejectQuestionBatch(questionSubmissionRuntime)({
+            return yield* rejectQuestionBatch(questionSubmissionDeps)({
               interaction,
               requestId: action.requestID,
               expectedVersion: action.version,
@@ -873,7 +873,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
           (batch) =>
             batch.message
               ? editQuestionMessage(batch).pipe(
-                  Effect.catchAll((error) =>
+                  Effect.catch((error) =>
                     deps.logger.warn("failed to terminate question batch message", {
                       channelId: batch.session.channelId,
                       sessionId: batch.session.opencode.sessionId,
@@ -890,7 +890,7 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
           sessionIds,
           (sessionId) =>
             syncTypingForSession(sessionId).pipe(
-              Effect.catchAll((error) =>
+              Effect.catch((error) =>
                 deps.logger.warn("failed to sync typing after question termination", {
                   sessionId,
                   error: deps.formatError(error),
@@ -931,5 +931,5 @@ export const createQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<
       hasPendingQuestionsForSession,
       terminateForSession,
       shutdown,
-    } satisfies QuestionRuntime;
+    } satisfies QuestionCoordinator;
   });

@@ -31,5 +31,5 @@ export const resolveReactionTargetMessage = (
   return Effect.tryPromise({
     try: () => channel.messages.fetch(messageId),
     catch: () => null,
-  }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+  }).pipe(Effect.catch(() => Effect.succeed(null)));
 };

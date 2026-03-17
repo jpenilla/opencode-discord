@@ -121,13 +121,13 @@ const makeRuntime = async (options?: {
       ) =>
         options?.submitResult === "failure"
           ? record(`submit:${requestId}:${JSON.stringify(answers)}`).pipe(
-              Effect.zipRight(Effect.fail(new Error("submit failed"))),
+              Effect.andThen(Effect.fail(new Error("submit failed"))),
             )
           : record(`submit:${requestId}:${JSON.stringify(answers)}`),
       rejectInOpencode: (_session: TestSessionHandle, requestId: string) =>
         options?.rejectResult === "failure"
           ? record(`reject:${requestId}`).pipe(
-              Effect.zipRight(Effect.fail(new Error("reject failed"))),
+              Effect.andThen(Effect.fail(new Error("reject failed"))),
             )
           : record(`reject:${requestId}`),
       formatError: (error: unknown) => (error instanceof Error ? error.message : String(error)),

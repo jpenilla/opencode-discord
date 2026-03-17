@@ -1,4 +1,4 @@
-import { Context, Effect, Layer } from "effect";
+import { Effect, Layer, ServiceMap } from "effect";
 
 export type LoggerShape = {
   info: (message: string, fields?: Record<string, unknown>) => Effect.Effect<void>;
@@ -6,7 +6,7 @@ export type LoggerShape = {
   error: (message: string, fields?: Record<string, unknown>) => Effect.Effect<void>;
 };
 
-export class Logger extends Context.Tag("Logger")<Logger, LoggerShape>() {}
+export class Logger extends ServiceMap.Service<Logger, LoggerShape>()("Logger") {}
 
 const write = (level: string, message: string, fields?: Record<string, unknown>) =>
   Effect.sync(() => {
@@ -19,7 +19,7 @@ const write = (level: string, message: string, fields?: Record<string, unknown>)
     console.log(JSON.stringify(payload));
   });
 
-export const LoggerLive = Layer.succeed(Logger, {
+export const LoggerLayer = Layer.succeed(Logger, {
   info: (message, fields) => write("info", message, fields),
   warn: (message, fields) => write("warn", message, fields),
   error: (message, fields) => write("error", message, fields),

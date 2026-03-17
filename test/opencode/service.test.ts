@@ -1,8 +1,38 @@
 import { describe, expect, test } from "bun:test";
 import type { GlobalEvent, PermissionRequest } from "@opencode-ai/sdk/v2";
+import { Deferred, Effect, Fiber, Queue, Redacted } from "effect";
 
+import type { AppConfigShape } from "@/config.ts";
 import { summarizeOpencodeEventForLog, summarizePermissionForLog } from "@/opencode/log-summary.ts";
+import { makeOpencodeService, type SessionHandle } from "@/opencode/service.ts";
+import type { LoggerShape } from "@/util/logging.ts";
 import { unsafeStub } from "../support/stub.ts";
+
+const makeConfig = (): AppConfigShape => ({
+  discordToken: Redacted.make("discord-token"),
+  triggerPhrase: "hey opencode",
+  ignoreOtherBotTriggers: false,
+  sessionInstructions: "",
+  stateDir: "/tmp/opencode-discord-test",
+  defaultProviderId: undefined,
+  defaultModelId: undefined,
+  showThinkingByDefault: true,
+  showCompactionSummariesByDefault: true,
+  sessionIdleTimeoutMs: 30 * 60 * 1_000,
+  toolBridgeSocketPath: "/tmp/bridge.sock",
+  toolBridgeToken: Redacted.make("bridge-token"),
+  sandboxBackend: "unsafe-dev",
+  opencodeBin: "opencode",
+  bwrapBin: "bwrap",
+  sandboxReadOnlyPaths: [],
+  sandboxEnvPassthrough: [],
+});
+
+const logger: LoggerShape = {
+  info: () => Effect.void,
+  warn: () => Effect.void,
+  error: () => Effect.void,
+};
 
 describe("opencode log summaries", () => {
   test("logs a compact summary for tool events without raw tool payloads", () => {
@@ -125,5 +155,438 @@ describe("opencode log summaries", () => {
     });
     expect(JSON.stringify(summary)).not.toContain("very large permission payload body");
     expect(JSON.stringify(summary)).not.toContain("https://example.com/some/really/long/url");
+  });
+});
+
+describe("makeOpencodeService", () => {
+  test("closes bootstrapped resources when createSession is interrupted before the SDK responds", async () => {
+    let abortSeen = false;
+    let serverClosed = false;
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const eventQueue = yield* Queue.unbounded<GlobalEvent>();
+          const createStarted = yield* Deferred.make<void>();
+
+          const service = yield* makeOpencodeService({
+            config: makeConfig(),
+            eventQueue,
+            logger,
+            runtime: {
+              createClient: () =>
+                unsafeStub<SessionHandle["client"]>({
+                  global: {
+                    event: async ({ signal }: { signal: AbortSignal }) => {
+                      signal.addEventListener(
+                        "abort",
+                        () => {
+                          abortSeen = true;
+                        },
+                        { once: true },
+                      );
+
+                      return {
+                        stream: {
+                          async *[Symbol.asyncIterator]() {
+                            yield* [];
+                            await new Promise(() => {});
+                          },
+                        },
+                      };
+                    },
+                    health: async () => ({
+                      data: {
+                        healthy: true,
+                      },
+                    }),
+                  },
+                  session: {
+                    create: async () => {
+                      await Effect.runPromise(
+                        Deferred.succeed(createStarted, undefined).pipe(Effect.ignore),
+                      );
+                      return await new Promise(() => {});
+                    },
+                    get: async () => ({
+                      data: {
+                        id: "session-1",
+                      },
+                    }),
+                    promptAsync: async () => ({ data: undefined }),
+                    message: async () => ({
+                      data: {
+                        parts: [],
+                      },
+                    }),
+                    messages: async () => ({ data: [] }),
+                    abort: async () => ({ data: true }),
+                    summarize: async () => ({ data: true }),
+                  },
+                  question: {
+                    reply: async () => ({ data: true }),
+                    reject: async () => ({ data: true }),
+                  },
+                  permission: {
+                    reply: async () => ({ data: true }),
+                  },
+                }),
+              launchServer: async () => ({
+                url: "http://opencode.invalid",
+                backend: "unsafe-dev" as const,
+                close: () => {
+                  serverClosed = true;
+                },
+              }),
+              probeExecutables: () => ({
+                backend: "unsafe-dev",
+                opencodeBin: "opencode",
+                bwrapBin: "bwrap",
+              }),
+              stageConfigDir: async () => ({
+                configDir: "/tmp/opencode-config",
+                cleanup: async () => {},
+              }),
+            },
+          });
+
+          const fiber = yield* service
+            .createSession("/tmp/workdir", "Session", undefined)
+            .pipe(Effect.forkChild({ startImmediately: true }));
+
+          yield* Deferred.await(createStarted);
+          yield* Fiber.interrupt(fiber);
+
+          expect(abortSeen).toBe(true);
+          expect(serverClosed).toBe(true);
+        }),
+      ),
+    );
+  });
+
+  test("keeps the session event stream alive after createSession returns and closes it via the handle", async () => {
+    const event = unsafeStub<GlobalEvent>({
+      payload: {
+        type: "session.status",
+        properties: {
+          sessionID: "session-1",
+          status: {
+            type: "idle",
+          },
+        },
+      },
+    });
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const eventQueue = yield* Queue.unbounded<GlobalEvent>();
+          const streamStarted = yield* Deferred.make<void>();
+          const firstEvent = yield* Deferred.make<IteratorResult<GlobalEvent, undefined>>();
+          let firstPull = true;
+          let pendingNext:
+            | ((result: IteratorResult<GlobalEvent, undefined>) => void)
+            | null = null;
+          let abortSeen = false;
+
+          const service = yield* makeOpencodeService({
+            config: makeConfig(),
+            eventQueue,
+            logger,
+            runtime: {
+              createClient: () =>
+                unsafeStub<SessionHandle["client"]>({
+                  global: {
+                    event: async ({ signal }: { signal: AbortSignal }) => {
+                      signal.addEventListener(
+                        "abort",
+                        () => {
+                          abortSeen = true;
+                          pendingNext?.({ done: true, value: undefined });
+                        },
+                        { once: true },
+                      );
+
+                      return {
+                        stream: {
+                          [Symbol.asyncIterator]: () => ({
+                            next: async () => {
+                              await Effect.runPromise(
+                                Deferred.succeed(streamStarted, undefined).pipe(Effect.ignore),
+                              );
+                              if (firstPull) {
+                                firstPull = false;
+                                return await Effect.runPromise(Deferred.await(firstEvent));
+                              }
+                              return await new Promise<IteratorResult<GlobalEvent, undefined>>(
+                                (resolve) => {
+                                  pendingNext = resolve;
+                                },
+                              );
+                            },
+                          }),
+                        },
+                      };
+                    },
+                    health: async () => ({
+                      data: {
+                        healthy: true,
+                      },
+                    }),
+                  },
+                  session: {
+                    create: async () => ({
+                      data: {
+                        id: "session-1",
+                      },
+                    }),
+                    get: async () => ({
+                      data: {
+                        id: "session-1",
+                      },
+                    }),
+                    promptAsync: async () => ({ data: undefined }),
+                    message: async () => ({
+                      data: {
+                        parts: [],
+                      },
+                    }),
+                    messages: async () => ({ data: [] }),
+                    abort: async () => ({ data: true }),
+                    summarize: async () => ({ data: true }),
+                  },
+                  question: {
+                    reply: async () => ({ data: true }),
+                    reject: async () => ({ data: true }),
+                  },
+                  permission: {
+                    reply: async () => ({ data: true }),
+                  },
+                }),
+              launchServer: async () => ({
+                url: "http://opencode.invalid",
+                backend: "unsafe-dev" as const,
+                close: () => {},
+              }),
+              probeExecutables: () => ({
+                backend: "unsafe-dev",
+                opencodeBin: "opencode",
+                bwrapBin: "bwrap",
+              }),
+              stageConfigDir: async () => ({
+                configDir: "/tmp/opencode-config",
+                cleanup: async () => {},
+              }),
+            },
+          });
+
+          const session = yield* service.createSession("/tmp/workdir", "Session", undefined);
+          yield* Deferred.await(streamStarted);
+          yield* Deferred.succeed(firstEvent, { done: false, value: event }).pipe(Effect.ignore);
+
+          expect(yield* Queue.take(eventQueue)).toEqual(event);
+
+          yield* session.close();
+          expect(abortSeen).toBe(true);
+        }),
+      ),
+    );
+  });
+
+  test("does not warn when closing a session aborts a rejecting event stream", async () => {
+    const warnings: Array<{ message: string; fields?: Record<string, unknown> }> = [];
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const eventQueue = yield* Queue.unbounded<GlobalEvent>();
+          const streamStarted = yield* Deferred.make<void>();
+          let rejectNext: ((error: unknown) => void) | null = null;
+
+          const service = yield* makeOpencodeService({
+            config: makeConfig(),
+            eventQueue,
+            logger: {
+              info: () => Effect.void,
+              warn: (message, fields) =>
+                Effect.sync(() => {
+                  warnings.push({ message, fields });
+                }),
+              error: () => Effect.void,
+            },
+            runtime: {
+              createClient: () =>
+                unsafeStub<SessionHandle["client"]>({
+                  global: {
+                    event: async ({ signal }: { signal: AbortSignal }) => {
+                      signal.addEventListener(
+                        "abort",
+                        () => {
+                          rejectNext?.(new DOMException("Aborted", "AbortError"));
+                        },
+                        { once: true },
+                      );
+
+                      return {
+                        stream: {
+                          [Symbol.asyncIterator]: () => ({
+                            next: async () => {
+                              await Effect.runPromise(
+                                Deferred.succeed(streamStarted, undefined).pipe(Effect.ignore),
+                              );
+                              return await new Promise<IteratorResult<GlobalEvent, undefined>>(
+                                (_resolve, reject) => {
+                                  rejectNext = reject;
+                                },
+                              );
+                            },
+                          }),
+                        },
+                      };
+                    },
+                    health: async () => ({
+                      data: {
+                        healthy: true,
+                      },
+                    }),
+                  },
+                  session: {
+                    create: async () => ({
+                      data: {
+                        id: "session-1",
+                      },
+                    }),
+                    get: async () => ({
+                      data: {
+                        id: "session-1",
+                      },
+                    }),
+                    promptAsync: async () => ({ data: undefined }),
+                    message: async () => ({
+                      data: {
+                        parts: [],
+                      },
+                    }),
+                    messages: async () => ({ data: [] }),
+                    abort: async () => ({ data: true }),
+                    summarize: async () => ({ data: true }),
+                  },
+                  question: {
+                    reply: async () => ({ data: true }),
+                    reject: async () => ({ data: true }),
+                  },
+                  permission: {
+                    reply: async () => ({ data: true }),
+                  },
+                }),
+              launchServer: async () => ({
+                url: "http://opencode.invalid",
+                backend: "unsafe-dev" as const,
+                close: () => {},
+              }),
+              probeExecutables: () => ({
+                backend: "unsafe-dev",
+                opencodeBin: "opencode",
+                bwrapBin: "bwrap",
+              }),
+              stageConfigDir: async () => ({
+                configDir: "/tmp/opencode-config",
+                cleanup: async () => {},
+              }),
+            },
+          });
+
+          const session = yield* service.createSession("/tmp/workdir", "Session", undefined);
+          yield* Deferred.await(streamStarted);
+          yield* session.close();
+        }),
+      ),
+    );
+
+    expect(warnings.filter((entry) => entry.message === "opencode event stream closed unexpectedly")).toEqual([]);
+  });
+
+  test("surfaces SDK result errors through the Effect failure channel", async () => {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const service = yield* makeOpencodeService({
+            config: makeConfig(),
+            eventQueue: yield* Queue.unbounded<GlobalEvent>(),
+            logger,
+            runtime: {
+              createClient: () =>
+                unsafeStub<SessionHandle["client"]>({
+                  global: {
+                    event: async () => ({
+                      stream: {
+                        async *[Symbol.asyncIterator]() {},
+                      },
+                    }),
+                    health: async () => ({
+                      data: {
+                        healthy: true,
+                      },
+                    }),
+                  },
+                  session: {
+                    create: async () => ({
+                      data: {
+                        id: "session-1",
+                      },
+                    }),
+                    get: async () => ({
+                      data: {
+                        id: "session-1",
+                      },
+                    }),
+                    promptAsync: async () => ({ data: undefined }),
+                    message: async () => ({
+                      data: {
+                        parts: [],
+                      },
+                    }),
+                    messages: async () => ({ data: [] }),
+                    abort: async () => ({
+                      data: false,
+                      error: "already stopped",
+                    }),
+                    summarize: async () => ({ data: true }),
+                  },
+                  question: {
+                    reply: async () => ({ data: true }),
+                    reject: async () => ({ data: true }),
+                  },
+                  permission: {
+                    reply: async () => ({ data: true }),
+                  },
+                }),
+              launchServer: async () => ({
+                url: "http://opencode.invalid",
+                backend: "unsafe-dev" as const,
+                close: () => {},
+              }),
+              probeExecutables: () => ({
+                backend: "unsafe-dev",
+                opencodeBin: "opencode",
+                bwrapBin: "bwrap",
+              }),
+              stageConfigDir: async () => ({
+                configDir: "/tmp/opencode-config",
+                cleanup: async () => {},
+              }),
+            },
+          });
+          const session = yield* service.createSession("/tmp/workdir", "Session", undefined);
+
+          const result = yield* service.interruptSession(session).pipe(Effect.result);
+          expect(result).toMatchObject({
+            _tag: "Failure",
+          });
+
+          yield* session.close();
+        }),
+      ),
+    );
   });
 });

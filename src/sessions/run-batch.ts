@@ -1,10 +1,19 @@
 import type { Message } from "discord.js";
+import { Effect, Queue } from "effect";
 
 import { buildBatchedOpencodePrompt, buildQueuedFollowUpPrompt } from "@/discord/messages.ts";
 import type { AdmittedPromptContext, ActiveRunBatchKind } from "@/sessions/prompt-context.ts";
 import type { RunRequest } from "@/sessions/session.ts";
 
 export type NonEmptyRunRequestBatch = readonly [RunRequest, ...RunRequest[]];
+export const maxQueuedRunBatchSize = 65;
+
+export const takeQueuedRunBatch = (
+  queue: Queue.Queue<RunRequest>,
+): Effect.Effect<NonEmptyRunRequestBatch> =>
+  Queue.takeBetween(queue, 1, maxQueuedRunBatchSize).pipe(
+    Effect.map((requests) => [requests[0]!, ...requests.slice(1)] as NonEmptyRunRequestBatch),
+  );
 
 export const mergeAttachmentMessages = (
   target: Map<string, Message>,

@@ -7,7 +7,7 @@ import {
   MessageFlags,
   type Guild,
 } from "discord.js";
-import { Context, Effect, Layer, Redacted, Runtime } from "effect";
+import { Effect, Layer, Redacted } from "effect";
 
 import { AppConfig } from "@/config.ts";
 import { syncGuildCommands } from "@/discord/commands.ts";
@@ -16,12 +16,6 @@ import { detectInvocation } from "@/discord/triggers.ts";
 import { ChannelSessions } from "@/sessions/registry.ts";
 import { Logger } from "@/util/logging.ts";
 
-export type DiscordBotShape = {
-  client: Client;
-};
-
-export class DiscordBot extends Context.Tag("DiscordBot")<DiscordBot, DiscordBotShape>() {}
-
 const formatError = (error: unknown) => {
   if (error instanceof Error) {
     return error.message;
@@ -29,13 +23,11 @@ const formatError = (error: unknown) => {
   return String(error);
 };
 
-export const DiscordBotLive = Layer.scoped(
-  DiscordBot,
+export const DiscordBotLayer = Layer.effectDiscard(
   Effect.gen(function* () {
     const config = yield* AppConfig;
     const logger = yield* Logger;
     const sessions = yield* ChannelSessions;
-    const runtime = yield* Effect.runtime<ChannelSessions | Logger>();
 
     const client = new Client({
       intents: [
@@ -49,95 +41,98 @@ export const DiscordBotLive = Layer.scoped(
       },
     });
 
-    const syncCommandsForGuild = async (guild: Guild) => {
-      try {
-        await syncGuildCommands(guild);
-        await Effect.runPromise(
-          logger.info("synced guild slash commands", {
-            guildId: guild.id,
-            guildName: guild.name,
-          }),
-        );
-      } catch (error) {
-        await Effect.runPromise(
-          logger.error("failed to sync guild slash commands", {
-            guildId: guild.id,
-            guildName: guild.name,
-            error: formatError(error),
-          }),
-        );
-      }
-    };
+    const syncCommandsForGuild = (guild: Guild) =>
+      Effect.runFork(
+        Effect.tryPromise(() => syncGuildCommands(guild)).pipe(
+          Effect.andThen(
+            logger.info("synced guild slash commands", {
+              guildId: guild.id,
+              guildName: guild.name,
+            }),
+          ),
+          Effect.catch((error) =>
+            logger.error("failed to sync guild slash commands", {
+              guildId: guild.id,
+              guildName: guild.name,
+              error: formatError(error),
+            }),
+          ),
+        ),
+      );
 
     client.once(Events.ClientReady, (ready) => {
       void ready.user.setPresence({
         activities: [{ name: config.triggerPhrase, type: ActivityType.Listening }],
         status: "online",
       });
-      void Effect.runPromise(
+      Effect.runFork(
         logger.info("discord client ready", {
           user: ready.user.tag,
         }),
       );
       for (const guild of ready.guilds.cache.values()) {
-        void syncCommandsForGuild(guild);
+        syncCommandsForGuild(guild);
       }
     });
 
     client.on(Events.GuildCreate, (guild) => {
-      void syncCommandsForGuild(guild);
+      syncCommandsForGuild(guild);
     });
 
-    client.on(Events.MessageCreate, async (message) => {
-      if (!message.inGuild()) {
-        return;
-      }
-      if (message.channel.type !== ChannelType.GuildText) {
-        return;
-      }
+    client.on(Events.MessageCreate, (message) => {
+      Effect.runFork(
+        Effect.gen(function* () {
+          if (!message.inGuild()) {
+            return;
+          }
+          if (message.channel.type !== ChannelType.GuildText) {
+            return;
+          }
 
-      const invocation = await detectInvocation({
-        client,
-        message,
-        triggerPhrase: config.triggerPhrase,
-        ignoreOtherBotTriggers: config.ignoreOtherBotTriggers,
-      });
+          const invocation = yield* Effect.tryPromise(() =>
+            detectInvocation({
+              client,
+              message,
+              triggerPhrase: config.triggerPhrase,
+              ignoreOtherBotTriggers: config.ignoreOtherBotTriggers,
+            }),
+          );
 
-      if (!invocation) {
-        return;
-      }
+          if (!invocation) {
+            return;
+          }
 
-      Runtime.runFork(runtime)(
-        sessions.submit(message, invocation).pipe(
-          Effect.catchAll((error) => {
-            const formattedError = formatError(error);
-            return logger
-              .error("failed to enqueue message", {
-                channelId: message.channelId,
-                error: formattedError,
-              })
-              .pipe(
-                Effect.zipRight(
-                  Effect.promise(() =>
-                    message.reply({
-                      content: formatErrorResponse(
-                        "## ❌ Failed to start Opencode",
-                        formattedError,
-                      ),
-                      allowedMentions: { repliedUser: false, parse: [] },
-                    }),
-                  ).pipe(Effect.ignore),
-                ),
-              );
-          }),
-        ),
+          yield* sessions.submit(message, invocation).pipe(
+            Effect.catch((error) => {
+              const formattedError = formatError(error);
+              return logger
+                .error("failed to enqueue message", {
+                  channelId: message.channelId,
+                  error: formattedError,
+                })
+                .pipe(
+                  Effect.andThen(
+                    Effect.promise(() =>
+                      message.reply({
+                        content: formatErrorResponse(
+                          "## ❌ Failed to start Opencode",
+                          formattedError,
+                        ),
+                        allowedMentions: { repliedUser: false, parse: [] },
+                      }),
+                    ).pipe(Effect.ignore),
+                  ),
+                );
+            }),
+          );
+        }),
       );
     });
 
     client.on(Events.InteractionCreate, (interaction) => {
-      Runtime.runFork(runtime)(
+      Effect.runFork(
         sessions.handleInteraction(interaction).pipe(
-          Effect.catchAll((error) => {
+          Effect.catch((error) => {
             const formattedError = formatError(error);
             return logger
               .error("failed to handle interaction", {
@@ -145,7 +140,7 @@ export const DiscordBotLive = Layer.scoped(
                 error: formattedError,
               })
               .pipe(
-                Effect.zipRight(
+                Effect.andThen(
                   interaction.isRepliable() && !interaction.replied && !interaction.deferred
                     ? Effect.promise(() =>
                         interaction.reply({
@@ -171,7 +166,7 @@ export const DiscordBotLive = Layer.scoped(
       Effect.gen(function* () {
         client.removeAllListeners();
         yield* sessions.shutdown().pipe(
-          Effect.catchAll((error) =>
+          Effect.catch((error) =>
             logger.warn("failed to shut down channel sessions before discord destroy", {
               error: formatError(error),
             }),
@@ -180,7 +175,5 @@ export const DiscordBotLive = Layer.scoped(
         yield* Effect.promise(() => client.destroy());
       }),
     );
-
-    return { client } satisfies DiscordBotShape;
   }),
 );

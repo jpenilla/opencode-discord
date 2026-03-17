@@ -11,7 +11,7 @@ export const resolveReferencedMessage = (
   return Effect.tryPromise({
     try: () => message.fetchReference(),
     catch: () => null,
-  }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+  }).pipe(Effect.catch(() => Effect.succeed(null)));
 };
 
 export const collectAttachmentMessages = (

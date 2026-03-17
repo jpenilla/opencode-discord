@@ -48,7 +48,7 @@ const executeCompactSession: GuildCommand["execute"] = (context) =>
       }),
     ).pipe(
       Effect.tap((card) => context.deps.setIdleCompactionCard(session.opencode.sessionId, card)),
-      Effect.catchAll((error) =>
+      Effect.catch((error) =>
         context.deps.logger
           .warn("failed to post idle compaction card", {
             channelId: session.channelId,
@@ -74,7 +74,7 @@ const executeCompactSession: GuildCommand["execute"] = (context) =>
           error: context.deps.formatError(error),
         }),
       ),
-      Effect.catchAll((error) =>
+      Effect.catch((error) =>
         compactionCard
           ? context.deps.getIdleCompactionInterruptRequested(session.opencode.sessionId).pipe(
               Effect.flatMap((interruptRequested) =>
@@ -98,7 +98,7 @@ const executeCompactSession: GuildCommand["execute"] = (context) =>
             )
           : Effect.void,
       ),
-      Effect.forkDaemon,
+      Effect.forkDetach({ startImmediately: true }),
     );
 
     yield* editCommandInteraction(

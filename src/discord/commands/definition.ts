@@ -5,9 +5,9 @@ import type { ChannelSession } from "@/sessions/session.ts";
 import type { ChannelSettings, PersistedChannelSettings } from "@/state/channel-settings.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
-export type GuildCommandRuntimeDeps = {
+export type GuildCommandDeps = {
   getSession: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
-  getLiveSession: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
+  getLoadedSession: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
   invalidateSession: (channelId: string, reason: string) => Effect.Effect<void, unknown>;
   getChannelSettings: (
     channelId: string,
@@ -48,14 +48,14 @@ export type GuildCommandRuntimeDeps = {
 };
 
 export type GuildCommandExecutionContext = {
-  deps: GuildCommandRuntimeDeps;
+  deps: GuildCommandDeps;
   interaction: ChatInputCommandInteraction;
   inGuildTextChannel: boolean;
   session: ChannelSession | null;
 };
 
 type GuildCommandSessionResolver = (
-  deps: Pick<GuildCommandRuntimeDeps, "getSession" | "getLiveSession">,
+  deps: Pick<GuildCommandDeps, "getSession" | "getLoadedSession">,
   interaction: ChatInputCommandInteraction,
   inGuildTextChannel: boolean,
 ) => Effect.Effect<ChannelSession | null, unknown>;
@@ -75,8 +75,8 @@ type GuildCommandDefinitionInput<TName extends string, TDescription extends stri
 
 const defineGuildCommand = <const T extends GuildCommand>(command: T) => command;
 
-const resolveLiveSession: GuildCommandSessionResolver = (deps, interaction, inGuildTextChannel) =>
-  inGuildTextChannel ? deps.getLiveSession(interaction.channelId) : Effect.succeed(null);
+const resolveLoadedSession: GuildCommandSessionResolver = (deps, interaction, inGuildTextChannel) =>
+  inGuildTextChannel ? deps.getLoadedSession(interaction.channelId) : Effect.succeed(null);
 
 const resolveRestoredSession: GuildCommandSessionResolver = (
   deps,
@@ -94,7 +94,7 @@ export const defineSessionCommand = <const TName extends string, const TDescript
     execute: input.execute,
   });
 
-export const defineLiveSessionCommand = <
+export const defineLoadedSessionCommand = <
   const TName extends string,
   const TDescription extends string,
 >(
@@ -103,6 +103,6 @@ export const defineLiveSessionCommand = <
   defineGuildCommand({
     name: input.name,
     description: input.description,
-    resolveSession: resolveLiveSession,
+    resolveSession: resolveLoadedSession,
     execute: input.execute,
   });

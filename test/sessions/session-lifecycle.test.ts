@@ -213,9 +213,9 @@ describe("createSessionLifecycle", () => {
 
     const [first, second] = await Effect.runPromise(
       Effect.gen(function* () {
-        const fiber1 = yield* Effect.fork(lifecycle.createOrGetSession(message));
+        const fiber1 = yield* Effect.forkChild(lifecycle.createOrGetSession(message));
         yield* Deferred.await(createStarted);
-        const fiber2 = yield* Effect.fork(lifecycle.createOrGetSession(message));
+        const fiber2 = yield* Effect.forkChild(lifecycle.createOrGetSession(message));
         yield* Deferred.succeed(releaseCreate, undefined).pipe(Effect.ignore);
         return yield* Effect.all([Fiber.join(fiber1), Fiber.join(fiber2)]);
       }),
@@ -249,9 +249,15 @@ describe("createSessionLifecycle", () => {
 
     const exits = await Effect.runPromise(
       Effect.gen(function* () {
-        const fiber1 = yield* Effect.fork(Effect.exit(lifecycle.createOrGetSession(message)));
+        const fiber1 = yield* Effect.forkChild(
+          Effect.exit(lifecycle.createOrGetSession(message)),
+          { startImmediately: true },
+        );
         yield* Deferred.await(createStarted);
-        const fiber2 = yield* Effect.fork(Effect.exit(lifecycle.createOrGetSession(message)));
+        const fiber2 = yield* Effect.forkChild(
+          Effect.exit(lifecycle.createOrGetSession(message)),
+          { startImmediately: true },
+        );
         yield* Deferred.succeed(releaseCreate, undefined).pipe(Effect.ignore);
         return yield* Effect.all([Fiber.join(fiber1), Fiber.join(fiber2)]);
       }),
@@ -318,11 +324,11 @@ describe("createSessionLifecycle", () => {
 
     const [first, second] = await Effect.runPromise(
       Effect.gen(function* () {
-        const fiber1 = yield* Effect.fork(
+        const fiber1 = yield* Effect.forkChild(
           lifecycle.ensureSessionHealth(session, message, "recover", false),
         );
         yield* Deferred.await(recreateStarted);
-        const fiber2 = yield* Effect.fork(
+        const fiber2 = yield* Effect.forkChild(
           lifecycle.ensureSessionHealth(session, message, "recover", false),
         );
         yield* Deferred.succeed(releaseRecreate, undefined).pipe(Effect.ignore);
@@ -363,7 +369,7 @@ describe("createSessionLifecycle", () => {
     expect(await Effect.runPromise(Ref.get(removedRoots))).toEqual([]);
   });
 
-  test("invalidates the live session without deleting the session root", async () => {
+  test("invalidates the loaded session without deleting the session root", async () => {
     const { lifecycle, closed, removedRoots, persisted } = await makeHarness();
     const message = makeMessage("channel-1");
     const session = await Effect.runPromise(lifecycle.createOrGetSession(message));

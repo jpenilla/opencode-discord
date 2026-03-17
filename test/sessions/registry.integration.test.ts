@@ -20,14 +20,14 @@ import {
   promptMessageContext,
 } from "@/discord/messages.ts";
 import type { GlobalEvent } from "@opencode-ai/sdk/v2";
-import { type OpencodeEventQueueShape, OpencodeEventQueue } from "@/opencode/events.ts";
+import { OpencodeEventQueue } from "@/opencode/events.ts";
 import {
   type OpencodeServiceShape,
   OpencodeService,
   type PromptResult,
   type SessionHandle,
 } from "@/opencode/service.ts";
-import { ChannelSessions, ChannelSessionsLive } from "@/sessions/registry.ts";
+import { ChannelSessions, ChannelSessionsLayer } from "@/sessions/registry.ts";
 import { QUESTION_PENDING_INTERRUPT_MESSAGE } from "@/sessions/command-lifecycle.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import {
@@ -85,9 +85,10 @@ const waitForNoActiveRun = (
       activeRun ? Effect.fail(new Error("run still active")) : Effect.void,
     ),
     Effect.eventually,
-    Effect.timeoutFail({
+    Effect.timeoutOrElse({
       duration: "1 second",
-      onTimeout: () => new Error(`Timed out waiting for active run ${sessionId} to clear`),
+      onTimeout: () =>
+        Effect.fail(new Error(`Timed out waiting for active run ${sessionId} to clear`)),
     }),
   );
 
@@ -106,9 +107,9 @@ const waitForReplyPayload = (
       payloads.some(predicate) ? Effect.void : Effect.fail(new Error("payload not posted yet")),
     ),
     Effect.eventually,
-    Effect.timeoutFail({
+    Effect.timeoutOrElse({
       duration: "1 second",
-      onTimeout: () => new Error("Timed out waiting for reply payload"),
+      onTimeout: () => Effect.fail(new Error("Timed out waiting for reply payload")),
     }),
   );
 
@@ -363,7 +364,7 @@ const makeHarness = async (options: {
 
   const completePrompt = (sessionId: string, userMessageId: string, result: PromptResult) =>
     storePromptResult(result).pipe(
-      Effect.zipRight(
+      Effect.andThen(
         publishEvent(
           makeAssistantMessageUpdatedEvent({
             id: result.messageId,
@@ -372,7 +373,7 @@ const makeHarness = async (options: {
           }),
         ),
       ),
-      Effect.zipRight(publishEvent(makeSessionIdleEvent(sessionId))),
+      Effect.andThen(publishEvent(makeSessionIdleEvent(sessionId))),
     );
 
   const commandChannel = unsafeStub<SendableChannels>({
@@ -428,9 +429,9 @@ const makeHarness = async (options: {
       | "toggle-thinking"
       | "toggle-compaction-summaries",
   ) => {
-    const interactionReplies = Ref.unsafeMake<unknown[]>([]);
-    const interactionEdits = Ref.unsafeMake<unknown[]>([]);
-    const interactionDefers = Ref.unsafeMake(0);
+    const interactionReplies = Effect.runSync(Ref.make<unknown[]>([]));
+    const interactionEdits = Effect.runSync(Ref.make<unknown[]>([]));
+    const interactionDefers = Effect.runSync(Ref.make(0));
 
     const interaction = unsafeStub<
       Interaction & {
@@ -468,8 +469,8 @@ const makeHarness = async (options: {
   };
 
   const makeQuestionButtonInteraction = (input?: { userId?: string; messageId?: string }) => {
-    const interactionReplies = Ref.unsafeMake<unknown[]>([]);
-    const interactionEdits = Ref.unsafeMake<unknown[]>([]);
+    const interactionReplies = Effect.runSync(Ref.make<unknown[]>([]));
+    const interactionEdits = Effect.runSync(Ref.make<unknown[]>([]));
 
     const interaction = unsafeStub<Interaction & { replied: boolean; deferred: boolean }>({
       customId: "ocq:req-1:0:submit",
@@ -508,7 +509,7 @@ const makeHarness = async (options: {
       Ref.updateAndGet(createSessionCount, (count) => count + 1).pipe(
         Effect.flatMap((callIndex) =>
           Ref.update(createSessionCalls, (current) => [...current, { workdir, title }]).pipe(
-            Effect.zipRight(
+            Effect.andThen(
               options.createSessionImpl?.({
                 workdir,
                 title,
@@ -568,11 +569,11 @@ const makeHarness = async (options: {
       ),
     interruptSession: () =>
       Ref.update(interruptCalls, (count) => count + 1).pipe(
-        Effect.zipRight(options.interruptSessionImpl?.() ?? Effect.void),
+        Effect.andThen(options.interruptSessionImpl?.() ?? Effect.void),
       ),
     compactSession: () =>
       Ref.update(compactCalls, (count) => count + 1).pipe(
-        Effect.zipRight(options.compactSessionImpl?.() ?? Effect.void),
+        Effect.andThen(options.compactSessionImpl?.() ?? Effect.void),
       ),
     replyToQuestion: () => Effect.void,
     rejectQuestion: () => options.rejectQuestionImpl?.() ?? Effect.void,
@@ -621,12 +622,9 @@ const makeHarness = async (options: {
     Layer.succeed(Logger, makeLogger()),
     Layer.succeed(OpencodeService, service),
     Layer.succeed(SessionStore, sessionStore),
-    Layer.succeed(OpencodeEventQueue, {
-      publish: (event) => Queue.offer(eventQueue, event).pipe(Effect.asVoid),
-      take: () => Queue.take(eventQueue),
-    } satisfies OpencodeEventQueueShape),
+    Layer.succeed(OpencodeEventQueue, eventQueue),
   );
-  const layer = Layer.merge(deps, ChannelSessionsLive.pipe(Layer.provide(deps)));
+  const harnessLayer = Layer.merge(deps, ChannelSessionsLayer.pipe(Layer.provide(deps)));
 
   return {
     replies,
@@ -640,7 +638,7 @@ const makeHarness = async (options: {
     createSessionCalls,
     compactCalls,
     interruptCalls,
-    layer,
+    harnessLayer,
     makeMessage,
     makeCommandInteraction,
     makeQuestionButtonInteraction,
@@ -651,7 +649,7 @@ const makeHarness = async (options: {
   };
 };
 
-describe("ChannelSessionsLive integration", () => {
+describe("ChannelSessionsLayer integration", () => {
   test("submits a message, prompts opencode, and replies with the final response", async () => {
     const harness = await makeHarness({
       promptImpl: ({ completePrompt }) =>
@@ -671,7 +669,7 @@ describe("ChannelSessionsLive integration", () => {
           const sessions = yield* ChannelSessions;
           yield* sessions.submit(message, { prompt: "hello" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("done");
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -691,8 +689,8 @@ describe("ChannelSessionsLive integration", () => {
       promptImpl: ({ prompt, callIndex, completePrompt }) =>
         callIndex === 1
           ? Deferred.succeed(firstPromptStarted, undefined).pipe(
-              Effect.zipRight(Deferred.await(allowFirstPromptToFinish)),
-              Effect.zipRight(
+              Effect.andThen(Deferred.await(allowFirstPromptToFinish)),
+              Effect.andThen(
                 completePrompt({
                   messageId: "assistant-1",
                   transcript: "intermediate",
@@ -729,7 +727,7 @@ describe("ChannelSessionsLive integration", () => {
               }),
             ])}`,
           );
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -772,7 +770,7 @@ describe("ChannelSessionsLive integration", () => {
               messageId: "assistant-1",
               transcript: "intermediate",
             }).pipe(
-              Effect.zipRight(
+              Effect.andThen(
                 publishEvent(
                   makeAssistantMessageUpdatedEvent({
                     id: "assistant-1",
@@ -781,9 +779,9 @@ describe("ChannelSessionsLive integration", () => {
                   }),
                 ),
               ),
-              Effect.zipRight(Deferred.succeed(assistantFinished, undefined).pipe(Effect.ignore)),
-              Effect.zipRight(Deferred.await(allowIdleStatus)),
-              Effect.zipRight(publishEvent(makeSessionIdleEvent(sessionId))),
+              Effect.andThen(Deferred.succeed(assistantFinished, undefined).pipe(Effect.ignore)),
+              Effect.andThen(Deferred.await(allowIdleStatus)),
+              Effect.andThen(publishEvent(makeSessionIdleEvent(sessionId))),
             )
           : completePrompt({
               messageId: "assistant-2",
@@ -827,7 +825,7 @@ describe("ChannelSessionsLive integration", () => {
               }),
             ])}`,
           );
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -851,8 +849,8 @@ describe("ChannelSessionsLive integration", () => {
       promptImpl: ({ callIndex, publishEvent, completePrompt, sessionId }) =>
         callIndex === 1
           ? Deferred.succeed(firstPromptStarted, undefined).pipe(
-              Effect.zipRight(Deferred.await(allowFirstPromptToFinish)),
-              Effect.zipRight(
+              Effect.andThen(Deferred.await(allowFirstPromptToFinish)),
+              Effect.andThen(
                 completePrompt({
                   messageId: "assistant-1",
                   transcript: "stale-final",
@@ -866,7 +864,7 @@ describe("ChannelSessionsLive integration", () => {
                 parentId: "user-1",
               }),
             ).pipe(
-              Effect.zipRight(
+              Effect.andThen(
                 publishEvent(
                   makeUserMessageUpdatedEvent({
                     id: "user-1",
@@ -874,7 +872,7 @@ describe("ChannelSessionsLive integration", () => {
                   }),
                 ),
               ),
-              Effect.zipRight(
+              Effect.andThen(
                 completePrompt({
                   messageId: "assistant-2",
                   transcript: "follow-up-final",
@@ -901,7 +899,7 @@ describe("ChannelSessionsLive integration", () => {
           yield* Deferred.succeed(allowFirstPromptToFinish, undefined).pipe(Effect.ignore);
           expect(yield* Queue.take(harness.replyEvents)).toBe("stale-final");
           expect(yield* Queue.take(harness.replyEvents)).toBe("follow-up-final");
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -916,7 +914,7 @@ describe("ChannelSessionsLive integration", () => {
           messageId: "summary-1",
           transcript: "summary text",
         }).pipe(
-          Effect.zipRight(
+          Effect.andThen(
             publishEvent(
               makeAssistantMessageUpdatedEvent({
                 id: "summary-1",
@@ -927,7 +925,7 @@ describe("ChannelSessionsLive integration", () => {
               }),
             ),
           ),
-          Effect.zipRight(
+          Effect.andThen(
             completePrompt({
               messageId: "assistant-1",
               transcript: "final reply",
@@ -947,7 +945,7 @@ describe("ChannelSessionsLive integration", () => {
           yield* sessions.submit(message, { prompt: "hello" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("🗜️ Compacted Summary\nsummary text");
           expect(yield* Queue.take(harness.replyEvents)).toBe("final reply");
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -991,7 +989,7 @@ describe("ChannelSessionsLive integration", () => {
             ),
           );
           expect(yield* Queue.take(harness.replyEvents)).toBe("🗜️ Compacted Summary\nsummary text");
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1005,7 +1003,7 @@ describe("ChannelSessionsLive integration", () => {
           messageId: "assistant-1",
           transcript: "done",
         }).pipe(
-          Effect.zipRight(
+          Effect.andThen(
             publishEvent(
               makeToolUpdatedEvent({
                 sessionId,
@@ -1014,7 +1012,7 @@ describe("ChannelSessionsLive integration", () => {
               }),
             ),
           ),
-          Effect.zipRight(
+          Effect.andThen(
             publishEvent(
               makeAssistantMessageUpdatedEvent({
                 id: "assistant-1",
@@ -1023,7 +1021,7 @@ describe("ChannelSessionsLive integration", () => {
               }),
             ),
           ),
-          Effect.zipRight(
+          Effect.andThen(
             publishEvent(
               makeToolUpdatedEvent({
                 sessionId,
@@ -1032,7 +1030,7 @@ describe("ChannelSessionsLive integration", () => {
               }),
             ),
           ),
-          Effect.zipRight(publishEvent(makeSessionIdleEvent(sessionId))),
+          Effect.andThen(publishEvent(makeSessionIdleEvent(sessionId))),
         ),
     });
     const message = harness.makeMessage({
@@ -1046,7 +1044,7 @@ describe("ChannelSessionsLive integration", () => {
           const sessions = yield* ChannelSessions;
           yield* sessions.submit(message, { prompt: "hello" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("done");
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1058,7 +1056,7 @@ describe("ChannelSessionsLive integration", () => {
     );
   });
 
-  test("runs /compact through the live layer and posts a channel info card", async () => {
+  test("runs /compact through ChannelSessionsLayer and posts a channel info card", async () => {
     const compactStarted = await Effect.runPromise(Deferred.make<void>());
     const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
@@ -1069,7 +1067,7 @@ describe("ChannelSessionsLive integration", () => {
         }),
       compactSessionImpl: () =>
         Deferred.succeed(compactStarted, undefined).pipe(
-          Effect.zipRight(Deferred.await(allowCompactToFinish)),
+          Effect.andThen(Deferred.await(allowCompactToFinish)),
         ),
     });
     const message = harness.makeMessage({
@@ -1089,7 +1087,7 @@ describe("ChannelSessionsLive integration", () => {
           yield* Deferred.await(compactStarted);
           yield* Deferred.succeed(allowCompactToFinish, undefined).pipe(Effect.ignore);
           yield* Effect.promise(() => Bun.sleep(0));
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1109,7 +1107,7 @@ describe("ChannelSessionsLive integration", () => {
     );
   });
 
-  test("runs /interrupt through the live layer and stops the active run", async () => {
+  test("runs /interrupt through ChannelSessionsLayer and stops the active run", async () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>());
     const interruptRequested = await Effect.runPromise(Deferred.make<void>());
     const promptFinished = await Effect.runPromise(Deferred.make<void>());
@@ -1139,7 +1137,7 @@ describe("ChannelSessionsLive integration", () => {
           yield* Deferred.await(promptStarted);
           yield* sessions.handleInteraction(command.interaction);
           yield* Deferred.await(promptFinished);
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1200,7 +1198,7 @@ describe("ChannelSessionsLive integration", () => {
           yield* Deferred.await(promptFinished);
           expect(yield* Queue.take(harness.replyEvents)).toBe("done");
           yield* Effect.promise(() => Bun.sleep(0));
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1225,8 +1223,8 @@ describe("ChannelSessionsLive integration", () => {
     const harness = await makeHarness({
       promptImpl: ({ completePrompt }) =>
         Deferred.succeed(promptStarted, undefined).pipe(
-          Effect.zipRight(Deferred.await(allowPromptToFinish)),
-          Effect.zipRight(
+          Effect.andThen(Deferred.await(allowPromptToFinish)),
+          Effect.andThen(
             completePrompt({
               messageId: "assistant-1",
               transcript: "done",
@@ -1254,7 +1252,7 @@ describe("ChannelSessionsLive integration", () => {
           yield* Effect.promise(() => harness.publishEvent(makeQuestionRepliedEvent()));
           yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore);
           yield* Queue.take(harness.replyEvents);
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1273,7 +1271,9 @@ describe("ChannelSessionsLive integration", () => {
     );
   });
 
-  test("runs /interrupt through the live layer, marks compaction interrupting, and allows later completion", async () => {
+  test(
+    "runs /interrupt through ChannelSessionsLayer, marks compaction interrupting, and allows later completion",
+    async () => {
     const compactStarted = await Effect.runPromise(Deferred.make<void>());
     const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
@@ -1284,7 +1284,7 @@ describe("ChannelSessionsLive integration", () => {
         }),
       compactSessionImpl: () =>
         Deferred.succeed(compactStarted, undefined).pipe(
-          Effect.zipRight(Deferred.await(allowCompactToFinish)),
+          Effect.andThen(Deferred.await(allowCompactToFinish)),
         ),
       interruptSessionImpl: () =>
         Deferred.succeed(allowCompactToFinish, undefined).pipe(Effect.asVoid),
@@ -1307,7 +1307,7 @@ describe("ChannelSessionsLive integration", () => {
           yield* Deferred.await(compactStarted);
           yield* sessions.handleInteraction(interruptCommand.interaction);
           yield* Effect.promise(() => Bun.sleep(0));
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1327,7 +1327,9 @@ describe("ChannelSessionsLive integration", () => {
     );
   });
 
-  test("runs /new-session through the live layer and recreates the next message on the same workdir", async () => {
+  test(
+    "runs /new-session through ChannelSessionsLayer and recreates the next message on the same workdir",
+    async () => {
     const harness = await makeHarness({
       promptImpl: ({ callIndex, completePrompt }) =>
         completePrompt({
@@ -1356,7 +1358,7 @@ describe("ChannelSessionsLive integration", () => {
           yield* sessions.handleInteraction(command.interaction);
           yield* sessions.submit(secondMessage, { prompt: "second" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("second");
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1387,7 +1389,7 @@ describe("ChannelSessionsLive integration", () => {
         }),
       compactSessionImpl: () =>
         Deferred.succeed(compactStarted, undefined).pipe(
-          Effect.zipRight(Deferred.await(allowCompactToFinish)),
+          Effect.andThen(Deferred.await(allowCompactToFinish)),
         ),
       interruptSessionImpl: () =>
         Deferred.fail(allowCompactToFinish, new Error("aborted")).pipe(Effect.asVoid),
@@ -1410,7 +1412,7 @@ describe("ChannelSessionsLive integration", () => {
           yield* Deferred.await(compactStarted);
           yield* sessions.handleInteraction(interruptCommand.interaction);
           yield* Effect.promise(() => Bun.sleep(0));
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1432,8 +1434,8 @@ describe("ChannelSessionsLive integration", () => {
               transcript: "hello",
             })
           : Deferred.succeed(secondPromptStarted, undefined).pipe(
-              Effect.zipRight(Deferred.await(allowSecondPromptToFinish)),
-              Effect.zipRight(
+              Effect.andThen(Deferred.await(allowSecondPromptToFinish)),
+              Effect.andThen(
                 completePrompt({
                   messageId: "assistant-2",
                   transcript: "later",
@@ -1442,7 +1444,7 @@ describe("ChannelSessionsLive integration", () => {
             ),
       compactSessionImpl: () =>
         Deferred.succeed(compactStarted, undefined).pipe(
-          Effect.zipRight(Deferred.await(allowCompactToFinish)),
+          Effect.andThen(Deferred.await(allowCompactToFinish)),
         ),
       interruptSessionImpl: () =>
         Deferred.succeed(allowCompactToFinish, undefined).pipe(Effect.asVoid),
@@ -1475,7 +1477,7 @@ describe("ChannelSessionsLive integration", () => {
           yield* Effect.promise(() => harness.publishEvent(makeSessionCompactedEvent()));
           yield* Deferred.succeed(allowSecondPromptToFinish, undefined).pipe(Effect.ignore);
           yield* Queue.take(harness.replyEvents);
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1511,7 +1513,7 @@ describe("ChannelSessionsLive integration", () => {
       isHealthyImpl: () => Ref.get(healthy),
       createSessionImpl: ({ callIndex, workdir }) =>
         Ref.update(createSessionCount, (count) => count + 1).pipe(
-          Effect.zipRight(Ref.set(healthy, true)),
+          Effect.andThen(Ref.set(healthy, true)),
           Effect.as({
             sessionId: `session-${callIndex}`,
             client: {} as never,
@@ -1539,7 +1541,7 @@ describe("ChannelSessionsLive integration", () => {
           yield* waitForNoActiveRun(sessions, "session-1");
           yield* sessions.submit(secondMessage, { prompt: "second" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("recovered");
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1555,14 +1557,16 @@ describe("ChannelSessionsLive integration", () => {
     ]);
   });
 
-  test("processes queued question events through the live layer and finalizes the question card", async () => {
+  test(
+    "processes queued question events through ChannelSessionsLayer and finalizes the question card",
+    async () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>());
     const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: ({ completePrompt }) =>
         Deferred.succeed(promptStarted, undefined).pipe(
-          Effect.zipRight(Deferred.await(allowPromptToFinish)),
-          Effect.zipRight(
+          Effect.andThen(Deferred.await(allowPromptToFinish)),
+          Effect.andThen(
             completePrompt({
               messageId: "assistant-1",
               transcript: "question complete",
@@ -1586,7 +1590,7 @@ describe("ChannelSessionsLive integration", () => {
           yield* Effect.promise(() => harness.publishEvent(makeQuestionRepliedEvent()));
           yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore);
           expect(yield* Queue.take(harness.replyEvents)).toBe("question complete");
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1598,14 +1602,16 @@ describe("ChannelSessionsLive integration", () => {
     );
   });
 
-  test("routes question interactions through the live layer after command handling falls through", async () => {
+  test(
+    "routes question interactions through ChannelSessionsLayer after command handling falls through",
+    async () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>());
     const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: ({ completePrompt }) =>
         Deferred.succeed(promptStarted, undefined).pipe(
-          Effect.zipRight(Deferred.await(allowPromptToFinish)),
-          Effect.zipRight(
+          Effect.andThen(Deferred.await(allowPromptToFinish)),
+          Effect.andThen(
             completePrompt({
               messageId: "assistant-1",
               transcript: "done",
@@ -1632,7 +1638,7 @@ describe("ChannelSessionsLive integration", () => {
           yield* Effect.promise(() => harness.publishEvent(makeQuestionRepliedEvent()));
           yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore);
           yield* Queue.take(harness.replyEvents);
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1640,11 +1646,13 @@ describe("ChannelSessionsLive integration", () => {
     expect((await getRef(questionInteraction.interactionEdits)).length).toBe(1);
   });
 
-  test("expires live question cards during session shutdown even while the run is still active", async () => {
+  test(
+    "expires active question cards during session shutdown even while the run is still active",
+    async () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: () =>
-        Deferred.succeed(promptStarted, undefined).pipe(Effect.zipRight(Effect.never)),
+        Deferred.succeed(promptStarted, undefined).pipe(Effect.andThen(Effect.never)),
     });
     const message = harness.makeMessage({
       id: "message-1",
@@ -1663,7 +1671,7 @@ describe("ChannelSessionsLive integration", () => {
           );
           yield* sessions.shutdown();
           yield* Effect.promise(() => Bun.sleep(0));
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 
@@ -1680,8 +1688,8 @@ describe("ChannelSessionsLive integration", () => {
     const harness = await makeHarness({
       promptImpl: ({ completePrompt }) =>
         Deferred.succeed(promptStarted, undefined).pipe(
-          Effect.zipRight(Deferred.await(allowPromptToFinish)),
-          Effect.zipRight(
+          Effect.andThen(Deferred.await(allowPromptToFinish)),
+          Effect.andThen(
             completePrompt({
               messageId: "assistant-1",
               transcript: "",
@@ -1709,15 +1717,15 @@ describe("ChannelSessionsLive integration", () => {
                 : Effect.fail(new Error("question UI failure not recorded yet")),
             ),
             Effect.eventually,
-            Effect.timeoutFail({
+            Effect.timeoutOrElse({
               duration: "1 second",
               onTimeout: () =>
-                new Error("Timed out waiting for the live question UI failure state"),
+                Effect.fail(new Error("Timed out waiting for the current question UI failure state")),
             }),
           );
           yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore);
           expect(yield* Queue.take(harness.replyEvents)).toContain("Failed to show questions");
-        }).pipe(Effect.provide(harness.layer)),
+        }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
 

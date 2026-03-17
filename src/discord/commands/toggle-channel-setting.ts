@@ -7,7 +7,7 @@ import {
   type PersistedChannelSettings,
 } from "@/state/channel-settings.ts";
 
-import { defineLiveSessionCommand, type GuildCommand } from "./definition.ts";
+import { defineLoadedSessionCommand, type GuildCommand } from "./definition.ts";
 import { replyToCommandInteraction } from "./interaction.ts";
 
 type ToggleableChannelSetting = keyof Pick<
@@ -64,7 +64,7 @@ const defineChannelSettingToggleCommand = <
   setting: ToggleableChannelSetting;
   label: string;
 }) =>
-  defineLiveSessionCommand({
+  defineLoadedSessionCommand({
     name: input.name,
     description: input.description,
     execute: executeToggleChannelSetting(input.setting, input.label),

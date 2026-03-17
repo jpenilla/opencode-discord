@@ -42,12 +42,12 @@ describe("classifyToolBridgeFailure", () => {
 
     const wrapped = await Effect.runPromise(
       Effect.tryPromise(() => Promise.reject(discordApiError)).pipe(
-        Effect.either,
+        Effect.result,
         Effect.map((result) => {
-          if (result._tag !== "Left") {
+          if (result._tag !== "Failure") {
             throw new Error("expected failure");
           }
-          return result.left;
+          return result.failure;
         }),
       ),
     );

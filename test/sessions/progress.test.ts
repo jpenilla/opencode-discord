@@ -3,7 +3,11 @@ import type { Message, MessageCreateOptions, MessageEditOptions } from "discord.
 import type { CompactionPart, ToolPart } from "@opencode-ai/sdk/v2";
 import { Deferred, Effect, Fiber, Queue, Ref } from "effect";
 
-import { runProgressWorker } from "@/sessions/progress.ts";
+import {
+  maxProgressBatchSize,
+  runProgressWorker,
+  takeProgressBatch,
+} from "@/sessions/progress.ts";
 import type { ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
 import { unsafeStub } from "../support/stub.ts";
 
@@ -106,6 +110,20 @@ const makeCompactionPart = (): CompactionPart =>
     auto: false,
   });
 
+const makeReasoningCompletedEvent = (index: number): RunProgressEvent => ({
+  type: "reasoning-completed",
+  partId: `reasoning-${index}`,
+  text: `thinking ${index}`,
+});
+
+const reasoningIds = (events: ReadonlyArray<RunProgressEvent>) =>
+  events.map((event) => {
+    if (event.type !== "reasoning-completed") {
+      throw new Error("expected reasoning-completed events");
+    }
+    return event.partId;
+  });
+
 const runFinalizationScenario = async (reason: "interrupted" | "shutdown") => {
   const harness = await makeHarness();
 
@@ -113,7 +131,7 @@ const runFinalizationScenario = async (reason: "interrupted" | "shutdown") => {
     Effect.scoped(
       Effect.gen(function* () {
         const queue = yield* Queue.unbounded<RunProgressEvent>();
-        const worker = yield* Effect.fork(
+        const worker = yield* Effect.forkChild(
           runProgressWorker(
             harness.session,
             harness.sourceMessage,
@@ -150,6 +168,45 @@ const runFinalizationScenario = async (reason: "interrupted" | "shutdown") => {
   return result;
 };
 
+describe("takeProgressBatch", () => {
+  test("blocks until the first event arrives and preserves queued overflow for the next drain", async () => {
+    const queue = await Effect.runPromise(Queue.unbounded<RunProgressEvent>());
+    const events = Array.from({ length: maxProgressBatchSize + 5 }, (_, index) =>
+      makeReasoningCompletedEvent(index + 1),
+    );
+
+    const { firstBatch, secondBatch } = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fiber = yield* takeProgressBatch(queue).pipe(
+            Effect.forkChild({ startImmediately: true }),
+          );
+
+          expect(yield* Effect.sync(() => fiber.pollUnsafe())).toBeUndefined();
+
+          yield* Queue.offerAll(queue, events);
+
+          return {
+            firstBatch: yield* Fiber.join(fiber),
+            secondBatch: yield* takeProgressBatch(queue),
+          };
+        }),
+      ),
+    );
+
+    expect(firstBatch).toHaveLength(maxProgressBatchSize);
+    expect(reasoningIds(firstBatch)[0]).toBe("reasoning-1");
+    expect(reasoningIds(firstBatch).at(-1)).toBe(`reasoning-${maxProgressBatchSize}`);
+    expect(reasoningIds(secondBatch)).toEqual([
+      "reasoning-66",
+      "reasoning-67",
+      "reasoning-68",
+      "reasoning-69",
+      "reasoning-70",
+    ]);
+  });
+});
+
 describe("runProgressWorker", () => {
   test("ignores session-compacted without an active compaction in this worker", async () => {
     const harness = await makeHarness();
@@ -158,7 +215,7 @@ describe("runProgressWorker", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* Effect.fork(
+          const worker = yield* Effect.forkChild(
             runProgressWorker(
               harness.session,
               harness.sourceMessage,
@@ -212,7 +269,7 @@ describe("runProgressWorker", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* Effect.fork(
+          const worker = yield* Effect.forkChild(
             runProgressWorker(
               harness.session,
               harness.sourceMessage,
@@ -280,7 +337,7 @@ describe("runProgressWorker", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* Effect.fork(
+          const worker = yield* Effect.forkChild(
             runProgressWorker(
               harness.session,
               harness.sourceMessage,
@@ -317,7 +374,7 @@ describe("runProgressWorker", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* Effect.fork(
+          const worker = yield* Effect.forkChild(
             runProgressWorker(
               harness.session,
               harness.sourceMessage,
@@ -354,7 +411,7 @@ describe("runProgressWorker", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* Effect.fork(
+          const worker = yield* Effect.forkChild(
             runProgressWorker(
               harness.session,
               harness.sourceMessage,

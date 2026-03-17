@@ -39,27 +39,33 @@ const executeInterruptSession: GuildCommand["execute"] = (context) =>
     const session = context.session!;
     if (interruptEntry.target === "compaction") {
       yield* context.deps.setIdleCompactionInterruptRequested(session.opencode.sessionId, true);
-      const interruptResult = yield* context.deps
-        .interruptSession(session.opencode)
-        .pipe(Effect.either);
-      if (interruptResult._tag === "Left") {
-        yield* context.deps.setIdleCompactionInterruptRequested(session.opencode.sessionId, false);
-        yield* editCommandInteraction(
-          context.interaction,
-          formatErrorResponse(
-            "## ❌ Failed to interrupt compaction",
-            context.deps.formatError(interruptResult.left),
-          ),
-        );
-        return true;
-      }
-
       const interruptingCard = compactionCardContent("interrupting");
       yield* context.deps.updateIdleCompactionCard(
         session.opencode.sessionId,
         interruptingCard.title,
         interruptingCard.body,
       );
+      const interruptResult = yield* context.deps
+        .interruptSession(session.opencode)
+        .pipe(Effect.result);
+      if (interruptResult._tag === "Failure") {
+        yield* context.deps.setIdleCompactionInterruptRequested(session.opencode.sessionId, false);
+        const compactingCard = compactionCardContent("compacting");
+        yield* context.deps.updateIdleCompactionCard(
+          session.opencode.sessionId,
+          compactingCard.title,
+          compactingCard.body,
+        );
+        yield* editCommandInteraction(
+          context.interaction,
+          formatErrorResponse(
+            "## ❌ Failed to interrupt compaction",
+            context.deps.formatError(interruptResult.failure),
+          ),
+        );
+        return true;
+      }
+
       yield* editCommandInteraction(
         context.interaction,
         "Requested interruption of the active OpenCode compaction.",
@@ -68,15 +74,17 @@ const executeInterruptSession: GuildCommand["execute"] = (context) =>
     }
 
     const activeRun = session.activeRun!;
+    activeRun.interruptRequested = true;
     const interruptResult = yield* context.deps
       .interruptSession(session.opencode)
-      .pipe(Effect.either);
-    if (interruptResult._tag === "Left") {
+      .pipe(Effect.result);
+    if (interruptResult._tag === "Failure") {
+      activeRun.interruptRequested = false;
       yield* editCommandInteraction(
         context.interaction,
         formatErrorResponse(
           "## ❌ Failed to interrupt run",
-          context.deps.formatError(interruptResult.left),
+          context.deps.formatError(interruptResult.failure),
         ),
       );
       return true;
@@ -86,11 +94,11 @@ const executeInterruptSession: GuildCommand["execute"] = (context) =>
       session.opencode.sessionId,
     );
     if (hasPendingQuestionsAfterInterrupt) {
+      activeRun.interruptRequested = false;
       yield* editCommandInteraction(context.interaction, QUESTION_PENDING_INTERRUPT_MESSAGE);
       return true;
     }
 
-    activeRun.interruptRequested = true;
     yield* editCommandInteraction(
       context.interaction,
       "Requested interruption of the active OpenCode run.",

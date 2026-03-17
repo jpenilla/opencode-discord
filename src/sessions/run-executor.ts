@@ -29,7 +29,7 @@ type RunExecutorPromptInput = {
   ) => Effect.Effect<void, unknown>;
 };
 
-type RunExecutorRuntime = {
+type RunExecutorDeps = {
   runPrompts: (input: RunExecutorPromptInput) => Effect.Effect<PromptResult, unknown>;
   runProgressWorker: (
     session: ChannelSession,
@@ -56,22 +56,22 @@ type RunExecutorRuntime = {
 };
 
 const finishProgressWorker = (
-  runtime: Pick<RunExecutorRuntime, "logger">,
+  deps: Pick<RunExecutorDeps, "logger">,
   session: ChannelSession,
   progressQueue: Queue.Queue<RunProgressEvent>,
   progressFiber: Fiber.Fiber<unknown, unknown>,
   reason?: RunFinalizationReason,
 ): Effect.Effect<void, unknown> =>
   Effect.gen(function* () {
-    const progressFiberExit = yield* Fiber.poll(progressFiber);
-    if (progressFiberExit._tag === "None") {
+    const progressFiberExit = yield* Effect.sync(() => progressFiber.pollUnsafe());
+    if (progressFiberExit === undefined) {
       const finalizingAck = yield* Deferred.make<void>();
       yield* Queue.offer(progressQueue, { type: "run-finalizing", ack: finalizingAck, reason });
       const finalizingResult = yield* Deferred.await(finalizingAck).pipe(
         Effect.timeoutOption("2 seconds"),
       );
       if (finalizingResult._tag === "None") {
-        yield* runtime.logger.warn("progress worker finalization timed out", {
+        yield* deps.logger.warn("progress worker finalization timed out", {
           channelId: session.channelId,
           sessionId: session.opencode.sessionId,
         });
@@ -79,15 +79,15 @@ const finishProgressWorker = (
       return;
     }
 
-    yield* runtime.logger.warn("progress worker exited before finalization", {
+    yield* deps.logger.warn("progress worker exited before finalization", {
       channelId: session.channelId,
       sessionId: session.opencode.sessionId,
-      exit: String(progressFiberExit.value),
+      exit: String(progressFiberExit),
     });
   });
 
 export const executeRunBatch =
-  (runtime: RunExecutorRuntime) =>
+  (deps: RunExecutorDeps) =>
   (
     session: ChannelSession,
     initialRequests: NonEmptyRunRequestBatch,
@@ -98,11 +98,11 @@ export const executeRunBatch =
       const followUpQueue = yield* Queue.unbounded<RunRequest>();
       const acceptFollowUps = yield* Ref.make(true);
       const originMessage = initialRequests[0]!.message;
-      const progressFiber = yield* runtime
+      const progressFiber = yield* deps
         .runProgressWorker(session, originMessage, session.workdir, progressQueue)
-        .pipe(Effect.fork);
+        .pipe(Effect.forkChild({ startImmediately: true }));
       const finalizeProgress = (reason?: RunFinalizationReason) =>
-        finishProgressWorker(runtime, session, progressQueue, progressFiber, reason);
+        finishProgressWorker(deps, session, progressQueue, progressFiber, reason);
       const activeRun: ActiveRun = {
         originMessage,
         workdir: session.workdir,
@@ -117,12 +117,12 @@ export const executeRunBatch =
         promptState,
         followUpQueue,
         acceptFollowUps,
-        typing: runtime.startTyping(originMessage),
+        typing: deps.startTyping(originMessage),
         finalizeProgress,
         questionOutcome: noQuestionOutcome(),
         interruptRequested: false,
       };
-      yield* runtime.setActiveRun(session, activeRun);
+      yield* deps.setActiveRun(session, activeRun);
 
       const stopTyping = Effect.promise(() => activeRun.typing.stop());
       let failed = false;
@@ -136,10 +136,10 @@ export const executeRunBatch =
 
           switch (completion.type) {
             case "send-final-response":
-              yield* runtime.sendFinalResponse(promptContext.replyTargetMessage, result.transcript);
+              yield* deps.sendFinalResponse(promptContext.replyTargetMessage, result.transcript);
               break;
             case "send-question-ui-failure":
-              yield* runtime.sendQuestionUiFailure(
+              yield* deps.sendQuestionUiFailure(
                 promptContext.replyTargetMessage,
                 completion.message,
               );
@@ -152,7 +152,7 @@ export const executeRunBatch =
         });
 
       const runResult = yield* Effect.gen(function* () {
-        const result = yield* runtime.runPrompts({
+        const result = yield* deps.runPrompts({
           channelId: session.channelId,
           session: session.opencode,
           activeRun,
@@ -162,7 +162,7 @@ export const executeRunBatch =
 
         if (activeRun.interruptRequested) {
           activeRun.interruptRequested = false;
-          yield* runtime.logger.warn("interrupt request did not stop run", {
+          yield* deps.logger.warn("interrupt request did not stop run", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
           });
@@ -170,42 +170,42 @@ export const executeRunBatch =
 
         yield* stopTyping;
         yield* finalizeProgress();
-        yield* runtime.logger.info("completed run", {
+        yield* deps.logger.info("completed run", {
           channelId: session.channelId,
           sessionId: session.opencode.sessionId,
           opencodeMessageId: result.messageId,
         });
-      }).pipe(Effect.either);
+      }).pipe(Effect.result);
 
-      if (runResult._tag === "Left") {
-        const error = runResult.left;
+      if (runResult._tag === "Failure") {
+        const error = runResult.failure;
         if (activeRun.interruptRequested) {
-          yield* runtime.logger.info("interrupted run", {
+          yield* deps.logger.info("interrupted run", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
-            error: runtime.formatError(error),
+            error: deps.formatError(error),
           });
           yield* stopTyping;
           yield* finalizeProgress("interrupted");
-          yield* runtime.sendRunInterruptedInfo(originMessage);
+          yield* deps.sendRunInterruptedInfo(originMessage);
         } else {
-          yield* runtime.logger.error("run failed", {
+          yield* deps.logger.error("run failed", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
-            error: runtime.formatError(error),
+            error: deps.formatError(error),
           });
           yield* stopTyping;
-          yield* runtime.sendRunFailure(currentPromptReplyTargetMessage(activeRun), error);
+          yield* deps.sendRunFailure(currentPromptReplyTargetMessage(activeRun), error);
           failed = true;
         }
       }
 
       yield* stopTyping;
-      yield* runtime.terminateQuestionBatches(session.opencode.sessionId);
-      yield* runtime.setActiveRun(session, null);
+      yield* deps.terminateQuestionBatches(session.opencode.sessionId);
+      yield* deps.setActiveRun(session, null);
       yield* Fiber.interrupt(progressFiber);
 
       if (failed) {
-        yield* runtime.ensureSessionHealthAfterFailure(session, originMessage).pipe(Effect.ignore);
+        yield* deps.ensureSessionHealthAfterFailure(session, originMessage).pipe(Effect.ignore);
       }
     });

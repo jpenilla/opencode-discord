@@ -2,7 +2,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import { PassThrough } from "node:stream";
 
 import { AttachmentBuilder } from "discord.js";
-import { Effect } from "effect";
+import { Effect, Fiber } from "effect";
 import * as v from "valibot";
 
 import { requireSendableChannel, sendBridgeMessage } from "@/tools/bridge/handlers/shared.ts";
@@ -19,6 +19,14 @@ export const uploadPayloadSchema = v.object({
 
 export type UploadPayload = v.InferOutput<typeof uploadPayloadSchema>;
 export const uploadMetadataHeader = "x-opencode-discord-upload";
+type UploadRequest = Partial<
+  Pick<ToolBridgeHandlerContext<UploadPayload>["request"], "pause" | "resume" | "unpipe">
+> & { destroyed?: boolean };
+type UploadStream = {
+  destroyed?: boolean;
+  destroy: (error?: Error) => void;
+};
+type UploadWritable = PassThrough;
 
 export const parseUploadHeaders = (headers: IncomingHttpHeaders) =>
   parseEncodedBridgePayload(uploadPayloadSchema, headers[uploadMetadataHeader], {
@@ -26,26 +34,33 @@ export const parseUploadHeaders = (headers: IncomingHttpHeaders) =>
     invalidError: "invalid upload metadata",
   });
 
-const destroyStream = (stream: { destroyed?: boolean; destroy: (error?: Error) => void }) => {
+const destroyStream = (
+  stream: UploadStream,
+  error?: Error,
+) => {
   if (!stream.destroyed) {
-    stream.destroy();
+    stream.destroy(error);
   }
 };
 
-const stopReadingRequestBody = (
-  request: Pick<ToolBridgeHandlerContext<UploadPayload>["request"], "pause" | "unpipe">,
-) =>
+const stopReadingRequestBody = (request: UploadRequest) =>
   Effect.sync(() => {
-    request.unpipe();
-    request.pause();
+    request.unpipe?.();
+    if (request.destroyed) {
+      return;
+    }
+
+    if (typeof request.resume === "function") {
+      request.resume();
+      return;
+    }
+
+    request.pause?.();
   });
 
 export const cleanupFailedUpload = (
-  request: Pick<ToolBridgeHandlerContext<UploadPayload>["request"], "pause" | "unpipe">,
-  uploadStream: {
-    destroyed?: boolean;
-    destroy: (error?: Error) => void;
-  },
+  request: UploadRequest,
+  uploadStream: UploadStream,
 ) =>
   Effect.all(
     [
@@ -59,25 +74,42 @@ export const cleanupFailedUpload = (
     { discard: true },
   );
 
+const startUploadFiber = (
+  request: ToolBridgeHandlerContext<UploadPayload>["request"],
+  uploadStream: UploadWritable,
+) =>
+  pipeAsyncIterableToWritable(request, uploadStream).pipe(
+    Effect.andThen(endWritable(uploadStream)),
+    Effect.tapError((error) =>
+      Effect.sync(() => {
+        destroyStream(uploadStream, error);
+      }),
+    ),
+    Effect.forkChild({ startImmediately: true }),
+  );
+
+const failUpload = <E>(request: UploadRequest, uploadStream: UploadStream, error: E) =>
+  cleanupFailedUpload(request, uploadStream).pipe(Effect.andThen(Effect.fail<E>(error)));
+
 const handleUpload = (context: ToolBridgeHandlerContext<UploadPayload>, kind: "file" | "image") => {
   return Effect.gen(function* () {
     const { caption, displayPath, filename } = context.payload;
     const channel = yield* requireSendableChannel(context.activeRun);
     const uploadStream = new PassThrough();
     const attachment = new AttachmentBuilder(uploadStream, { name: filename });
+    const uploadFiber = yield* startUploadFiber(context.request, uploadStream);
 
-    yield* Effect.all(
-      [
-        sendBridgeMessage(channel, {
-          content: caption,
-          files: [attachment],
-        }),
-        pipeAsyncIterableToWritable(context.request, uploadStream).pipe(
-          Effect.tap(() => endWritable(uploadStream)),
-        ),
-      ],
-      { concurrency: "unbounded", discard: true },
-    ).pipe(Effect.onError(() => cleanupFailedUpload(context.request, uploadStream)));
+    const sendResult = yield* sendBridgeMessage(channel, {
+      content: caption,
+      files: [attachment],
+    }).pipe(Effect.result);
+    if (sendResult._tag === "Failure") {
+      return yield* failUpload(context.request, uploadStream, sendResult.failure);
+    }
+
+    yield* Fiber.join(uploadFiber).pipe(
+      Effect.catch((error) => failUpload(context.request, uploadStream, error)),
+    );
 
     return `Sent ${kind} ${displayPath ?? filename}`;
   });

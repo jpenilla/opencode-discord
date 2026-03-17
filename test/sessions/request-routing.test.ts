@@ -19,7 +19,7 @@ const makeActiveRun = async (
 });
 
 const drainQueue = <A>(queue: Queue.Queue<A>) =>
-  Effect.runPromise(Queue.takeAll(queue).pipe(Effect.map((items) => [...items])));
+  Effect.runPromise(Queue.clear(queue).pipe(Effect.map((items) => [...items])));
 type EnqueueableSession = Parameters<typeof enqueueRunRequest>[0];
 
 describe("enqueueRunRequest", () => {

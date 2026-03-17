@@ -12,7 +12,7 @@ import {
 export type {
   GuildCommand,
   GuildCommandExecutionContext,
-  GuildCommandRuntimeDeps,
+  GuildCommandDeps,
 } from "./commands/definition.ts";
 
 export const GUILD_COMMANDS = [

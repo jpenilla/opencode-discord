@@ -1,4 +1,13 @@
-import { Config, ConfigProvider, Context, Effect, Layer, Option, Redacted } from "effect";
+import {
+  Config,
+  ConfigProvider,
+  Effect,
+  Layer,
+  Option,
+  Redacted,
+  Schema,
+  ServiceMap,
+} from "effect";
 
 export type AppConfigShape = {
   discordToken: Redacted.Redacted<string>;
@@ -20,22 +29,19 @@ export type AppConfigShape = {
   sandboxEnvPassthrough: ReadonlyArray<string>;
 };
 
-export class AppConfig extends Context.Tag("AppConfig")<AppConfig, AppConfigShape>() {}
+export class AppConfig extends ServiceMap.Service<AppConfig, AppConfigShape>()("AppConfig") {}
 
 const defaultToolBridgeSocketPath = () =>
   `/tmp/opencode-discord-${process.pid}-${crypto.randomUUID().slice(0, 8)}/bridge.sock`;
 
 const positiveInteger = (name: string, fallback: number) =>
   Config.withDefault(
-    Config.validate(Config.integer(name), {
-      message: `${name} must be a positive integer`,
-      validation: (value) => value > 0,
-    }),
+    Config.schema(Schema.Int.check(Schema.isGreaterThan(0)), name),
     fallback,
   );
 
 const stringList = (name: string) =>
-  Config.withDefault(Config.array(Config.string(), name), [] as Array<string>);
+  Config.withDefault(Config.schema(Schema.Array(Schema.String), name), [] as Array<string>);
 
 const optionalString = (name: string) =>
   Config.map(Config.option(Config.string(name)), (value) =>
@@ -45,8 +51,11 @@ const optionalString = (name: string) =>
     }),
   );
 
-const AppConfigSource: Config.Config<AppConfigShape> = Config.all({
-  discordToken: Config.redacted(Config.nonEmptyString("discordToken")),
+const nonEmptyRedacted = (name: string) =>
+  Config.map(Config.nonEmptyString(name), (value) => Redacted.make(value));
+
+const AppConfigSource = Config.all({
+  discordToken: nonEmptyRedacted("discordToken"),
   triggerPhrase: Config.withDefault(Config.string("triggerPhrase"), "hey opencode"),
   ignoreOtherBotTriggers: Config.withDefault(Config.boolean("ignoreOtherBotTriggers"), false),
   sessionInstructions: Config.withDefault(Config.string("sessionInstructions"), ""),
@@ -59,12 +68,11 @@ const AppConfigSource: Config.Config<AppConfigShape> = Config.all({
     true,
   ),
   sessionIdleTimeoutMs: positiveInteger("sessionIdleTimeoutMs", 30 * 60 * 1_000),
-  toolBridgeSocketPath: Config.orElse(Config.string("discordToolBridgeSocket"), () =>
-    Config.sync(defaultToolBridgeSocketPath),
+  toolBridgeSocketPath: Config.string("discordToolBridgeSocket").pipe(
+    Config.orElse(() => Config.succeed(defaultToolBridgeSocketPath())),
   ),
-  toolBridgeToken: Config.redacted(Config.sync(() => crypto.randomUUID())),
   sandboxBackend: Config.withDefault(
-    Config.literal("auto", "unsafe-dev", "bwrap")("sandboxBackend"),
+    Config.schema(Schema.Literals(["auto", "unsafe-dev", "bwrap"]), "sandboxBackend"),
     "auto",
   ),
   opencodeBin: Config.withDefault(Config.string("opencodeBin"), "opencode"),
@@ -73,7 +81,17 @@ const AppConfigSource: Config.Config<AppConfigShape> = Config.all({
   sandboxEnvPassthrough: stringList("sandboxEnvPassthrough"),
 });
 
-export const AppConfigLive = Layer.effect(
+export const parseAppConfig = (
+  provider = ConfigProvider.fromEnv().pipe(ConfigProvider.constantCase),
+) =>
+  AppConfigSource.parse(provider).pipe(
+    Effect.map((config) => ({
+      ...config,
+      toolBridgeToken: Redacted.make(crypto.randomUUID()),
+    })),
+  );
+
+export const AppConfigLayer = Layer.effect(
   AppConfig,
-  Effect.withConfigProvider(AppConfigSource, ConfigProvider.constantCase(ConfigProvider.fromEnv())),
+  parseAppConfig(),
 );

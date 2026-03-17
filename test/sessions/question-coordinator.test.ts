@@ -3,7 +3,7 @@ import type { Interaction, Message, MessageCreateOptions, MessageEditOptions } f
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
 import { Deferred, Effect, Ref } from "effect";
 
-import { createQuestionRuntime } from "@/sessions/question-runtime.ts";
+import { createQuestionCoordinator } from "@/sessions/question-coordinator.ts";
 import { createPromptState } from "@/sessions/prompt-state.ts";
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
 import { unsafeStub } from "../support/stub.ts";
@@ -141,7 +141,7 @@ const makeHarness = async (options?: {
   session.activeRun = activeRun;
 
   const runtime = await Effect.runPromise(
-    createQuestionRuntime({
+    createQuestionCoordinator({
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       replyToQuestion: (_opencode, requestId, _answers) =>
@@ -156,7 +156,7 @@ const makeHarness = async (options?: {
         ),
       sendQuestionUiFailure: (message, error) =>
         Ref.update(questionUiFailureTargetIds, (current) => [...current, message.id]).pipe(
-          Effect.zipRight(
+          Effect.andThen(
             Ref.update(sentQuestionUiFailures, (current) => [...current, String(error)]),
           ),
         ),
@@ -263,7 +263,7 @@ const makeHarness = async (options?: {
   };
 };
 
-describe("createQuestionRuntime", () => {
+describe("createQuestionCoordinator", () => {
   test("posts a question batch once and resumes typing after a reply event", async () => {
     const harness = await makeHarness();
 

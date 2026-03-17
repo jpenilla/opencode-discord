@@ -19,7 +19,7 @@ type QuestionPersistResult<Batch> =
   | { type: "missing" }
   | { type: "conflict"; batch: Batch };
 
-type QuestionSubmissionRuntime<
+type QuestionSubmissionDeps<
   Batch extends QuestionSubmissionBatch<SessionHandle>,
   Interaction,
   SessionHandle,
@@ -70,7 +70,7 @@ type RejectQuestionInput<Interaction> = {
 
 export const submitQuestionBatch =
   <Batch extends QuestionSubmissionBatch<SessionHandle>, Interaction, SessionHandle>(
-    runtime: QuestionSubmissionRuntime<Batch, Interaction, SessionHandle>,
+    deps: QuestionSubmissionDeps<Batch, Interaction, SessionHandle>,
   ) =>
   ({
     interaction,
@@ -80,49 +80,49 @@ export const submitQuestionBatch =
     answers,
   }: SubmitQuestionInput<Interaction>): Effect.Effect<boolean, unknown> =>
     Effect.gen(function* () {
-      const submitting = yield* runtime.tryPersistBatch(
+      const submitting = yield* deps.tryPersistBatch(
         requestId,
         expectedVersion,
         actorId,
         (current) => setQuestionBatchStatus(current, "submitting"),
       );
       if (submitting.type === "missing") {
-        yield* runtime.replyExpired(interaction);
+        yield* deps.replyExpired(interaction);
         return true;
       }
       if (submitting.type === "conflict") {
-        yield* runtime.replyConflict(interaction, submitting.batch);
+        yield* deps.replyConflict(interaction, submitting.batch);
         return true;
       }
 
-      yield* runtime.updateInteraction(interaction, submitting.batch);
+      yield* deps.updateInteraction(interaction, submitting.batch);
 
-      const submitResult = yield* runtime
+      const submitResult = yield* deps
         .submitToOpencode(submitting.batch.session.opencode, submitting.batch.request.id, answers)
-        .pipe(Effect.either);
-      if (submitResult._tag === "Left") {
-        const restored = yield* runtime.restoreBatch(requestId, (current) =>
+        .pipe(Effect.result);
+      if (submitResult._tag === "Failure") {
+        const restored = yield* deps.restoreBatch(requestId, (current) =>
           setQuestionBatchStatus(current, "active"),
         );
         if (restored) {
-          yield* runtime.editBatch(restored).pipe(Effect.ignore);
+          yield* deps.editBatch(restored).pipe(Effect.ignore);
         }
-        yield* runtime
+        yield* deps
           .followUpFailure(
             interaction,
-            `Failed to submit answers: ${runtime.formatError(submitResult.left)}`,
+            `Failed to submit answers: ${deps.formatError(submitResult.failure)}`,
           )
           .pipe(Effect.ignore);
         return true;
       }
 
-      yield* runtime.finalizeBatch(submitting.batch.request.id, "answered", answers);
+      yield* deps.finalizeBatch(submitting.batch.request.id, "answered", answers);
       return true;
     });
 
 export const rejectQuestionBatch =
   <Batch extends QuestionSubmissionBatch<SessionHandle>, Interaction, SessionHandle>(
-    runtime: QuestionSubmissionRuntime<Batch, Interaction, SessionHandle>,
+    deps: QuestionSubmissionDeps<Batch, Interaction, SessionHandle>,
   ) =>
   ({
     interaction,
@@ -131,50 +131,50 @@ export const rejectQuestionBatch =
     actorId,
   }: RejectQuestionInput<Interaction>): Effect.Effect<boolean, unknown> =>
     Effect.gen(function* () {
-      const rejecting = yield* runtime.tryPersistBatch(
+      const rejecting = yield* deps.tryPersistBatch(
         requestId,
         expectedVersion,
         actorId,
         (current) => setQuestionBatchStatus(current, "submitting"),
       );
       if (rejecting.type === "missing") {
-        yield* runtime.replyExpired(interaction);
+        yield* deps.replyExpired(interaction);
         return true;
       }
       if (rejecting.type === "conflict") {
-        yield* runtime.replyConflict(interaction, rejecting.batch);
+        yield* deps.replyConflict(interaction, rejecting.batch);
         return true;
       }
 
-      yield* runtime.updateInteraction(interaction, rejecting.batch);
+      yield* deps.updateInteraction(interaction, rejecting.batch);
 
       if (rejecting.batch.session.activeRun) {
         rejecting.batch.session.activeRun.questionOutcome = { _tag: "user-rejected" };
       }
 
-      const rejectResult = yield* runtime
+      const rejectResult = yield* deps
         .rejectInOpencode(rejecting.batch.session.opencode, rejecting.batch.request.id)
-        .pipe(Effect.either);
-      if (rejectResult._tag === "Left") {
+        .pipe(Effect.result);
+      if (rejectResult._tag === "Failure") {
         if (rejecting.batch.session.activeRun) {
           rejecting.batch.session.activeRun.questionOutcome = noQuestionOutcome();
         }
 
-        const restored = yield* runtime.restoreBatch(requestId, (current) =>
+        const restored = yield* deps.restoreBatch(requestId, (current) =>
           setQuestionBatchStatus(current, "active"),
         );
         if (restored) {
-          yield* runtime.editBatch(restored).pipe(Effect.ignore);
+          yield* deps.editBatch(restored).pipe(Effect.ignore);
         }
-        yield* runtime
+        yield* deps
           .followUpFailure(
             interaction,
-            `Failed to reject questions: ${runtime.formatError(rejectResult.left)}`,
+            `Failed to reject questions: ${deps.formatError(rejectResult.failure)}`,
           )
           .pipe(Effect.ignore);
         return true;
       }
 
-      yield* runtime.finalizeBatch(rejecting.batch.request.id, "rejected");
+      yield* deps.finalizeBatch(rejecting.batch.request.id, "rejected");
       return true;
     });

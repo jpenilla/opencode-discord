@@ -20,10 +20,10 @@
   },
   "dependencies": {
     "@discordjs/builders": "^1.13.1",
-    "@effect/platform-bun": "^0.87.1",
+    "@effect/platform-bun": "4.0.0-beta.33",
     "@opencode-ai/sdk": "^1.2.26",
     "discord.js": "^14.25.1",
-    "effect": "^3.19.19",
+    "effect": "4.0.0-beta.33",
     "valibot": "^1.2.0"
   },
   "devDependencies": {

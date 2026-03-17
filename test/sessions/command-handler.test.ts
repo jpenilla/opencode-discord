@@ -3,7 +3,7 @@ import { ChannelType, type Interaction, type Message, type SendableChannels } fr
 import { Deferred, Effect, Queue, Ref } from "effect";
 
 import { formatErrorResponse } from "@/discord/formatting.ts";
-import { createCommandRuntime } from "@/sessions/command-runtime.ts";
+import { createCommandHandler } from "@/sessions/command-handler.ts";
 import { QUESTION_PENDING_INTERRUPT_MESSAGE } from "@/sessions/command-lifecycle.ts";
 import { createPromptState } from "@/sessions/prompt-state.ts";
 import {
@@ -157,12 +157,12 @@ const makeHarness = async (options?: {
       Effect.runPromise(Ref.update(edits, (current) => [...current, content ?? ""])),
   });
 
-  const runtime = createCommandRuntime({
+  const runtime = createCommandHandler({
     getSession: (channelId) =>
       Effect.succeed(
         (options?.hasSession ?? true) && channelId === session.channelId ? session : null,
       ),
-    getLiveSession: (channelId) =>
+    getLoadedSession: (channelId) =>
       Effect.succeed(
         (options?.hasSession ?? true) && channelId === session.channelId ? session : null,
       ),
@@ -195,7 +195,7 @@ const makeHarness = async (options?: {
     beginIdleCompaction: () => Ref.set(idleCompactionActive, true),
     setIdleCompactionCard: (_sessionId, card) =>
       Ref.set(idleCardRef, card).pipe(
-        Effect.zipRight(Ref.set(idleCompactionActive, card !== null)),
+        Effect.andThen(Ref.set(idleCompactionActive, card !== null)),
       ),
     setIdleCompactionInterruptRequested: (_sessionId, interruptRequested) =>
       Ref.set(idleInterruptRequested, interruptRequested),
@@ -212,14 +212,14 @@ const makeHarness = async (options?: {
       ),
     finalizeIdleCompactionCard: (_sessionId, title, body) =>
       Ref.set(idleCardRef, null).pipe(
-        Effect.zipRight(Ref.set(idleCompactionActive, false)),
-        Effect.zipRight(Ref.update(compactionUpdates, (current) => [...current, { title, body }])),
-        Effect.zipRight(Deferred.succeed(compactUpdated, undefined).pipe(Effect.ignore)),
+        Effect.andThen(Ref.set(idleCompactionActive, false)),
+        Effect.andThen(Ref.update(compactionUpdates, (current) => [...current, { title, body }])),
+        Effect.andThen(Deferred.succeed(compactUpdated, undefined).pipe(Effect.ignore)),
       ),
     isSessionHealthy: () => Effect.succeed(options?.sessionHealthy ?? true),
     compactSession: () =>
       Deferred.succeed(compactStarted, undefined).pipe(
-        Effect.zipRight(Deferred.await(compactFinish)),
+        Effect.andThen(Deferred.await(compactFinish)),
       ),
     interruptSession: () =>
       options?.interruptResult === "failure"
@@ -257,10 +257,11 @@ const makeHarness = async (options?: {
     compactStarted,
     compactFinish,
     compactUpdated,
+    idleInterruptRequested,
   };
 };
 
-describe("createCommandRuntime", () => {
+describe("createCommandHandler", () => {
   test("rejects unhealthy compact requests after deferring", async () => {
     const harness = await makeHarness({
       sessionHealthy: false,
@@ -391,6 +392,35 @@ describe("createCommandRuntime", () => {
     ]);
   });
 
+  test("restores the compaction card when interrupting compaction fails", async () => {
+    const harness = await makeHarness({
+      interruptResult: "failure",
+    });
+    harness.interaction.commandName = "interrupt";
+    await Effect.runPromise(
+      Ref.set(harness.idleCardRef, unsafeStub<Message>({ id: "compaction-card" })),
+    );
+
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+
+    expect(handled).toBe(true);
+    expect(await getRef(harness.idleInterruptRequested)).toBe(false);
+    expect(await getRef(harness.compactionUpdates)).toEqual([
+      {
+        title: "‼️ Interrupting compaction",
+        body: "OpenCode is stopping session compaction.",
+      },
+      {
+        title: "🗜️ Compacting session",
+        body: "OpenCode is summarizing earlier context for this session.",
+      },
+    ]);
+    expect((await getRef(harness.idleCardRef))?.id).toBe("compaction-card");
+    expect(await getRef(harness.edits)).toEqual([
+      formatErrorResponse("## ❌ Failed to interrupt compaction", "interrupt failed"),
+    ]);
+  });
+
   test("clears the channel session for the next triggered message", async () => {
     const harness = await makeHarness({
       hasSession: false,
@@ -476,7 +506,7 @@ describe("createCommandRuntime", () => {
     );
   });
 
-  test("toggles compaction summary visibility and updates the live session", async () => {
+  test("toggles compaction summary visibility and updates the loaded session", async () => {
     const harness = await makeHarness();
     harness.interaction.commandName = "toggle-compaction-summaries";
 

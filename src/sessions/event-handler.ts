@@ -1,19 +1,14 @@
-import type { Event, QuestionAnswer, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2";
+import type { AssistantMessage, Event, QuestionAnswer, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2";
 import { Deferred, Effect, Queue } from "effect";
 
 import { compactionCardContent } from "@/discord/compaction-card.ts";
 import {
-  getAssistantMessageUpdated,
   getEventSessionId,
-  getQuestionAsked,
-  getQuestionRejected,
-  getQuestionReplied,
+  getEventByType,
+  getMessageUpdatedByRole,
+  getUpdatedPartByType,
   isCompactionSummaryAssistant,
   isObservedAssistantMessage,
-  getSessionError,
-  getSessionStatusUpdated,
-  getToolPartUpdated,
-  getUserMessageUpdated,
 } from "@/opencode/events.ts";
 import type { OpencodeServiceShape } from "@/opencode/service.ts";
 import {
@@ -24,11 +19,11 @@ import {
   handleUserMessageUpdated,
   resolvePromptTrackingActions,
 } from "@/sessions/prompt-state.ts";
-import { collectProgressEvents } from "@/sessions/progress.ts";
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
+import type { RunProgressEvent } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
-export type EventRuntime = {
+export type EventHandler = {
   handleEvent: (event: Event) => Effect.Effect<void, unknown>;
 };
 
@@ -45,7 +40,7 @@ const recordCurrentPromptMessage = (activeRun: ActiveRun, messageId: string) => 
 
 const recordPromptAssistantMessage = (
   activeRun: ActiveRun,
-  message: NonNullable<ReturnType<typeof getAssistantMessageUpdated>>,
+  message: AssistantMessage,
 ) => {
   if (isCompactionSummaryAssistant(message)) {
     return;
@@ -72,7 +67,7 @@ const isInFlightToolPart = (status: ToolPart["state"]["status"]) =>
 
 const selectToolPartForActiveRun = (
   activeRun: ActiveRun,
-  toolPart: NonNullable<ReturnType<typeof getToolPartUpdated>>,
+  toolPart: ToolPart,
 ) => {
   const belongsToCurrentPrompt = assistantBelongsToCurrentPrompt(activeRun, toolPart.messageID);
   const isObservedCall = activeRun.observedToolCallIds.has(toolPart.callID);
@@ -86,7 +81,60 @@ const selectToolPartForActiveRun = (
   return toolPart;
 };
 
-type EventRuntimeDeps = {
+const toProgressEvent = (event: Event): RunProgressEvent | null => {
+  const toolPart = getUpdatedPartByType(event, "tool");
+  if (toolPart) {
+    return {
+      type: "tool-updated",
+      part: toolPart,
+    };
+  }
+
+  const patchPart = getUpdatedPartByType(event, "patch");
+  if (patchPart) {
+    return {
+      type: "patch-updated",
+      part: patchPart,
+    };
+  }
+
+  const sessionStatus = getEventByType(event, "session.status")?.properties;
+  if (sessionStatus) {
+    return {
+      type: "session-status",
+      status: sessionStatus.status,
+    };
+  }
+
+  const compactionPart = getUpdatedPartByType(event, "compaction");
+  if (compactionPart) {
+    return {
+      type: "session-compacting",
+      part: compactionPart,
+    };
+  }
+
+  const compacted = getEventByType(event, "session.compacted")?.properties;
+  if (compacted) {
+    return {
+      type: "session-compacted",
+      compacted,
+    };
+  }
+
+  const reasoningPart = getUpdatedPartByType(event, "reasoning");
+  if (reasoningPart?.time.end) {
+    return {
+      type: "reasoning-completed",
+      partId: reasoningPart.id,
+      text: reasoningPart.text,
+    };
+  }
+
+  return null;
+};
+
+type EventHandlerDeps = {
   getSessionContext: (
     sessionId: string,
   ) => Effect.Effect<{ session: ChannelSession; activeRun: ActiveRun | null } | null, unknown>;
@@ -112,7 +160,7 @@ type EventRuntimeDeps = {
   formatError: (error: unknown) => string;
 };
 
-export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
+export const createEventHandler = (deps: EventHandlerDeps): EventHandler => ({
   handleEvent: (event) =>
     Effect.gen(function* () {
       const sessionId = getEventSessionId(event);
@@ -126,15 +174,15 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
       }
 
       const { activeRun } = context;
-      const progressEvents = collectProgressEvents(event);
-      const userMessage = getUserMessageUpdated(event);
-      const assistantMessage = getAssistantMessageUpdated(event);
-      const sessionError = getSessionError(event);
-      const sessionStatus = getSessionStatusUpdated(event);
-      const toolPart = getToolPartUpdated(event);
-      const questionAsked = getQuestionAsked(event);
-      const questionReplied = getQuestionReplied(event);
-      const questionRejected = getQuestionRejected(event);
+      const progressEvent = toProgressEvent(event);
+      const userMessage = getMessageUpdatedByRole(event, "user");
+      const assistantMessage = getMessageUpdatedByRole(event, "assistant");
+      const sessionError = getEventByType(event, "session.error")?.properties ?? null;
+      const sessionStatus = getEventByType(event, "session.status")?.properties ?? null;
+      const toolPart = getUpdatedPartByType(event, "tool");
+      const questionAsked = getEventByType(event, "question.asked")?.properties ?? null;
+      const questionReplied = getEventByType(event, "question.replied")?.properties ?? null;
+      const questionRejected = getEventByType(event, "question.rejected")?.properties ?? null;
 
       if (questionAsked) {
         yield* deps.handleQuestionEvent({
@@ -180,7 +228,7 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
             targetSession.emittedCompactionSummaryMessageIds.add(messageId);
             return deps.sendCompactionSummary(targetSession, text);
           }),
-          Effect.catchAll((error) =>
+          Effect.catch((error) =>
             deps.logger.warn("failed to load compaction summary transcript", {
               channelId: targetSession.channelId,
               sessionId,
@@ -250,15 +298,11 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
         // message has been bound to the assistant lineage. Pending/running updates are still
         // surfaced immediately so live tool activity is not hidden while the current prompt is
         // still being correlated.
-        const runProgressEvents = relevantToolPart
-          ? progressEvents
-          : progressEvents.filter((progressEvent) => progressEvent.type !== "tool-updated");
-        yield* Effect.forEach(
-          runProgressEvents,
-          (progressEvent) =>
-            Queue.offer(activeRun.progressQueue, progressEvent).pipe(Effect.asVoid),
-          { discard: true },
-        );
+        const runProgressEvent =
+          progressEvent?.type === "tool-updated" && !relevantToolPart ? null : progressEvent;
+        if (runProgressEvent) {
+          yield* Queue.offer(activeRun.progressQueue, runProgressEvent).pipe(Effect.asVoid);
+        }
 
         const { completePrompt, failPrompt } = resolvePromptTrackingActions(promptActions);
 
@@ -267,7 +311,7 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
             Effect.flatMap((result) =>
               Deferred.succeed(completePrompt.deferred, result).pipe(Effect.ignore),
             ),
-            Effect.catchAll((error) =>
+            Effect.catch((error) =>
               deps.logger
                 .warn("failed to resolve prompt result from event stream", {
                   channelId: context.session.channelId,
@@ -276,7 +320,7 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
                   error: deps.formatError(error),
                 })
                 .pipe(
-                  Effect.zipRight(
+                  Effect.andThen(
                     Deferred.fail(completePrompt.deferred, error).pipe(Effect.ignore),
                   ),
                 ),
@@ -290,7 +334,7 @@ export const createEventRuntime = (deps: EventRuntimeDeps): EventRuntime => ({
         return;
       }
 
-      if (progressEvents.some((progressEvent) => progressEvent.type === "session-compacted")) {
+      if (progressEvent?.type === "session-compacted") {
         const compactedCard = compactionCardContent("compacted");
         yield* deps.finalizeIdleCompactionCard(sessionId, compactedCard.title, compactedCard.body);
       }

@@ -1,4 +1,4 @@
-import { Chunk, Context, Effect, FiberSet, Layer, Queue, Ref } from "effect";
+import { Effect, FiberSet, Layer, Queue, Ref, ServiceMap } from "effect";
 import { type Interaction, type Message, type SendableChannels } from "discord.js";
 
 import { AppConfig } from "@/config.ts";
@@ -16,14 +16,15 @@ import { formatCompactionSummary } from "@/discord/progress.ts";
 import { OpencodeEventQueue } from "@/opencode/events.ts";
 import type { Invocation } from "@/discord/triggers.ts";
 import { OpencodeService } from "@/opencode/service.ts";
-import { createCommandRuntime } from "@/sessions/command-runtime.ts";
-import { createEventRuntime } from "@/sessions/event-runtime.ts";
+import { createCommandHandler } from "@/sessions/command-handler.ts";
+import { createEventHandler } from "@/sessions/event-handler.ts";
 import { collectAttachmentMessages } from "@/sessions/message-context.ts";
 import { coordinateActiveRunPrompts } from "@/sessions/prompt-coordinator.ts";
 import { runProgressWorker } from "@/sessions/progress.ts";
-import { createQuestionRuntime } from "@/sessions/question-runtime.ts";
+import { createQuestionCoordinator } from "@/sessions/question-coordinator.ts";
 import { enqueueRunRequest } from "@/sessions/request-routing.ts";
 import { executeRunBatch } from "@/sessions/run-executor.ts";
+import { takeQueuedRunBatch } from "@/sessions/run-batch.ts";
 import {
   createSessionLifecycle,
   type SessionLifecycleState,
@@ -41,10 +42,9 @@ export type ChannelSessionsShape = {
   shutdown: () => Effect.Effect<void, unknown>;
 };
 
-export class ChannelSessions extends Context.Tag("ChannelSessions")<
-  ChannelSessions,
-  ChannelSessionsShape
->() {}
+export class ChannelSessions extends ServiceMap.Service<ChannelSessions, ChannelSessionsShape>()(
+  "ChannelSessions",
+) {}
 type FallibleEffect<A> = Effect.Effect<A, unknown>;
 
 const formatError = (error: unknown) => {
@@ -54,9 +54,9 @@ const formatError = (error: unknown) => {
   return String(error);
 };
 
-type SessionRuntimeState = SessionLifecycleState;
+type ChannelSessionsState = SessionLifecycleState;
 
-const createSessionRuntimeState = (): SessionRuntimeState => ({
+const createChannelSessionsState = (): ChannelSessionsState => ({
   sessionsByChannelId: new Map(),
   sessionsBySessionId: new Map(),
   activeRunsBySessionId: new Map(),
@@ -64,7 +64,7 @@ const createSessionRuntimeState = (): SessionRuntimeState => ({
   idleCompactionsBySessionId: new Map(),
 });
 
-export const ChannelSessionsLive = Layer.scoped(
+export const ChannelSessionsLayer = Layer.effect(
   ChannelSessions,
   Effect.gen(function* () {
     const logger = yield* Logger;
@@ -72,7 +72,7 @@ export const ChannelSessionsLive = Layer.scoped(
     const opencode = yield* OpencodeService;
     const eventQueue = yield* OpencodeEventQueue;
     const sessionStore = yield* SessionStore;
-    const stateRef = yield* Ref.make(createSessionRuntimeState());
+    const stateRef = yield* Ref.make(createChannelSessionsState());
     const shutdownStartedRef = yield* Ref.make(false);
     const lateIdleCompactionFinalizersRef = yield* Ref.make(
       new Map<string, { title: string; body: string }>(),
@@ -105,7 +105,8 @@ export const ChannelSessionsLive = Layer.scoped(
       touchPersistedSession: sessionStore.touchSession,
       deletePersistedSession: sessionStore.deleteSession,
       isSessionHealthy: opencode.isHealthy,
-      startWorker: (session) => FiberSet.run(fiberSet, worker(session)).pipe(Effect.asVoid),
+      startWorker: (session) =>
+        FiberSet.run(fiberSet, { startImmediately: true })(worker(session)).pipe(Effect.asVoid),
       logger,
       sessionInstructions: config.sessionInstructions,
       triggerPhrase: config.triggerPhrase,
@@ -150,7 +151,7 @@ export const ChannelSessionsLive = Layer.scoped(
           }
 
           return Effect.promise(() => editInfoCard(card, title, body)).pipe(
-            Effect.catchAll((error) =>
+            Effect.catch((error) =>
               logger.warn("failed to finalize idle compaction card", {
                 sessionId,
                 error: formatError(error),
@@ -163,7 +164,7 @@ export const ChannelSessionsLive = Layer.scoped(
 
     const attachIdleCompactionCard = (sessionId: string, card: Message | null) =>
       setIdleCompactionCard(sessionId, card).pipe(
-        Effect.zipRight(
+        Effect.andThen(
           !card
             ? Effect.void
             : Ref.modify(
@@ -187,7 +188,7 @@ export const ChannelSessionsLive = Layer.scoped(
                 Effect.flatMap((pending) =>
                   pending
                     ? Effect.promise(() => editInfoCard(card, pending.title, pending.body)).pipe(
-                        Effect.catchAll((error) =>
+                        Effect.catch((error) =>
                           logger.warn("failed to finalize late idle compaction card", {
                             sessionId,
                             error: formatError(error),
@@ -209,7 +210,7 @@ export const ChannelSessionsLive = Layer.scoped(
           }
 
           return Effect.promise(() => editInfoCard(card, title, body)).pipe(
-            Effect.catchAll((error) =>
+            Effect.catch((error) =>
               logger.warn("failed to update idle compaction card", {
                 sessionId,
                 error: formatError(error),
@@ -245,7 +246,7 @@ export const ChannelSessionsLive = Layer.scoped(
           text: formatted,
         }),
       ).pipe(
-        Effect.catchAll((error) =>
+        Effect.catch((error) =>
           logger.warn("failed to send compaction summary", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
@@ -256,7 +257,7 @@ export const ChannelSessionsLive = Layer.scoped(
       );
     };
 
-    const questionRuntime = yield* createQuestionRuntime({
+    const questionCoordinator = yield* createQuestionCoordinator({
       getSessionContext,
       replyToQuestion: opencode.replyToQuestion,
       rejectQuestion: opencode.rejectQuestion,
@@ -265,9 +266,9 @@ export const ChannelSessionsLive = Layer.scoped(
       formatError,
     });
 
-    const eventRuntime = createEventRuntime({
+    const eventHandler = createEventHandler({
       getSessionContext,
-      handleQuestionEvent: questionRuntime.handleEvent,
+      handleQuestionEvent: questionCoordinator.handleEvent,
       finalizeIdleCompactionCard,
       sendCompactionSummary,
       readPromptResult: opencode.readPromptResult,
@@ -275,10 +276,10 @@ export const ChannelSessionsLive = Layer.scoped(
       formatError,
     });
 
-    yield* eventQueue.take().pipe(
-      Effect.flatMap((wrapped) => eventRuntime.handleEvent(wrapped.payload)),
+    yield* Queue.take(eventQueue).pipe(
+      Effect.flatMap((wrapped) => eventHandler.handleEvent(wrapped.payload)),
       Effect.forever,
-      Effect.catchAll((error) =>
+      Effect.catch((error) =>
         logger.error("opencode event dispatcher failed", {
           error: formatError(error),
         }),
@@ -287,9 +288,9 @@ export const ChannelSessionsLive = Layer.scoped(
     );
 
     yield* Effect.sleep(60_000).pipe(
-      Effect.zipRight(closeExpiredSessions()),
+      Effect.andThen(closeExpiredSessions()),
       Effect.forever,
-      Effect.catchAll((error) =>
+      Effect.catch((error) =>
         logger.error("idle session sweeper failed", {
           error: formatError(error),
         }),
@@ -312,7 +313,7 @@ export const ChannelSessionsLive = Layer.scoped(
       runProgressWorker,
       startTyping: (message) => startTypingLoop(message.channel),
       setActiveRun,
-      terminateQuestionBatches: questionRuntime.terminateForSession,
+      terminateQuestionBatches: questionCoordinator.terminateForSession,
       ensureSessionHealthAfterFailure: (session, responseMessage) =>
         ensureSessionHealth(
           session,
@@ -328,7 +329,7 @@ export const ChannelSessionsLive = Layer.scoped(
             "OpenCode stopped the active run in this channel.",
           ).then(() => undefined),
         ).pipe(
-          Effect.catchAll((error) =>
+          Effect.catch((error) =>
             logger.warn("failed to post interrupt info card", {
               channelId: message.channelId,
               error: formatError(error),
@@ -344,18 +345,12 @@ export const ChannelSessionsLive = Layer.scoped(
       formatError,
     });
 
-    const worker = (session: ChannelSession): Effect.Effect<never> =>
-      Effect.forever(
-        Queue.take(session.queue).pipe(
-          Effect.flatMap((first) =>
-            Queue.takeUpTo(session.queue, 64).pipe(
-              Effect.flatMap((rest) =>
-                runExecutor(session, [first, ...Chunk.toReadonlyArray(rest)]),
-              ),
-            ),
-          ),
-          Effect.catchAll((error) =>
-            logger.error("channel worker iteration failed", {
+	    const worker = (session: ChannelSession): Effect.Effect<never> =>
+	      Effect.forever(
+	        takeQueuedRunBatch(session.queue).pipe(
+	          Effect.flatMap((requests) => runExecutor(session, requests)),
+	          Effect.catch((error) =>
+	            logger.error("channel worker iteration failed", {
               channelId: session.channelId,
               error: formatError(error),
             }),
@@ -363,16 +358,16 @@ export const ChannelSessionsLive = Layer.scoped(
         ),
       );
 
-    const commandRuntime = createCommandRuntime({
+    const commandHandler = createCommandHandler({
       getSession: getOrRestoreSession,
-      getLiveSession: (channelId) =>
+      getLoadedSession: (channelId) =>
         sessionLifecycle.getSession(channelId).pipe(Effect.map((session) => session ?? null)),
       invalidateSession,
       getChannelSettings: sessionStore.getChannelSettings,
       upsertChannelSettings: sessionStore.upsertChannelSettings,
       channelSettingsDefaults,
       hasIdleCompaction,
-      hasPendingQuestions: questionRuntime.hasPendingQuestionsForSession,
+      hasPendingQuestions: questionCoordinator.hasPendingQuestionsForSession,
       getIdleCompactionCard,
       beginIdleCompaction,
       setIdleCompactionCard: attachIdleCompactionCard,
@@ -404,9 +399,9 @@ export const ChannelSessionsLive = Layer.scoped(
                 const idleCompactionIds = [...state.idleCompactionsBySessionId.keys()];
                 const stoppedCompactionCard = compactionCardContent("stopped");
 
-                yield* questionRuntime.shutdown().pipe(
-                  Effect.catchAll((error) =>
-                    logger.warn("failed to shut down question runtime", {
+                yield* questionCoordinator.shutdown().pipe(
+                  Effect.catch((error) =>
+                    logger.warn("failed to shut down question coordinator", {
                       error: formatError(error),
                     }),
                   ),
@@ -418,7 +413,7 @@ export const ChannelSessionsLive = Layer.scoped(
                     Effect.gen(function* () {
                       yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore);
                       yield* activeRun.finalizeProgress("shutdown").pipe(
-                        Effect.catchAll((error) =>
+                        Effect.catch((error) =>
                           logger.warn("failed to finalize active run progress on shutdown", {
                             sessionId,
                             error: formatError(error),
@@ -437,7 +432,7 @@ export const ChannelSessionsLive = Layer.scoped(
                       stoppedCompactionCard.title,
                       stoppedCompactionCard.body,
                     ).pipe(
-                      Effect.catchAll((error) =>
+                      Effect.catch((error) =>
                         logger.warn("failed to finalize idle compaction on shutdown", {
                           sessionId,
                           error: formatError(error),
@@ -448,14 +443,14 @@ export const ChannelSessionsLive = Layer.scoped(
                 );
 
                 yield* FiberSet.clear(fiberSet).pipe(
-                  Effect.catchAll((error) =>
+                  Effect.catch((error) =>
                     logger.warn("failed to interrupt session workers on shutdown", {
                       error: formatError(error),
                     }),
                   ),
                 );
                 yield* shutdownSessions().pipe(
-                  Effect.catchAll((error) =>
+                  Effect.catch((error) =>
                     logger.warn("failed to shut down sessions", {
                       error: formatError(error),
                     }),
@@ -467,7 +462,7 @@ export const ChannelSessionsLive = Layer.scoped(
             ],
       ).pipe(
         Effect.flatten,
-        Effect.catchAll((error) =>
+        Effect.catch((error) =>
           logger.warn("channel sessions shutdown failed", {
             error: formatError(error),
           }),
@@ -525,11 +520,11 @@ export const ChannelSessionsLive = Layer.scoped(
         ),
       getActiveRunBySessionId,
       handleInteraction: (interaction) =>
-        commandRuntime
+        commandHandler
           .handleInteraction(interaction)
           .pipe(
             Effect.flatMap((handled) =>
-              handled ? Effect.succeed(true) : questionRuntime.handleInteraction(interaction),
+              handled ? Effect.succeed(true) : questionCoordinator.handleInteraction(interaction),
             ),
           ),
       shutdown,

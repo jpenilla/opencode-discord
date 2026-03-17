@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SendableChannels } from "discord.js";
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 
 import { sendBridgeMessage } from "@/tools/bridge/handlers/shared.ts";
 import { unsafeStub } from "../../../support/stub.ts";
@@ -21,17 +21,17 @@ describe("sendBridgeMessage", () => {
     });
 
     const result = await Effect.runPromise(
-      Effect.either(
+      Effect.result(
         sendBridgeMessage(channel, {
           content: "hello",
         }),
       ),
     );
 
-    expect(Either.isLeft(result)).toBe(true);
-    if (Either.isRight(result)) {
+    expect(Result.isFailure(result)).toBe(true);
+    if (Result.isSuccess(result)) {
       throw new Error("expected sendBridgeMessage to fail");
     }
-    expect(result.left).toMatchObject(error);
+    expect(result.failure).toMatchObject(error);
   });
 });

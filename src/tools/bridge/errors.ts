@@ -28,7 +28,7 @@ const numberProp = (record: Record<string, unknown> | null, key: string): number
 // wrapped failures that already crossed an Effect.tryPromise boundary elsewhere.
 const unwrapEffectUnknownException = (error: unknown): unknown => {
   const record = asRecord(error);
-  if (record?._tag !== "UnknownException") {
+  if (record?._tag !== "UnknownException" && record?._tag !== "UnknownError") {
     return error;
   }
 

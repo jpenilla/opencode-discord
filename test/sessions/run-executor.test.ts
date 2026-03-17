@@ -116,7 +116,7 @@ const makeRuntime = async (options?: {
             Effect.flatMap((event) => {
               if (event.type === "run-finalizing") {
                 return record("progress:run-finalizing").pipe(
-                  Effect.zipRight(Deferred.succeed(event.ack, undefined).pipe(Effect.ignore)),
+                  Effect.andThen(Deferred.succeed(event.ack, undefined).pipe(Effect.ignore)),
                 );
               }
               return record("progress:event");
@@ -137,7 +137,7 @@ const makeRuntime = async (options?: {
       setActiveRun: (session: ChannelSession, activeRun: ActiveRun | null) =>
         Effect.sync(() => {
           session.activeRun = activeRun;
-        }).pipe(Effect.zipRight(record(`setActiveRun:${activeRun ? "active" : "null"}`))),
+        }).pipe(Effect.andThen(record(`setActiveRun:${activeRun ? "active" : "null"}`))),
       terminateQuestionBatches: (sessionId: string) =>
         record(`terminateQuestionBatches:${sessionId}:expired`),
       ensureSessionHealthAfterFailure: (_session: ChannelSession, _responseMessage: Message) =>
@@ -145,17 +145,17 @@ const makeRuntime = async (options?: {
       sendRunInterruptedInfo: (_message: Message) => record("sendRunInterruptedInfo"),
       sendFinalResponse: (message: Message, text: string) =>
         Ref.update(finalResponseMessageIds, (current) => [...current, message.id]).pipe(
-          Effect.zipRight(record(`sendFinalResponse:${text}`)),
+          Effect.andThen(record(`sendFinalResponse:${text}`)),
         ),
       sendRunFailure: (message: Message, error: unknown) =>
         Ref.update(runFailureMessageIds, (current) => [...current, message.id]).pipe(
-          Effect.zipRight(
+          Effect.andThen(
             record(`sendRunFailure:${error instanceof Error ? error.message : String(error)}`),
           ),
         ),
       sendQuestionUiFailure: (message: Message, error: unknown) =>
         Ref.update(questionUiFailureMessageIds, (current) => [...current, message.id]).pipe(
-          Effect.zipRight(record(`sendQuestionUiFailure:${String(error)}`)),
+          Effect.andThen(record(`sendQuestionUiFailure:${String(error)}`)),
         ),
       logger: {
         info: (message: string) => record(`info:${message}`),
@@ -349,12 +349,12 @@ describe("executeRunBatch", () => {
     await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
 
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
+      "progress:exit",
       "typing:start",
       "setActiveRun:active",
       "runPrompts",
       "sendFinalResponse:final transcript",
       "typing:stop",
-      "progress:exit",
       "warn:progress worker exited before finalization",
       "info:completed run",
       "typing:stop",
@@ -406,7 +406,7 @@ describe("executeRunBatch", () => {
         }),
       sendFinalResponse: (message: Message, text: string) =>
         Ref.update(finalResponseMessageIds, (current) => [...current, message.id]).pipe(
-          Effect.zipRight(record(`sendFinalResponse:${text}`)),
+          Effect.andThen(record(`sendFinalResponse:${text}`)),
         ),
     } as const;
 

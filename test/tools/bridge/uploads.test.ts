@@ -51,7 +51,39 @@ describe("parseUploadHeaders", () => {
 });
 
 describe("cleanupFailedUpload", () => {
-  test("stops reading the request body and destroys the outgoing upload stream", async () => {
+  test("drains the remaining request body when the request supports resume", async () => {
+    let requestResumed = false;
+    let requestUnpiped = false;
+    let uploadDestroyed = false;
+    const request: Pick<IncomingMessage, "resume" | "unpipe"> & { complete: boolean } = {
+      complete: false,
+      resume: () => {
+        requestResumed = true;
+        return request as IncomingMessage;
+      },
+      unpipe: () => {
+        requestUnpiped = true;
+        return request as IncomingMessage;
+      },
+    };
+
+    await expect(
+      Effect.runPromise(
+        cleanupFailedUpload(request, {
+          destroyed: false,
+          destroy: () => {
+            uploadDestroyed = true;
+          },
+        }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(requestResumed).toBe(true);
+    expect(requestUnpiped).toBe(true);
+    expect(uploadDestroyed).toBe(true);
+    expect(request.complete).toBe(false);
+  });
+
+  test("falls back to pausing the request body when resume is unavailable", async () => {
     let requestPaused = false;
     let requestUnpiped = false;
     let uploadDestroyed = false;

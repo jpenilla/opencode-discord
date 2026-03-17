@@ -3,7 +3,7 @@ import { Effect, Queue } from "effect";
 
 import { decideNewSessionEntry } from "@/sessions/command-lifecycle.ts";
 
-import { defineLiveSessionCommand, type GuildCommand } from "./definition.ts";
+import { defineLoadedSessionCommand, type GuildCommand } from "./definition.ts";
 import {
   deferCommandInteraction,
   editCommandInteraction,
@@ -21,7 +21,7 @@ const executeNewSession: GuildCommand["execute"] = (context) =>
           : false,
       hasQueuedWork:
         context.session && !context.session.activeRun
-          ? !(yield* Queue.isEmpty(context.session.queue))
+          ? (yield* Queue.size(context.session.queue)) > 0
           : false,
     });
     if (newSessionEntry.type === "reject") {
@@ -43,7 +43,7 @@ const executeNewSession: GuildCommand["execute"] = (context) =>
         body: "The next triggered message in this channel will start a new OpenCode session with fresh chat history. Workspace files were left in place.",
       }),
     ).pipe(
-      Effect.catchAll((error) =>
+      Effect.catch((error) =>
         context.deps.logger.warn("failed to post new-session info card", {
           channelId: context.interaction.channelId,
           error: context.deps.formatError(error),
@@ -58,7 +58,7 @@ const executeNewSession: GuildCommand["execute"] = (context) =>
     return true;
   });
 
-export const newSessionCommand = defineLiveSessionCommand({
+export const newSessionCommand = defineLoadedSessionCommand({
   name: "new-session",
   description: "Start a fresh OpenCode session in this channel on the next message",
   execute: executeNewSession,

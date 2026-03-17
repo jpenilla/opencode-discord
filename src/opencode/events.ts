@@ -1,85 +1,61 @@
 import type {
   AssistantMessage,
-  CompactionPart,
   Event,
-  EventQuestionReplied,
-  EventQuestionRejected,
-  EventSessionCompacted,
-  EventSessionError,
-  EventSessionIdle,
-  PatchPart,
-  QuestionRequest,
-  ReasoningPart,
-  EventPermissionReplied,
-  EventSessionStatus,
   GlobalEvent,
-  PermissionRequest,
-  ToolPart,
-  UserMessage,
 } from "@opencode-ai/sdk/v2";
-import { Context, Effect, Layer, Queue } from "effect";
+import { Layer, Queue, ServiceMap } from "effect";
 
-export type OpencodeEventQueueShape = {
-  publish: (event: GlobalEvent) => Effect.Effect<void>;
-  take: () => Effect.Effect<GlobalEvent>;
-};
-
-export class OpencodeEventQueue extends Context.Tag("OpencodeEventQueue")<
+export class OpencodeEventQueue extends ServiceMap.Service<
   OpencodeEventQueue,
-  OpencodeEventQueueShape
->() {}
+  Queue.Queue<GlobalEvent>
+>()("OpencodeEventQueue") {}
 
-export const OpencodeEventQueueLive = Layer.effect(
+export const OpencodeEventQueueLayer = Layer.effect(
   OpencodeEventQueue,
-  Effect.gen(function* () {
-    const queue = yield* Queue.unbounded<GlobalEvent>();
-
-    return {
-      publish: (event) => Queue.offer(queue, event).pipe(Effect.asVoid),
-      take: () => Queue.take(queue),
-    } satisfies OpencodeEventQueueShape;
-  }),
+  Queue.unbounded<GlobalEvent>(),
 );
 
-export const getEventSessionId = (event: Event) => {
-  switch (event.type) {
-    case "message.updated":
-      return event.properties.info.sessionID;
-    case "message.part.updated":
-      return event.properties.part.sessionID;
-    case "message.part.delta":
-      return event.properties.sessionID;
-    case "message.part.removed":
-    case "permission.asked":
-    case "permission.replied":
-    case "session.status":
-    case "session.idle":
-    case "session.compacted":
-    case "session.error":
-    case "session.diff":
-    case "message.removed":
-    case "question.asked":
-    case "question.replied":
-    case "question.rejected":
-      return event.properties.sessionID;
-    default:
-      return null;
-  }
-};
+type EventOfType<TType extends Event["type"]> = Extract<Event, { type: TType }>;
+type MessageInfo = EventOfType<"message.updated">["properties"]["info"];
+type UpdatedMessagePart = EventOfType<"message.part.updated">["properties"]["part"];
+type EventPropertiesWithSessionId = { sessionID?: unknown };
 
-export const getToolPartUpdated = (event: Event): ToolPart | null => {
-  if (event.type !== "message.part.updated") {
+export const getEventByType = <TType extends Event["type"]>(
+  event: Event,
+  type: TType,
+): EventOfType<TType> | null => {
+  if (event.type !== type) {
     return null;
   }
-  return event.properties.part.type === "tool" ? event.properties.part : null;
+
+  return event as EventOfType<TType>;
 };
 
-export const getAssistantMessageUpdated = (event: Event): AssistantMessage | null => {
-  if (event.type !== "message.updated") {
-    return null;
-  }
-  return event.properties.info.role === "assistant" ? event.properties.info : null;
+export const getMessageUpdatedByRole = <TRole extends MessageInfo["role"]>(
+  event: Event,
+  role: TRole,
+): Extract<MessageInfo, { role: TRole }> | null => {
+  const info = getEventByType(event, "message.updated")?.properties.info;
+  return info?.role === role ? (info as Extract<MessageInfo, { role: TRole }>) : null;
 };
+
+export const getUpdatedPartByType = <TType extends UpdatedMessagePart["type"]>(
+  event: Event,
+  type: TType,
+): Extract<UpdatedMessagePart, { type: TType }> | null => {
+  const part = getEventByType(event, "message.part.updated")?.properties.part;
+  return part?.type === type ? (part as Extract<UpdatedMessagePart, { type: TType }>) : null;
+};
+
+const getSessionIdFromProperties = (properties: EventPropertiesWithSessionId) =>
+  typeof properties.sessionID === "string" ? properties.sessionID : null;
+
+export const getEventSessionId = (event: Event) =>
+  event.type === "message.updated"
+    ? event.properties.info.sessionID
+    : event.type === "message.part.updated"
+      ? event.properties.part.sessionID
+      : getSessionIdFromProperties(event.properties as EventPropertiesWithSessionId);
 
 export const isCompactionSummaryAssistant = (message: AssistantMessage) =>
   message.summary === true && message.mode === "compaction" && message.agent === "compaction";
@@ -88,94 +64,3 @@ export const isObservedAssistantMessage = (message: AssistantMessage) =>
   message.time.completed !== undefined ||
   message.finish !== undefined ||
   message.error !== undefined;
-
-export const getUserMessageUpdated = (event: Event): UserMessage | null => {
-  if (event.type !== "message.updated") {
-    return null;
-  }
-  return event.properties.info.role === "user" ? event.properties.info : null;
-};
-
-export const getPermissionUpdated = (event: Event): PermissionRequest | null => {
-  if (event.type !== "permission.asked") {
-    return null;
-  }
-  return event.properties;
-};
-
-export const getPermissionReplied = (event: Event): EventPermissionReplied["properties"] | null => {
-  if (event.type !== "permission.replied") {
-    return null;
-  }
-  return event.properties;
-};
-
-export const getSessionStatusUpdated = (event: Event): EventSessionStatus["properties"] | null => {
-  if (event.type !== "session.status") {
-    return null;
-  }
-  return event.properties;
-};
-
-export const getSessionIdle = (event: Event): EventSessionIdle["properties"] | null => {
-  if (event.type !== "session.idle") {
-    return null;
-  }
-  return event.properties;
-};
-
-export const getSessionError = (event: Event): EventSessionError["properties"] | null => {
-  if (event.type !== "session.error") {
-    return null;
-  }
-  return event.properties;
-};
-
-export const getSessionCompacted = (event: Event): EventSessionCompacted["properties"] | null => {
-  if (event.type !== "session.compacted") {
-    return null;
-  }
-  return event.properties;
-};
-
-export const getCompactionPart = (event: Event): CompactionPart | null => {
-  if (event.type !== "message.part.updated" || event.properties.part.type !== "compaction") {
-    return null;
-  }
-  return event.properties.part;
-};
-
-export const getPatchPart = (event: Event): PatchPart | null => {
-  if (event.type !== "message.part.updated" || event.properties.part.type !== "patch") {
-    return null;
-  }
-  return event.properties.part;
-};
-
-export const getReasoningPart = (event: Event): ReasoningPart | null => {
-  if (event.type !== "message.part.updated" || event.properties.part.type !== "reasoning") {
-    return null;
-  }
-  return event.properties.part;
-};
-
-export const getQuestionAsked = (event: Event): QuestionRequest | null => {
-  if (event.type !== "question.asked") {
-    return null;
-  }
-  return event.properties;
-};
-
-export const getQuestionReplied = (event: Event): EventQuestionReplied["properties"] | null => {
-  if (event.type !== "question.replied") {
-    return null;
-  }
-  return event.properties;
-};
-
-export const getQuestionRejected = (event: Event): EventQuestionRejected["properties"] | null => {
-  if (event.type !== "question.rejected") {
-    return null;
-  }
-  return event.properties;
-};
