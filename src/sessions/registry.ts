@@ -230,7 +230,7 @@ export const ChannelSessionsLayer = Layer.effect(
         infoCards
           .send(
             message.channel as SendableChannels,
-            "‼️ Run interrupted",
+            source === "shutdown" ? "🛑 Run interrupted" : "‼️ Run interrupted",
             source === "shutdown"
               ? "OpenCode stopped the active run in this channel because the bot is shutting down."
               : "OpenCode stopped the active run in this channel.",
@@ -445,7 +445,7 @@ export const ChannelSessionsLayer = Layer.effect(
               yield* infoCards
                 .send(
                   activeRun.originMessage.channel as SendableChannels,
-                  "‼️ Run interrupted",
+                  "🛑 Run interrupted",
                   "OpenCode stopped the active run in this channel because the bot is shutting down.",
                 )
                 .pipe(
