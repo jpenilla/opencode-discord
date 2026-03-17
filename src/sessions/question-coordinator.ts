@@ -467,18 +467,15 @@ export const createQuestionCoordinator = (
       });
 
     const completeShutdownRejectedRequest = (requestId: string) =>
-      Ref.modify(
-        shutdownRejectedRequestIdsRef,
-        (current): readonly [boolean, Set<string>] => {
-          if (!current.has(requestId)) {
-            return [false, current];
-          }
+      Ref.modify(shutdownRejectedRequestIdsRef, (current): readonly [boolean, Set<string>] => {
+        if (!current.has(requestId)) {
+          return [false, current];
+        }
 
-          const next = new Set(current);
-          next.delete(requestId);
-          return [true, next];
-        },
-      );
+        const next = new Set(current);
+        next.delete(requestId);
+        return [true, next];
+      });
 
     const finalizeQuestionBatch = (
       requestId: string,
@@ -486,7 +483,8 @@ export const createQuestionCoordinator = (
       resolvedAnswers?: ReadonlyArray<QuestionAnswer>,
     ) =>
       Effect.gen(function* () {
-        const renderExpired = status === "rejected" && (yield* completeShutdownRejectedRequest(requestId));
+        const renderExpired =
+          status === "rejected" && (yield* completeShutdownRejectedRequest(requestId));
         const batch = yield* updateQuestionBatch(requestId, (current) =>
           renderExpired
             ? terminateQuestionBatch(current, "expired")

@@ -12,17 +12,15 @@ export const installShutdownSignalHandlers = (input: {
 }) => {
   let signaled = false;
 
-  const handleSignal =
-    (signal: ShutdownSignal) =>
-    () => {
-      if (!signaled) {
-        signaled = true;
-        input.onFirstSignal(signal);
-        return;
-      }
+  const handleSignal = (signal: ShutdownSignal) => () => {
+    if (!signaled) {
+      signaled = true;
+      input.onFirstSignal(signal);
+      return;
+    }
 
-      input.onSecondSignal(signal);
-    };
+    input.onSecondSignal(signal);
+  };
 
   const onSigint = handleSignal("SIGINT");
   const onSigterm = handleSignal("SIGTERM");
