@@ -21,7 +21,7 @@ export const newSessionCommand = defineGuildCommand({
 
     if (!context.inGuildTextChannel || !context.guildTextChannel) {
       yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
-      return true;
+      return;
     }
 
     const session = yield* sessionControl.getLoaded(context.channelId);
@@ -29,21 +29,21 @@ export const newSessionCommand = defineGuildCommand({
       yield* context.complete(
         "OpenCode is busy in this channel right now. Wait for the current run to finish or use /interrupt before starting a fresh session.",
       );
-      return true;
+      return;
     }
 
     if (session && (yield* idleCompaction.hasActive(session.opencode.sessionId))) {
       yield* context.complete(
         "OpenCode is compacting this channel right now. Wait for compaction to finish or use /interrupt before starting a fresh session.",
       );
-      return true;
+      return;
     }
 
     if (session && (yield* sessionControl.hasQueuedWork(session))) {
       yield* context.complete(
         "OpenCode still has queued work for this channel. Wait for it to finish before starting a fresh session.",
       );
-      return true;
+      return;
     }
 
     yield* context.ack();
@@ -70,6 +70,5 @@ export const newSessionCommand = defineGuildCommand({
     yield* context.complete(
       "Cleared this channel's current OpenCode session. The next triggered message here will start a new session with fresh chat history. Workspace files were left in place.",
     );
-    return true;
   }),
 });

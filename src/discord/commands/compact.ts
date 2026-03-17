@@ -16,19 +16,19 @@ export const compactCommand = defineGuildCommand({
 
     if (!context.inGuildTextChannel || !context.guildTextChannel) {
       yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
-      return true;
+      return;
     }
 
     const session = yield* sessionControl.getOrRestore(context.channelId);
     if (!session) {
       yield* context.complete("No OpenCode session exists in this channel yet.");
-      return true;
+      return;
     }
     if (session.activeRun) {
       yield* context.complete(
         "OpenCode is busy in this channel right now. Use /interrupt first or wait for the current run to finish.",
       );
-      return true;
+      return;
     }
 
     yield* context.ack();
@@ -40,10 +40,9 @@ export const compactCommand = defineGuildCommand({
 
     if (result.type === "rejected") {
       yield* context.complete(result.message);
-      return true;
+      return;
     }
 
     yield* context.complete("Started session compaction. I'll post updates in this channel.");
-    return true;
   }),
 });

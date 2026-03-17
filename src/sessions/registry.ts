@@ -42,7 +42,7 @@ import { SessionStore } from "@/state/store.ts";
 export type ChannelSessionsShape = {
   submit: (message: Message, invocation: Invocation) => Effect.Effect<void, unknown>;
   getActiveRunBySessionId: (sessionId: string) => Effect.Effect<ActiveRun | null>;
-  handleInteraction: (interaction: Interaction) => Effect.Effect<boolean, unknown>;
+  handleInteraction: (interaction: Interaction) => Effect.Effect<void, unknown>;
   shutdown: () => Effect.Effect<void, unknown>;
 };
 
@@ -403,13 +403,13 @@ export const ChannelSessionsLayer = Layer.effect(
         ),
       getActiveRunBySessionId,
       handleInteraction: (interaction) =>
-        commandHandler
-          .handleInteraction(interaction)
-          .pipe(
-            Effect.flatMap((handled) =>
-              handled ? Effect.succeed(true) : questionCoordinator.handleInteraction(interaction),
-            ),
-          ),
+        interaction.isChatInputCommand()
+          ? commandHandler.handleInteraction(interaction)
+          : interaction.isButton() ||
+              interaction.isStringSelectMenu() ||
+              interaction.isModalSubmit()
+            ? questionCoordinator.handleInteraction(interaction)
+            : Effect.void,
       shutdown,
     } satisfies ChannelSessionsShape;
   }),

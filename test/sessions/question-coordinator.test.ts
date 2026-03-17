@@ -336,7 +336,7 @@ describe("createQuestionCoordinator", () => {
       }),
     );
 
-    const handled = await Effect.runPromise(
+    await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
           customId: `ocq:${harness.request.id}:0:submit`,
@@ -345,7 +345,6 @@ describe("createQuestionCoordinator", () => {
       ),
     );
 
-    expect(handled).toBe(true);
     expect(await getRef(harness.interactionReplies)).toEqual([]);
     expect(await getRef(harness.replyCalls)).toEqual([harness.request.id]);
   });
@@ -365,7 +364,7 @@ describe("createQuestionCoordinator", () => {
       harness.runtime.terminateForSession(harness.session.opencode.sessionId),
     );
 
-    const handled = await Effect.runPromise(
+    await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
           customId: `ocq:${harness.request.id}:0:submit`,
@@ -373,7 +372,6 @@ describe("createQuestionCoordinator", () => {
       ),
     );
 
-    expect(handled).toBe(true);
     expect((await getRef(harness.editedPayloads)).length).toBe(1);
     expect((await getRef(harness.interactionReplies))[0]?.content).toBe(
       "This question prompt has expired.",
@@ -510,7 +508,7 @@ describe("createQuestionCoordinator", () => {
       ),
     );
 
-    const handled = await Effect.runPromise(
+    await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
           customId: `ocq:${harness.request.id}:0:question-prev`,
@@ -519,7 +517,6 @@ describe("createQuestionCoordinator", () => {
       ),
     );
 
-    expect(handled).toBe(true);
     expect((await getRef(harness.interactionReplies)).at(-1)?.content).toBe(
       "Another user updated this question prompt before your action was applied. Review the latest card and try again.",
     );
@@ -545,7 +542,7 @@ describe("createQuestionCoordinator", () => {
       ),
     );
 
-    const handled = await Effect.runPromise(
+    await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeModalInteraction({
           customId: `ocq:${harness.request.id}:0:modal:0`,
@@ -555,7 +552,6 @@ describe("createQuestionCoordinator", () => {
       ),
     );
 
-    expect(handled).toBe(true);
     expect((await getRef(harness.interactionReplies)).at(-1)?.content).toBe(
       "Another user updated this question prompt before your action was applied. Review the latest card and try again.",
     );

@@ -58,7 +58,7 @@ const defineChannelSettingToggleCommand = <
 
       if (!context.inGuildTextChannel) {
         yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
-        return true;
+        return;
       }
 
       const persisted = yield* sessionStore.getChannelSettings(context.channelId);
@@ -78,7 +78,6 @@ const defineChannelSettingToggleCommand = <
       yield* context.complete(
         `${input.label} are now ${resolved[input.setting] ? "enabled" : "disabled"} in this channel.`,
       );
-      return true;
     }),
   });
 

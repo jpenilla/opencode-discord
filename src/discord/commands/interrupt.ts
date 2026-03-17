@@ -25,13 +25,13 @@ export const interruptCommand = defineGuildCommand({
 
     if (!context.inGuildTextChannel) {
       yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
-      return true;
+      return;
     }
 
     const session = yield* sessionControl.getOrRestore(context.channelId);
     if (!session) {
       yield* context.complete("No OpenCode session exists in this channel yet.");
-      return true;
+      return;
     }
 
     if (session.activeRun) {
@@ -40,7 +40,7 @@ export const interruptCommand = defineGuildCommand({
       );
       if (hasPendingQuestions) {
         yield* context.complete(QUESTION_PENDING_INTERRUPT_MESSAGE);
-        return true;
+        return;
       }
 
       yield* context.ack();
@@ -57,7 +57,7 @@ export const interruptCommand = defineGuildCommand({
             formatError(interruptResult.failure),
           ),
         );
-        return true;
+        return;
       }
 
       const hasPendingQuestionsAfterInterrupt = yield* questionStatus.hasPendingQuestions(
@@ -66,27 +66,26 @@ export const interruptCommand = defineGuildCommand({
       if (hasPendingQuestionsAfterInterrupt) {
         yield* sessionControl.setRunInterruptRequested(activeRun, false);
         yield* context.complete(QUESTION_PENDING_INTERRUPT_MESSAGE);
-        return true;
+        return;
       }
 
       yield* context.complete("Requested interruption of the active OpenCode run.");
-      return true;
+      return;
     }
 
     const hasIdleCompaction = yield* idleCompaction.hasActive(session.opencode.sessionId);
     if (!hasIdleCompaction) {
       yield* context.complete("No active OpenCode run or compaction is running in this channel.");
-      return true;
+      return;
     }
 
     yield* context.ack();
     const result = yield* idleCompaction.requestInterrupt({ session });
     if (result.type === "failed") {
       yield* context.complete(result.message);
-      return true;
+      return;
     }
 
     yield* context.complete("Requested interruption of the active OpenCode compaction.");
-    return true;
   }),
 });

@@ -139,7 +139,7 @@ describe("submitQuestionBatch", () => {
   test("replies that the prompt expired when the batch is gone", async () => {
     const { runtime, calls } = await makeRuntime({ batch: null });
 
-    const handled = await Effect.runPromise(
+    await Effect.runPromise(
       submitQuestionBatch(runtime)({
         interaction: { id: "interaction-1" },
         requestId: "req-1",
@@ -149,7 +149,6 @@ describe("submitQuestionBatch", () => {
       }),
     );
 
-    expect(handled).toBe(true);
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
       "try-persist:req-1:0:owner",
       "reply-expired",
@@ -159,7 +158,7 @@ describe("submitQuestionBatch", () => {
   test("updates the question card, submits answers, and finalizes on success", async () => {
     const { runtime, calls } = await makeRuntime();
 
-    const handled = await Effect.runPromise(
+    await Effect.runPromise(
       submitQuestionBatch(runtime)({
         interaction: { id: "interaction-1" },
         requestId: "req-1",
@@ -169,7 +168,6 @@ describe("submitQuestionBatch", () => {
       }),
     );
 
-    expect(handled).toBe(true);
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
       "try-persist:req-1:0:owner",
       "update:submitting",
@@ -181,7 +179,7 @@ describe("submitQuestionBatch", () => {
   test("restores the batch to active and follows up on submit failure", async () => {
     const { runtime, calls, currentBatch } = await makeRuntime({ submitResult: "failure" });
 
-    const handled = await Effect.runPromise(
+    await Effect.runPromise(
       submitQuestionBatch(runtime)({
         interaction: { id: "interaction-1" },
         requestId: "req-1",
@@ -191,7 +189,6 @@ describe("submitQuestionBatch", () => {
       }),
     );
 
-    expect(handled).toBe(true);
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
       "try-persist:req-1:0:owner",
       "update:submitting",
@@ -206,7 +203,7 @@ describe("submitQuestionBatch", () => {
   test("replies with a conflict when another action already updated the batch", async () => {
     const { runtime, calls, currentBatch } = await makeRuntime();
 
-    const handled = await Effect.runPromise(
+    await Effect.runPromise(
       submitQuestionBatch(runtime)({
         interaction: { id: "interaction-1" },
         requestId: "req-1",
@@ -216,7 +213,6 @@ describe("submitQuestionBatch", () => {
       }),
     );
 
-    expect(handled).toBe(true);
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
       "try-persist:req-1:1:intruder",
       "reply-conflict:0",
@@ -229,7 +225,7 @@ describe("rejectQuestionBatch", () => {
   test("marks the active run as user-rejected and finalizes on success", async () => {
     const { runtime, calls, currentBatch } = await makeRuntime();
 
-    const handled = await Effect.runPromise(
+    await Effect.runPromise(
       rejectQuestionBatch(runtime)({
         interaction: { id: "interaction-1" },
         requestId: "req-1",
@@ -238,7 +234,6 @@ describe("rejectQuestionBatch", () => {
       }),
     );
 
-    expect(handled).toBe(true);
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
       "try-persist:req-1:0:owner",
       "update:submitting",
@@ -255,7 +250,7 @@ describe("rejectQuestionBatch", () => {
   test("rolls back question outcome and restores the batch on reject failure", async () => {
     const { runtime, calls, currentBatch } = await makeRuntime({ rejectResult: "failure" });
 
-    const handled = await Effect.runPromise(
+    await Effect.runPromise(
       rejectQuestionBatch(runtime)({
         interaction: { id: "interaction-1" },
         requestId: "req-1",
@@ -264,7 +259,6 @@ describe("rejectQuestionBatch", () => {
       }),
     );
 
-    expect(handled).toBe(true);
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
       "try-persist:req-1:0:owner",
       "update:submitting",

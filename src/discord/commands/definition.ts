@@ -23,7 +23,7 @@ export type GuildCommandDependencies =
 export type GuildCommand = {
   name: string;
   description: string;
-  execute: Effect.Effect<boolean, unknown, CommandContext | GuildCommandDependencies>;
+  execute: Effect.Effect<void, unknown, CommandContext | GuildCommandDependencies>;
 };
 
 type GuildCommandDefinitionInput<TName extends string, TDescription extends string> = {

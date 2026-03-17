@@ -78,7 +78,7 @@ export const submitQuestionBatch =
     expectedVersion,
     actorId,
     answers,
-  }: SubmitQuestionInput<Interaction>): Effect.Effect<boolean, unknown> =>
+  }: SubmitQuestionInput<Interaction>): Effect.Effect<void, unknown> =>
     Effect.gen(function* () {
       const submitting = yield* deps.tryPersistBatch(
         requestId,
@@ -88,11 +88,11 @@ export const submitQuestionBatch =
       );
       if (submitting.type === "missing") {
         yield* deps.replyExpired(interaction);
-        return true;
+        return;
       }
       if (submitting.type === "conflict") {
         yield* deps.replyConflict(interaction, submitting.batch);
-        return true;
+        return;
       }
 
       yield* deps.updateInteraction(interaction, submitting.batch);
@@ -113,11 +113,10 @@ export const submitQuestionBatch =
             `Failed to submit answers: ${deps.formatError(submitResult.failure)}`,
           )
           .pipe(Effect.ignore);
-        return true;
+        return;
       }
 
       yield* deps.finalizeBatch(submitting.batch.request.id, "answered", answers);
-      return true;
     });
 
 export const rejectQuestionBatch =
@@ -129,7 +128,7 @@ export const rejectQuestionBatch =
     requestId,
     expectedVersion,
     actorId,
-  }: RejectQuestionInput<Interaction>): Effect.Effect<boolean, unknown> =>
+  }: RejectQuestionInput<Interaction>): Effect.Effect<void, unknown> =>
     Effect.gen(function* () {
       const rejecting = yield* deps.tryPersistBatch(
         requestId,
@@ -139,11 +138,11 @@ export const rejectQuestionBatch =
       );
       if (rejecting.type === "missing") {
         yield* deps.replyExpired(interaction);
-        return true;
+        return;
       }
       if (rejecting.type === "conflict") {
         yield* deps.replyConflict(interaction, rejecting.batch);
-        return true;
+        return;
       }
 
       yield* deps.updateInteraction(interaction, rejecting.batch);
@@ -172,9 +171,8 @@ export const rejectQuestionBatch =
             `Failed to reject questions: ${deps.formatError(rejectResult.failure)}`,
           )
           .pipe(Effect.ignore);
-        return true;
+        return;
       }
 
       yield* deps.finalizeBatch(rejecting.batch.request.id, "rejected");
-      return true;
     });

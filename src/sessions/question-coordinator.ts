@@ -63,7 +63,7 @@ export type QuestionCoordinatorEvent =
 
 export type QuestionCoordinator = {
   handleEvent: (event: QuestionCoordinatorEvent) => Effect.Effect<void, unknown>;
-  handleInteraction: (interaction: Interaction) => Effect.Effect<boolean, unknown>;
+  handleInteraction: (interaction: Interaction) => Effect.Effect<void, unknown>;
   hasPendingQuestionsForSession: (sessionId: string) => Effect.Effect<boolean>;
   terminateForSession: (sessionId: string) => Effect.Effect<void, unknown>;
   shutdown: () => Effect.Effect<void, unknown>;
@@ -529,7 +529,7 @@ export const createQuestionCoordinator = (
     ) =>
       Effect.gen(function* () {
         if (!interaction.isButton() && !interaction.isStringSelectMenu()) {
-          return false;
+          return;
         }
 
         const persisted = yield* tryPersistQuestionBatch(
@@ -543,38 +543,37 @@ export const createQuestionCoordinator = (
             interaction,
             "This question prompt is no longer active.",
           );
-          return true;
+          return;
         }
         if (persisted.type === "conflict") {
           yield* replyToQuestionConflict(interaction, persisted.batch);
-          return true;
+          return;
         }
 
         yield* Effect.promise(() =>
           interaction.update(createQuestionMessageEdit(questionBatchView(persisted.batch))),
         );
-        return true;
       });
 
-    const handleInteraction = (interaction: Interaction): Effect.Effect<boolean, unknown> =>
+    const handleInteraction = (interaction: Interaction): Effect.Effect<void, unknown> =>
       Effect.gen(function* () {
         if (
           !interaction.isButton() &&
           !interaction.isStringSelectMenu() &&
           !interaction.isModalSubmit()
         ) {
-          return false;
+          return;
         }
 
         const action = parseQuestionActionId(interaction.customId);
         if (!action) {
-          return false;
+          return;
         }
 
         const batch = yield* getQuestionBatch(action.requestID);
         if (!batch) {
           yield* replyToQuestionInteraction(interaction, "This question prompt has expired.");
-          return true;
+          return;
         }
 
         if (
@@ -583,7 +582,7 @@ export const createQuestionCoordinator = (
           interaction.message.id !== batch.message.id
         ) {
           yield* replyToQuestionInteraction(interaction, "This question prompt has been replaced.");
-          return true;
+          return;
         }
 
         if (batch.status !== "active") {
@@ -591,17 +590,17 @@ export const createQuestionCoordinator = (
             interaction,
             "This question prompt is already being finalized.",
           );
-          return true;
+          return;
         }
 
         if (batch.version !== action.version) {
           yield* replyToQuestionConflict(interaction, batch);
-          return true;
+          return;
         }
 
         switch (action.kind) {
           case "question-prev":
-            return yield* applyQuestionUpdate(
+            yield* applyQuestionUpdate(
               interaction,
               action.requestID,
               action.version,
@@ -610,8 +609,9 @@ export const createQuestionCoordinator = (
                 page: Math.max(0, current.page - 1),
               }),
             );
+            return;
           case "question-next":
-            return yield* applyQuestionUpdate(
+            yield* applyQuestionUpdate(
               interaction,
               action.requestID,
               action.version,
@@ -620,101 +620,86 @@ export const createQuestionCoordinator = (
                 page: Math.min(current.request.questions.length - 1, current.page + 1),
               }),
             );
+            return;
           case "option-prev":
-            return yield* applyQuestionUpdate(
-              interaction,
-              action.requestID,
-              action.version,
-              (current) => {
-                const optionPages = [...current.optionPages];
-                optionPages[action.questionIndex] = Math.max(
-                  0,
-                  (optionPages[action.questionIndex] ?? 0) - 1,
-                );
-                return {
-                  ...current,
-                  page: action.questionIndex,
-                  optionPages,
-                };
-              },
-            );
+            yield* applyQuestionUpdate(interaction, action.requestID, action.version, (current) => {
+              const optionPages = [...current.optionPages];
+              optionPages[action.questionIndex] = Math.max(
+                0,
+                (optionPages[action.questionIndex] ?? 0) - 1,
+              );
+              return {
+                ...current,
+                page: action.questionIndex,
+                optionPages,
+              };
+            });
+            return;
           case "option-next":
-            return yield* applyQuestionUpdate(
-              interaction,
-              action.requestID,
-              action.version,
-              (current) => {
-                const question = current.request.questions[action.questionIndex];
-                if (!question) {
-                  return current;
-                }
-                const maxOptionPage = Math.max(0, questionOptionPageCount(question) - 1);
-                const optionPages = [...current.optionPages];
-                optionPages[action.questionIndex] = Math.min(
-                  maxOptionPage,
-                  (optionPages[action.questionIndex] ?? 0) + 1,
-                );
-                return {
-                  ...current,
-                  page: action.questionIndex,
-                  optionPages,
-                };
-              },
-            );
+            yield* applyQuestionUpdate(interaction, action.requestID, action.version, (current) => {
+              const question = current.request.questions[action.questionIndex];
+              if (!question) {
+                return current;
+              }
+              const maxOptionPage = Math.max(0, questionOptionPageCount(question) - 1);
+              const optionPages = [...current.optionPages];
+              optionPages[action.questionIndex] = Math.min(
+                maxOptionPage,
+                (optionPages[action.questionIndex] ?? 0) + 1,
+              );
+              return {
+                ...current,
+                page: action.questionIndex,
+                optionPages,
+              };
+            });
+            return;
           case "clear":
-            return yield* applyQuestionUpdate(
-              interaction,
-              action.requestID,
-              action.version,
-              (current) => {
-                const drafts = [...current.drafts];
-                drafts[action.questionIndex] = clearQuestionDraft();
-                return {
-                  ...current,
-                  page: action.questionIndex,
-                  drafts,
-                };
-              },
-            );
+            yield* applyQuestionUpdate(interaction, action.requestID, action.version, (current) => {
+              const drafts = [...current.drafts];
+              drafts[action.questionIndex] = clearQuestionDraft();
+              return {
+                ...current,
+                page: action.questionIndex,
+                drafts,
+              };
+            });
+            return;
           case "select":
             if (!interaction.isStringSelectMenu()) {
-              return false;
+              return;
             }
 
-            return yield* applyQuestionUpdate(
-              interaction,
-              action.requestID,
-              action.version,
-              (current) => {
-                const question = current.request.questions[action.questionIndex];
-                if (!question) {
-                  return current;
-                }
+            yield* applyQuestionUpdate(interaction, action.requestID, action.version, (current) => {
+              const question = current.request.questions[action.questionIndex];
+              if (!question) {
+                return current;
+              }
 
-                const page = current.optionPages[action.questionIndex] ?? 0;
-                const visibleOptions = question.options
-                  .slice(
-                    page * QUESTION_OPTIONS_PER_PAGE,
-                    page * QUESTION_OPTIONS_PER_PAGE + QUESTION_OPTIONS_PER_PAGE,
-                  )
-                  .map((option) => option.label);
-                const drafts = [...current.drafts];
-                drafts[action.questionIndex] = setQuestionOptionSelection({
-                  question,
-                  draft: currentQuestionDraft(current, action.questionIndex),
-                  visibleOptions,
-                  selectedOptions: interaction.values,
-                });
-                return {
-                  ...current,
-                  page: action.questionIndex,
-                  drafts,
-                };
-              },
-            );
+              const page = current.optionPages[action.questionIndex] ?? 0;
+              const visibleOptions = question.options
+                .slice(
+                  page * QUESTION_OPTIONS_PER_PAGE,
+                  page * QUESTION_OPTIONS_PER_PAGE + QUESTION_OPTIONS_PER_PAGE,
+                )
+                .map((option) => option.label);
+              const drafts = [...current.drafts];
+              drafts[action.questionIndex] = setQuestionOptionSelection({
+                question,
+                draft: currentQuestionDraft(current, action.questionIndex),
+                visibleOptions,
+                selectedOptions: interaction.values,
+              });
+              return {
+                ...current,
+                page: action.questionIndex,
+                drafts,
+              };
+            });
+            return;
           case "custom":
             if (!interaction.isButton()) {
-              return false;
+              return;
             }
 
             {
@@ -724,7 +709,7 @@ export const createQuestionCoordinator = (
                   interaction,
                   "This question does not allow a custom answer.",
                 );
-                return true;
+                return;
               }
 
               yield* Effect.promise(() =>
@@ -738,11 +723,11 @@ export const createQuestionCoordinator = (
                   }),
                 ),
               );
-              return true;
+              return;
             }
           case "modal":
             if (!interaction.isModalSubmit()) {
-              return false;
+              return;
             }
 
             {
@@ -752,7 +737,7 @@ export const createQuestionCoordinator = (
                   interaction,
                   "This question does not allow a custom answer.",
                 );
-                return true;
+                return;
               }
 
               const customAnswer = readQuestionModalValue(interaction);
@@ -760,7 +745,7 @@ export const createQuestionCoordinator = (
                 yield* Effect.promise(() =>
                   interaction.reply(questionInteractionReply("Custom answer cannot be empty.")),
                 ).pipe(Effect.ignore);
-                return true;
+                return;
               }
 
               const updated = yield* tryPersistQuestionBatch(
@@ -783,11 +768,11 @@ export const createQuestionCoordinator = (
               );
               if (updated.type === "missing") {
                 yield* replyToQuestionInteraction(interaction, "This question prompt has expired.");
-                return true;
+                return;
               }
               if (updated.type === "conflict") {
                 yield* replyToQuestionConflict(interaction, updated.batch);
-                return true;
+                return;
               }
 
               yield* editQuestionMessage(updated.batch).pipe(
@@ -801,31 +786,33 @@ export const createQuestionCoordinator = (
                 ),
               );
               yield* Effect.promise(() => interaction.deferUpdate()).pipe(Effect.ignore);
-              return true;
+              return;
             }
           case "submit":
             if (!interaction.isButton()) {
-              return false;
+              return;
             }
 
-            return yield* submitQuestionBatch(questionSubmissionDeps)({
+            yield* submitQuestionBatch(questionSubmissionDeps)({
               interaction,
               requestId: action.requestID,
               expectedVersion: action.version,
               actorId: interaction.user.id,
               answers: buildQuestionAnswers(batch.request, batch.drafts),
             });
+            return;
           case "reject":
             if (!interaction.isButton()) {
-              return false;
+              return;
             }
 
-            return yield* rejectQuestionBatch(questionSubmissionDeps)({
+            yield* rejectQuestionBatch(questionSubmissionDeps)({
               interaction,
               requestId: action.requestID,
               expectedVersion: action.version,
               actorId: interaction.user.id,
             });
+            return;
         }
       });
 

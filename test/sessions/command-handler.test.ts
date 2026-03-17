@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { ChannelType, type Interaction, type Message, type SendableChannels } from "discord.js";
+import {
+  ChannelType,
+  type ChatInputCommandInteraction,
+  type Message,
+  type SendableChannels,
+} from "discord.js";
 import { Deferred, Effect, Layer, Queue, Redacted, Ref } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
@@ -406,14 +411,14 @@ const makeHarness = async (options?: HarnessOptions) => {
   });
 
   const interaction = unsafeStub<
-    Interaction & {
+    ChatInputCommandInteraction & {
       replied: boolean;
       deferred: boolean;
       commandName: string;
     }
   >({
-    commandName: "compact",
     channelId: "channel-1",
+    commandName: "compact",
     channel: unsafeStub<SendableChannels>({
       id: "channel-1",
       type: ChannelType.GuildText,
@@ -463,9 +468,7 @@ describe("createCommandHandler", () => {
       sessionHealthy: false,
     });
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
     expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([
@@ -477,8 +480,7 @@ describe("createCommandHandler", () => {
   test("starts compaction, posts the idle card, and clears it after completion", async () => {
     const harness = await makeHarness();
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
 
     await Effect.runPromise(Deferred.await(harness.compactStarted));
     expect(await getRef(harness.defers)).toBe(1);
@@ -511,9 +513,7 @@ describe("createCommandHandler", () => {
     });
     harness.interaction.commandName = "interrupt";
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
     expect(harness.activeRun.interruptRequested).toBe(false);
     expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([
@@ -527,9 +527,7 @@ describe("createCommandHandler", () => {
     });
     harness.interaction.commandName = "interrupt";
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
     expect(harness.activeRun.interruptRequested).toBe(true);
     expect(await getRef(harness.typingStopCount)).toBe(0);
     expect(await getRef(harness.replies)).toEqual([]);
@@ -545,9 +543,7 @@ describe("createCommandHandler", () => {
     });
     harness.interaction.commandName = "interrupt";
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
     expect(harness.activeRun.interruptRequested).toBe(false);
     expect(await getRef(harness.defers)).toBe(0);
     expect(await getRef(harness.replies)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
@@ -562,9 +558,7 @@ describe("createCommandHandler", () => {
     });
     harness.interaction.commandName = "interrupt";
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
     expect(harness.activeRun.interruptRequested).toBe(false);
     expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
@@ -578,9 +572,7 @@ describe("createCommandHandler", () => {
     );
     await Effect.runPromise(Ref.set(harness.idleCompactionActive, true));
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
     expect(await getRef(harness.typingStopCount)).toBe(0);
     expect(await getRef(harness.compactionUpdates)).toEqual([
       {
@@ -605,9 +597,7 @@ describe("createCommandHandler", () => {
     );
     await Effect.runPromise(Ref.set(harness.idleCompactionActive, true));
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
     expect(await getRef(harness.idleInterruptRequested)).toBe(false);
     expect(await getRef(harness.compactionUpdates)).toEqual([
       {
@@ -632,9 +622,7 @@ describe("createCommandHandler", () => {
     });
     harness.interaction.commandName = "new-session";
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
     expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.invalidatedSessions)).toEqual([
       {
@@ -661,9 +649,7 @@ describe("createCommandHandler", () => {
     });
     harness.interaction.commandName = "new-session";
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
     expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.edits)).toEqual([
       "Cleared this channel's current OpenCode session. The next triggered message here will start a new session with fresh chat history. Workspace files were left in place.",
@@ -695,9 +681,7 @@ describe("createCommandHandler", () => {
     });
     harness.interaction.commandName = "new-session";
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
     expect(await getRef(harness.defers)).toBe(0);
     expect(await getRef(harness.replies)).toEqual([
       "OpenCode is busy in this channel right now. Wait for the current run to finish or use /interrupt before starting a fresh session.",
@@ -711,9 +695,7 @@ describe("createCommandHandler", () => {
     });
     harness.interaction.commandName = "new-session";
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
     expect(await getRef(harness.defers)).toBe(0);
     expect(await getRef(harness.replies)).toEqual([
       "OpenCode still has queued work for this channel. Wait for it to finish before starting a fresh session.",
@@ -727,9 +709,7 @@ describe("createCommandHandler", () => {
     });
     harness.interaction.commandName = "toggle-thinking";
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
     expect(await getRef(harness.replies)).toEqual([
       "Thinking messages are now disabled in this channel.",
     ]);
@@ -751,9 +731,7 @@ describe("createCommandHandler", () => {
     const harness = await makeHarness();
     harness.interaction.commandName = "toggle-compaction-summaries";
 
-    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
-    expect(handled).toBe(true);
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
     expect(await getRef(harness.replies)).toEqual([
       "Compaction summaries are now disabled in this channel.",
     ]);

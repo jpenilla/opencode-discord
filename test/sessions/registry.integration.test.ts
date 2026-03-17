@@ -1671,8 +1671,7 @@ describe("ChannelSessionsLayer integration", () => {
           yield* Deferred.await(promptStarted);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));
           yield* Effect.promise(() => Bun.sleep(10));
-          const handled = yield* sessions.handleInteraction(questionInteraction.interaction);
-          expect(handled).toBe(true);
+          yield* sessions.handleInteraction(questionInteraction.interaction);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionRepliedEvent()));
           yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore);
           yield* Queue.take(harness.replyEvents);
