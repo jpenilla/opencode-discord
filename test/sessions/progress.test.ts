@@ -254,7 +254,7 @@ describe("runProgressWorker", () => {
       "**🗜️ Compacting session**\nOpenCode is summarizing earlier context for this session.",
     );
     expect(result.edited.map(cardText)).toContain(
-      "**🛑 Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
+      "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
     );
   });
 
@@ -311,7 +311,7 @@ describe("runProgressWorker", () => {
       "**🗜️ Compacting session**\nOpenCode is summarizing earlier context for this session.",
     );
     expect(result.edited.map(cardText)).toEqual([
-      "**🛑 Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
+      "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
     ]);
   });
 
@@ -319,10 +319,10 @@ describe("runProgressWorker", () => {
     const result = await runFinalizationScenario("interrupted");
 
     expect(result.edited.map(cardText)).toContain(
-      "**💻 🛑 `bash` Interrupted**\n`pwd`\nPrint cwd\nNote: This tool did not complete because the run was interrupted.",
+      "**💻 ‼️ `bash` Interrupted**\n`pwd`\nPrint cwd\nNote: This tool did not complete because the run was interrupted.",
     );
     expect(result.edited.map(cardText)).toContain(
-      "**🛑 Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
+      "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
     );
   });
 

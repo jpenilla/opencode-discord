@@ -1324,7 +1324,7 @@ describe("ChannelSessionsLayer integration", () => {
       },
     ]);
     expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
-      "**🛑 Interrupting compaction**\nOpenCode is stopping session compaction.",
+      "**‼️ Interrupting compaction**\nOpenCode is stopping session compaction.",
     );
     expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
       "**🗜️ Session compacted**\nOpenCode summarized earlier context for this session.",
@@ -1460,7 +1460,7 @@ describe("ChannelSessionsLayer integration", () => {
     );
 
     expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
-      "**🛑 Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
+      "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
     );
   });
 
@@ -1532,7 +1532,7 @@ describe("ChannelSessionsLayer integration", () => {
     ];
 
     expect(allCardTexts).toContain(
-      "**🛑 Interrupting compaction**\nOpenCode is stopping session compaction.",
+      "**‼️ Interrupting compaction**\nOpenCode is stopping session compaction.",
     );
     expect(allCardTexts.filter((text) => text === compactedText)).toHaveLength(1);
   });
