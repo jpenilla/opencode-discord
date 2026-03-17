@@ -249,15 +249,13 @@ describe("createSessionLifecycle", () => {
 
     const exits = await Effect.runPromise(
       Effect.gen(function* () {
-        const fiber1 = yield* Effect.forkChild(
-          Effect.exit(lifecycle.createOrGetSession(message)),
-          { startImmediately: true },
-        );
+        const fiber1 = yield* Effect.forkChild(Effect.exit(lifecycle.createOrGetSession(message)), {
+          startImmediately: true,
+        });
         yield* Deferred.await(createStarted);
-        const fiber2 = yield* Effect.forkChild(
-          Effect.exit(lifecycle.createOrGetSession(message)),
-          { startImmediately: true },
-        );
+        const fiber2 = yield* Effect.forkChild(Effect.exit(lifecycle.createOrGetSession(message)), {
+          startImmediately: true,
+        });
         yield* Deferred.succeed(releaseCreate, undefined).pipe(Effect.ignore);
         return yield* Effect.all([Fiber.join(fiber1), Fiber.join(fiber2)]);
       }),

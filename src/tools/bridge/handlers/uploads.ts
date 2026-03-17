@@ -34,10 +34,7 @@ export const parseUploadHeaders = (headers: IncomingHttpHeaders) =>
     invalidError: "invalid upload metadata",
   });
 
-const destroyStream = (
-  stream: UploadStream,
-  error?: Error,
-) => {
+const destroyStream = (stream: UploadStream, error?: Error) => {
   if (!stream.destroyed) {
     stream.destroy(error);
   }
@@ -58,10 +55,7 @@ const stopReadingRequestBody = (request: UploadRequest) =>
     request.pause?.();
   });
 
-export const cleanupFailedUpload = (
-  request: UploadRequest,
-  uploadStream: UploadStream,
-) =>
+export const cleanupFailedUpload = (request: UploadRequest, uploadStream: UploadStream) =>
   Effect.all(
     [
       stopReadingRequestBody(request),

@@ -252,7 +252,9 @@ const resolveSessionModel = (session: SessionHandle) =>
       }
 
       return Effect.fail(
-        new Error("Failed to compact opencode session: no model metadata is available for this session"),
+        new Error(
+          "Failed to compact opencode session: no model metadata is available for this session",
+        ),
       );
     }),
   );

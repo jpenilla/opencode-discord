@@ -1,4 +1,10 @@
-import type { AssistantMessage, Event, QuestionAnswer, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2";
+import type {
+  AssistantMessage,
+  Event,
+  QuestionAnswer,
+  QuestionRequest,
+  ToolPart,
+} from "@opencode-ai/sdk/v2";
 import { Deferred, Effect, Queue } from "effect";
 
 import { compactionCardContent } from "@/discord/compaction-card.ts";
@@ -11,6 +17,7 @@ import {
   isObservedAssistantMessage,
 } from "@/opencode/events.ts";
 import type { OpencodeServiceShape } from "@/opencode/service.ts";
+import type { IdleCompactionWorkflowShape } from "@/sessions/idle-compaction-workflow.ts";
 import {
   handleAssistantMessageUpdated,
   handleSessionError as failPendingPromptFromSessionError,
@@ -38,10 +45,7 @@ const recordCurrentPromptMessage = (activeRun: ActiveRun, messageId: string) => 
   activeRun.currentPromptMessageIds.add(messageId);
 };
 
-const recordPromptAssistantMessage = (
-  activeRun: ActiveRun,
-  message: AssistantMessage,
-) => {
+const recordPromptAssistantMessage = (activeRun: ActiveRun, message: AssistantMessage) => {
   if (isCompactionSummaryAssistant(message)) {
     return;
   }
@@ -65,10 +69,7 @@ const assistantBelongsToCurrentPrompt = (activeRun: ActiveRun, assistantMessageI
 const isInFlightToolPart = (status: ToolPart["state"]["status"]) =>
   status === "pending" || status === "running";
 
-const selectToolPartForActiveRun = (
-  activeRun: ActiveRun,
-  toolPart: ToolPart,
-) => {
+const selectToolPartForActiveRun = (activeRun: ActiveRun, toolPart: ToolPart) => {
   const belongsToCurrentPrompt = assistantBelongsToCurrentPrompt(activeRun, toolPart.messageID);
   const isObservedCall = activeRun.observedToolCallIds.has(toolPart.callID);
   const isInFlight = isInFlightToolPart(toolPart.state.status);
@@ -149,12 +150,7 @@ type EventHandlerDeps = {
         }
       | { type: "rejected"; sessionId: string; requestId: string },
   ) => Effect.Effect<void, unknown>;
-  finalizeIdleCompactionCard: (
-    sessionId: string,
-    title: string,
-    body: string,
-  ) => Effect.Effect<void, unknown>;
-  sendCompactionSummary: (session: ChannelSession, text: string) => Effect.Effect<void, unknown>;
+  idleCompactionWorkflow: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">;
   readPromptResult: OpencodeServiceShape["readPromptResult"];
   logger: LoggerShape;
   formatError: (error: unknown) => string;
@@ -207,44 +203,15 @@ export const createEventHandler = (deps: EventHandlerDeps): EventHandler => ({
         });
       }
 
-      const emitCompactionSummary = (targetSession: ChannelSession, messageId: string) => {
-        if (targetSession.emittedCompactionSummaryMessageIds.has(messageId)) {
-          return Effect.void;
-        }
-
-        if (!targetSession.channelSettings.showCompactionSummaries) {
-          return Effect.sync(() => {
-            targetSession.emittedCompactionSummaryMessageIds.add(messageId);
-          });
-        }
-
-        return deps.readPromptResult(targetSession.opencode, messageId).pipe(
-          Effect.flatMap((result) => {
-            const text = result.transcript.trim();
-            if (!text) {
-              return Effect.void;
-            }
-
-            targetSession.emittedCompactionSummaryMessageIds.add(messageId);
-            return deps.sendCompactionSummary(targetSession, text);
-          }),
-          Effect.catch((error) =>
-            deps.logger.warn("failed to load compaction summary transcript", {
-              channelId: targetSession.channelId,
-              sessionId,
-              messageId,
-              error: deps.formatError(error),
-            }),
-          ),
-        );
-      };
-
       if (
         assistantMessage &&
         isCompactionSummaryAssistant(assistantMessage) &&
         isObservedAssistantMessage(assistantMessage)
       ) {
-        yield* emitCompactionSummary(context.session, assistantMessage.id);
+        yield* deps.idleCompactionWorkflow.emitSummary({
+          session: context.session,
+          messageId: assistantMessage.id,
+        });
       }
 
       if (activeRun) {
@@ -320,9 +287,7 @@ export const createEventHandler = (deps: EventHandlerDeps): EventHandler => ({
                   error: deps.formatError(error),
                 })
                 .pipe(
-                  Effect.andThen(
-                    Deferred.fail(completePrompt.deferred, error).pipe(Effect.ignore),
-                  ),
+                  Effect.andThen(Deferred.fail(completePrompt.deferred, error).pipe(Effect.ignore)),
                 ),
             ),
           );
@@ -335,8 +300,7 @@ export const createEventHandler = (deps: EventHandlerDeps): EventHandler => ({
       }
 
       if (progressEvent?.type === "session-compacted") {
-        const compactedCard = compactionCardContent("compacted");
-        yield* deps.finalizeIdleCompactionCard(sessionId, compactedCard.title, compactedCard.body);
+        yield* deps.idleCompactionWorkflow.handleCompacted(sessionId);
       }
     }),
 });

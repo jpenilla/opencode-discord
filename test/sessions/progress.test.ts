@@ -3,11 +3,7 @@ import type { Message, MessageCreateOptions, MessageEditOptions } from "discord.
 import type { CompactionPart, ToolPart } from "@opencode-ai/sdk/v2";
 import { Deferred, Effect, Fiber, Queue, Ref } from "effect";
 
-import {
-  maxProgressBatchSize,
-  runProgressWorker,
-  takeProgressBatch,
-} from "@/sessions/progress.ts";
+import { maxProgressBatchSize, runProgressWorker, takeProgressBatch } from "@/sessions/progress.ts";
 import type { ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
 import { unsafeStub } from "../support/stub.ts";
 

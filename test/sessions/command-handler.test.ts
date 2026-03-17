@@ -1,23 +1,72 @@
 import { describe, expect, test } from "bun:test";
 import { ChannelType, type Interaction, type Message, type SendableChannels } from "discord.js";
-import { Deferred, Effect, Queue, Ref } from "effect";
+import { Deferred, Effect, Layer, Queue, Redacted, Ref } from "effect";
 
+import { AppConfig, type AppConfigShape } from "@/config.ts";
+import { InfoCards, type InfoCardsShape } from "@/discord/info-cards.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { createCommandHandler } from "@/sessions/command-handler.ts";
 import { QUESTION_PENDING_INTERRUPT_MESSAGE } from "@/sessions/command-lifecycle.ts";
 import { createPromptState } from "@/sessions/prompt-state.ts";
+import {
+  IdleCompactionWorkflow,
+  type IdleCompactionWorkflowShape,
+  type IdleCompactionWorkflowInterruptResult,
+  type IdleCompactionWorkflowStartResult,
+} from "@/sessions/idle-compaction-workflow.ts";
+import {
+  makeSessionControl,
+  SessionControl,
+  type SessionControlShape,
+} from "@/sessions/session-control.ts";
+import { makeQuestionStatus, QuestionStatus } from "@/sessions/question-status.ts";
 import {
   noQuestionOutcome,
   type ActiveRun,
   type ChannelSession,
   type RunRequest,
 } from "@/sessions/session.ts";
+import {
+  OpencodeService,
+  type OpencodeServiceShape,
+  type PromptResult,
+  type SessionHandle,
+} from "@/opencode/service.ts";
+import {
+  SessionStore,
+  type PersistedChannelSession,
+  type SessionStoreShape,
+} from "@/state/store.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
+import { Logger, type LoggerShape } from "@/util/logging.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
 
-const makeHarness = async (options?: {
+const makeConfig = (defaults: {
+  showThinking: boolean;
+  showCompactionSummaries: boolean;
+}): AppConfigShape => ({
+  discordToken: Redacted.make("discord-token"),
+  triggerPhrase: "hey opencode",
+  ignoreOtherBotTriggers: false,
+  sessionInstructions: "",
+  stateDir: "/tmp/opencode-discord-test-state",
+  defaultProviderId: undefined,
+  defaultModelId: undefined,
+  showThinkingByDefault: defaults.showThinking,
+  showCompactionSummariesByDefault: defaults.showCompactionSummaries,
+  sessionIdleTimeoutMs: 30 * 60 * 1_000,
+  toolBridgeSocketPath: "/tmp/bridge.sock",
+  toolBridgeToken: Redacted.make("bridge-token"),
+  sandboxBackend: "bwrap",
+  opencodeBin: "opencode",
+  bwrapBin: "bwrap",
+  sandboxReadOnlyPaths: [],
+  sandboxEnvPassthrough: [],
+});
+
+type HarnessOptions = {
   sessionHealthy?: boolean;
   interruptResult?: "success" | "failure";
   hasActiveRun?: boolean;
@@ -26,7 +75,32 @@ const makeHarness = async (options?: {
   hasSession?: boolean;
   hasQueuedWork?: boolean;
   initialChannelSettings?: PersistedChannelSettings | null;
-}) => {
+  failInfoCardUpsert?: boolean;
+  failInvalidate?: boolean;
+};
+
+const makeCommandsLayer = (deps: {
+  sessionControl: SessionControlShape;
+  idleCompaction: IdleCompactionWorkflowShape;
+  infoCards: InfoCardsShape;
+  opencode: OpencodeServiceShape;
+  questionStatus: ReturnType<typeof makeQuestionStatus>;
+  sessionStore: SessionStoreShape;
+  logger: LoggerShape;
+  channelSettingsDefaults: { showThinking: boolean; showCompactionSummaries: boolean };
+}) =>
+  Layer.mergeAll(
+    Layer.succeed(AppConfig, makeConfig(deps.channelSettingsDefaults)),
+    Layer.succeed(SessionControl, deps.sessionControl),
+    Layer.succeed(IdleCompactionWorkflow, deps.idleCompaction),
+    Layer.succeed(InfoCards, deps.infoCards),
+    Layer.succeed(OpencodeService, deps.opencode),
+    Layer.succeed(QuestionStatus, deps.questionStatus),
+    Layer.succeed(SessionStore, deps.sessionStore),
+    Layer.succeed(Logger, deps.logger),
+  );
+
+const makeHarness = async (options?: HarnessOptions) => {
   const replies = await Effect.runPromise(Ref.make<string[]>([]));
   const defers = await Effect.runPromise(Ref.make(0));
   const edits = await Effect.runPromise(Ref.make<string[]>([]));
@@ -36,7 +110,6 @@ const makeHarness = async (options?: {
   const upsertedInfoCards = await Effect.runPromise(
     Ref.make<Array<{ title: string; body: string }>>([]),
   );
-  const loggedWarnings = await Effect.runPromise(Ref.make<string[]>([]));
   const typingStopCount = await Effect.runPromise(Ref.make(0));
   const idleCardRef = await Effect.runPromise(Ref.make<Message | null>(null));
   const idleCompactionActive = await Effect.runPromise(Ref.make(false));
@@ -47,6 +120,7 @@ const makeHarness = async (options?: {
   const invalidatedSessions = await Effect.runPromise(
     Ref.make<Array<{ channelId: string; reason: string }>>([]),
   );
+  const warnings = await Effect.runPromise(Ref.make<string[]>([]));
   const compactStarted = await Effect.runPromise(Deferred.make<void, never>());
   const compactFinish = await Effect.runPromise(Deferred.make<void, never>());
   const compactUpdated = await Effect.runPromise(Deferred.make<void, never>());
@@ -66,9 +140,10 @@ const makeHarness = async (options?: {
     );
   }
 
-  const compactionCard = unsafeStub<Message>({
-    id: "compaction-card",
-  });
+  const sessionQueue = await Effect.runPromise(Queue.unbounded<RunRequest>());
+  if (options?.hasQueuedWork) {
+    await Effect.runPromise(Queue.offer(sessionQueue, {} as RunRequest));
+  }
 
   const activeRun: ActiveRun = {
     originMessage: unsafeStub<Message>({
@@ -99,11 +174,6 @@ const makeHarness = async (options?: {
     interruptRequested: false,
   };
 
-  const sessionQueue = await Effect.runPromise(Queue.unbounded<RunRequest>());
-  if (options?.hasQueuedWork) {
-    await Effect.runPromise(Queue.offer(sessionQueue, {} as RunRequest));
-  }
-
   const session: ChannelSession = {
     channelId: "channel-1",
     opencode: {
@@ -131,6 +201,210 @@ const makeHarness = async (options?: {
     activeRun: (options?.hasActiveRun ?? false) ? activeRun : null,
   };
 
+  const sessionRef = await Effect.runPromise(
+    Ref.make((options?.hasSession ?? true) ? session : null),
+  );
+
+  const sessionControl = makeSessionControl({
+    getLoaded: (channelId) =>
+      Ref.get(sessionRef).pipe(
+        Effect.map((current) => (current && current.channelId === channelId ? current : null)),
+      ),
+    getOrRestore: (channelId) =>
+      Ref.get(sessionRef).pipe(
+        Effect.map((current) => (current && current.channelId === channelId ? current : null)),
+      ),
+    invalidate: (channelId, reason) =>
+      Effect.gen(function* () {
+        if (options?.failInvalidate) {
+          return yield* Effect.fail(new Error("invalidate failed"));
+        }
+        yield* Ref.update(invalidatedSessions, (current) => [
+          ...current,
+          { channelId: session.channelId, reason },
+        ]);
+        yield* Ref.update(sessionRef, (current) =>
+          current && current.channelId === channelId ? null : current,
+        );
+      }),
+  });
+
+  const infoCards: InfoCardsShape = {
+    send: () => Effect.succeed(unsafeStub<Message>({ id: "info-cards-send" })),
+    edit: () => Effect.void,
+    upsert: ({
+      channel,
+      title,
+      body,
+    }: {
+      channel: SendableChannels;
+      existingCard: Message | null;
+      title: string;
+      body: string;
+    }) =>
+      Effect.gen(function* () {
+        if (options?.failInfoCardUpsert) {
+          return yield* Effect.fail(new Error("card post failed"));
+        }
+        const card = unsafeStub<Message>({
+          id: `${title}-${channel.id}`,
+        });
+        yield* Ref.update(upsertedInfoCards, (current) => [...current, { title, body }]);
+        if (title === "🗜️ Compacting session") {
+          yield* Ref.set(idleCardRef, card);
+        }
+        return card;
+      }),
+  };
+
+  const logger: LoggerShape = {
+    info: () => Effect.void,
+    warn: (message) => Ref.update(warnings, (current) => [...current, message]),
+    error: () => Effect.void,
+  };
+
+  const opencodeService: OpencodeServiceShape = {
+    createSession: () => Effect.succeed(session.opencode satisfies SessionHandle),
+    attachSession: () => Effect.succeed(session.opencode satisfies SessionHandle),
+    submitPrompt: () => Effect.void,
+    readPromptResult: () =>
+      Effect.succeed({
+        messageId: "prompt-result",
+        transcript: "",
+      } satisfies PromptResult),
+    interruptSession: () =>
+      options?.interruptResult === "failure"
+        ? Effect.fail(new Error("interrupt failed"))
+        : Effect.void,
+    compactSession: () => Effect.void,
+    replyToQuestion: () => Effect.void,
+    rejectQuestion: () => Effect.void,
+    isHealthy: () => Effect.succeed(true),
+  };
+
+  const questionStatus = makeQuestionStatus(() =>
+    Ref.updateAndGet(pendingQuestionCheckCount, (count) => count + 1).pipe(
+      Effect.map((count) => {
+        const sequence = options?.hasPendingQuestionsSequence;
+        if (sequence && sequence.length > 0) {
+          return sequence[Math.min(count - 1, sequence.length - 1)] ?? false;
+        }
+        return options?.hasPendingQuestions ?? false;
+      }),
+    ),
+  );
+
+  const sessionStore: SessionStoreShape = {
+    getSession: () => Effect.succeed<PersistedChannelSession | null>(null),
+    upsertSession: () => Effect.void,
+    touchSession: () => Effect.void,
+    deleteSession: () => Effect.void,
+    getChannelSettings: (channelId: string) =>
+      Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(channelId) ?? null)),
+    upsertChannelSettings: (settings: PersistedChannelSettings) =>
+      Ref.update(persistedSettings, (current) => {
+        const next = new Map(current);
+        next.set(settings.channelId, settings);
+        return next;
+      }),
+  };
+
+  const idleCompactionWorkflow: IdleCompactionWorkflowShape = {
+    hasActive: () => Ref.get(idleCompactionActive),
+    start: ({ channel }: { session: ChannelSession; channel: SendableChannels }) =>
+      Effect.gen(function* () {
+        if (options?.sessionHealthy === false) {
+          return {
+            type: "rejected",
+            message:
+              "This channel session is unavailable right now. Send a normal message to recreate it.",
+          } satisfies IdleCompactionWorkflowStartResult;
+        }
+
+        yield* infoCards
+          .upsert({
+            channel,
+            existingCard: null,
+            title: "🗜️ Compacting session",
+            body: "OpenCode is summarizing earlier context for this session.",
+          })
+          .pipe(Effect.ignore);
+        yield* Ref.set(idleCompactionActive, true);
+        yield* Deferred.succeed(compactStarted, undefined);
+
+        yield* Effect.sync(() => {
+          void Effect.runPromise(
+            Deferred.await(compactFinish).pipe(
+              Effect.flatMap(() =>
+                Ref.update(compactionUpdates, (current) => [
+                  ...current,
+                  {
+                    title: "🗜️ Session compacted",
+                    body: "OpenCode summarized earlier context for this session.",
+                  },
+                ]),
+              ),
+              Effect.andThen(Ref.set(idleCardRef, null)),
+              Effect.andThen(Ref.set(idleCompactionActive, false)),
+              Effect.andThen(Deferred.succeed(compactUpdated, undefined)),
+            ),
+          );
+        });
+
+        return { type: "started" } satisfies IdleCompactionWorkflowStartResult;
+      }),
+    requestInterrupt: () =>
+      Effect.gen(function* () {
+        yield* Ref.set(idleInterruptRequested, true);
+        yield* Ref.update(compactionUpdates, (current) => [
+          ...current,
+          {
+            title: "‼️ Interrupting compaction",
+            body: "OpenCode is stopping session compaction.",
+          },
+        ]);
+
+        if (options?.interruptResult === "failure") {
+          yield* Ref.update(compactionUpdates, (current) => [
+            ...current,
+            {
+              title: "🗜️ Compacting session",
+              body: "OpenCode is summarizing earlier context for this session.",
+            },
+          ]);
+          yield* Ref.set(idleInterruptRequested, false);
+          return {
+            type: "failed",
+            message: formatErrorResponse(
+              "## ❌ Failed to interrupt compaction",
+              "interrupt failed",
+            ),
+          } satisfies IdleCompactionWorkflowInterruptResult;
+        }
+
+        return { type: "interrupted" } satisfies IdleCompactionWorkflowInterruptResult;
+      }),
+    handleCompacted: () => Effect.void,
+    handleStopped: () => Effect.void,
+    emitSummary: () => Effect.void,
+    shutdown: () => Effect.void,
+  };
+
+  const commandsLayer = makeCommandsLayer({
+    sessionControl,
+    idleCompaction: idleCompactionWorkflow,
+    infoCards,
+    opencode: opencodeService,
+    questionStatus,
+    sessionStore,
+    logger,
+    channelSettingsDefaults: channelSettingsDefaults,
+  });
+
+  const runtime = createCommandHandler({
+    commandLayer: commandsLayer,
+  });
+
   const interaction = unsafeStub<
     Interaction & {
       replied: boolean;
@@ -140,7 +414,10 @@ const makeHarness = async (options?: {
   >({
     commandName: "compact",
     channelId: "channel-1",
-    channel: unsafeStub<SendableChannels>({ type: ChannelType.GuildText, id: "channel-1" }),
+    channel: unsafeStub<SendableChannels>({
+      id: "channel-1",
+      type: ChannelType.GuildText,
+    }),
     replied: false,
     deferred: false,
     inGuild: () => true,
@@ -157,88 +434,6 @@ const makeHarness = async (options?: {
       Effect.runPromise(Ref.update(edits, (current) => [...current, content ?? ""])),
   });
 
-  const runtime = createCommandHandler({
-    getSession: (channelId) =>
-      Effect.succeed(
-        (options?.hasSession ?? true) && channelId === session.channelId ? session : null,
-      ),
-    getLoadedSession: (channelId) =>
-      Effect.succeed(
-        (options?.hasSession ?? true) && channelId === session.channelId ? session : null,
-      ),
-    invalidateSession: (channelId, reason) =>
-      Ref.update(invalidatedSessions, (current) => [...current, { channelId, reason }]),
-    getChannelSettings: (channelId) =>
-      Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(channelId) ?? null)),
-    upsertChannelSettings: (settings) =>
-      Ref.update(persistedSettings, (current) => {
-        const next = new Map(current);
-        next.set(settings.channelId, settings);
-        return next;
-      }),
-    channelSettingsDefaults,
-    hasIdleCompaction: () =>
-      Effect.all([Ref.get(idleCompactionActive), Ref.get(idleCardRef)]).pipe(
-        Effect.map(([active, card]) => active || card !== null),
-      ),
-    hasPendingQuestions: () =>
-      Ref.updateAndGet(pendingQuestionCheckCount, (count) => count + 1).pipe(
-        Effect.map((count) => {
-          const sequence = options?.hasPendingQuestionsSequence;
-          if (sequence && sequence.length > 0) {
-            return sequence[Math.min(count - 1, sequence.length - 1)] ?? false;
-          }
-          return options?.hasPendingQuestions ?? false;
-        }),
-      ),
-    getIdleCompactionCard: (_sessionId) => Ref.get(idleCardRef),
-    beginIdleCompaction: () => Ref.set(idleCompactionActive, true),
-    setIdleCompactionCard: (_sessionId, card) =>
-      Ref.set(idleCardRef, card).pipe(
-        Effect.andThen(Ref.set(idleCompactionActive, card !== null)),
-      ),
-    setIdleCompactionInterruptRequested: (_sessionId, interruptRequested) =>
-      Ref.set(idleInterruptRequested, interruptRequested),
-    getIdleCompactionInterruptRequested: (_sessionId) => Ref.get(idleInterruptRequested),
-    updateIdleCompactionCard: (_sessionId, title, body) =>
-      Ref.get(idleCardRef).pipe(
-        Effect.flatMap((card) =>
-          card
-            ? Ref.update(compactionUpdates, (current) => [...current, { title, body }]).pipe(
-                Effect.asVoid,
-              )
-            : Effect.void,
-        ),
-      ),
-    finalizeIdleCompactionCard: (_sessionId, title, body) =>
-      Ref.set(idleCardRef, null).pipe(
-        Effect.andThen(Ref.set(idleCompactionActive, false)),
-        Effect.andThen(Ref.update(compactionUpdates, (current) => [...current, { title, body }])),
-        Effect.andThen(Deferred.succeed(compactUpdated, undefined).pipe(Effect.ignore)),
-      ),
-    isSessionHealthy: () => Effect.succeed(options?.sessionHealthy ?? true),
-    compactSession: () =>
-      Deferred.succeed(compactStarted, undefined).pipe(
-        Effect.andThen(Deferred.await(compactFinish)),
-      ),
-    interruptSession: () =>
-      options?.interruptResult === "failure"
-        ? Effect.fail(new Error("interrupt failed"))
-        : Effect.void,
-    upsertInfoCard: async ({ title, body }) => {
-      await Effect.runPromise(
-        Ref.update(upsertedInfoCards, (current) => [...current, { title, body }]),
-      );
-      return compactionCard;
-    },
-    logger: {
-      info: () => Effect.void,
-      warn: (message) => Ref.update(loggedWarnings, (current) => [...current, message]),
-      error: () => Effect.void,
-    },
-    formatError: (error: unknown) => (error instanceof Error ? error.message : String(error)),
-  });
-
   return {
     runtime,
     session,
@@ -249,10 +444,11 @@ const makeHarness = async (options?: {
     edits,
     compactionUpdates,
     upsertedInfoCards,
-    loggedWarnings,
     typingStopCount,
     idleCardRef,
+    idleCompactionActive,
     invalidatedSessions,
+    warnings,
     persistedSettings,
     compactStarted,
     compactFinish,
@@ -271,6 +467,7 @@ describe("createCommandHandler", () => {
 
     expect(handled).toBe(true);
     expect(await getRef(harness.defers)).toBe(1);
+    expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([
       "This channel session is unavailable right now. Send a normal message to recreate it.",
     ]);
@@ -291,7 +488,8 @@ describe("createCommandHandler", () => {
         body: "OpenCode is summarizing earlier context for this session.",
       },
     ]);
-    expect((await getRef(harness.idleCardRef))?.id).toBe("compaction-card");
+    expect((await getRef(harness.idleCardRef))?.id).toBe("🗜️ Compacting session-channel-1");
+    expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([
       "Started session compaction. I'll post updates in this channel.",
     ]);
@@ -317,6 +515,7 @@ describe("createCommandHandler", () => {
 
     expect(handled).toBe(true);
     expect(harness.activeRun.interruptRequested).toBe(false);
+    expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([
       formatErrorResponse("## ❌ Failed to interrupt run", "interrupt failed"),
     ]);
@@ -333,6 +532,7 @@ describe("createCommandHandler", () => {
     expect(handled).toBe(true);
     expect(harness.activeRun.interruptRequested).toBe(true);
     expect(await getRef(harness.typingStopCount)).toBe(0);
+    expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([
       "Requested interruption of the active OpenCode run.",
     ]);
@@ -366,6 +566,7 @@ describe("createCommandHandler", () => {
 
     expect(handled).toBe(true);
     expect(harness.activeRun.interruptRequested).toBe(false);
+    expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
   });
 
@@ -375,6 +576,7 @@ describe("createCommandHandler", () => {
     await Effect.runPromise(
       Ref.set(harness.idleCardRef, unsafeStub<Message>({ id: "compaction-card" })),
     );
+    await Effect.runPromise(Ref.set(harness.idleCompactionActive, true));
 
     const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
 
@@ -387,6 +589,7 @@ describe("createCommandHandler", () => {
       },
     ]);
     expect((await getRef(harness.idleCardRef))?.id).toBe("compaction-card");
+    expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([
       "Requested interruption of the active OpenCode compaction.",
     ]);
@@ -400,6 +603,7 @@ describe("createCommandHandler", () => {
     await Effect.runPromise(
       Ref.set(harness.idleCardRef, unsafeStub<Message>({ id: "compaction-card" })),
     );
+    await Effect.runPromise(Ref.set(harness.idleCompactionActive, true));
 
     const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
 
@@ -416,6 +620,7 @@ describe("createCommandHandler", () => {
       },
     ]);
     expect((await getRef(harness.idleCardRef))?.id).toBe("compaction-card");
+    expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([
       formatErrorResponse("## ❌ Failed to interrupt compaction", "interrupt failed"),
     ]);
@@ -443,8 +648,44 @@ describe("createCommandHandler", () => {
         body: "The next triggered message in this channel will start a new OpenCode session with fresh chat history. Workspace files were left in place.",
       },
     ]);
+    expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([
       "Cleared this channel's current OpenCode session. The next triggered message here will start a new session with fresh chat history. Workspace files were left in place.",
+    ]);
+  });
+
+  test("logs and still replies when the fresh session info card cannot be posted", async () => {
+    const harness = await makeHarness({
+      hasSession: false,
+      failInfoCardUpsert: true,
+    });
+    harness.interaction.commandName = "new-session";
+
+    const handled = await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+
+    expect(handled).toBe(true);
+    expect(await getRef(harness.defers)).toBe(1);
+    expect(await getRef(harness.edits)).toEqual([
+      "Cleared this channel's current OpenCode session. The next triggered message here will start a new session with fresh chat history. Workspace files were left in place.",
+    ]);
+    expect(await getRef(harness.warnings)).toEqual(["failed to post fresh session info card"]);
+  });
+
+  test("completes a deferred command with a generic error when unhandled work fails after ack", async () => {
+    const harness = await makeHarness({
+      hasSession: false,
+      failInvalidate: true,
+    });
+    harness.interaction.commandName = "new-session";
+
+    await expect(
+      Effect.runPromise(harness.runtime.handleInteraction(harness.interaction)),
+    ).rejects.toThrow("invalidate failed");
+
+    expect(await getRef(harness.defers)).toBe(1);
+    expect(await getRef(harness.replies)).toEqual([]);
+    expect(await getRef(harness.edits)).toEqual([
+      "An unexpected error occurred while processing this command.",
     ]);
   });
 

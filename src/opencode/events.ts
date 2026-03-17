@@ -1,8 +1,4 @@
-import type {
-  AssistantMessage,
-  Event,
-  GlobalEvent,
-} from "@opencode-ai/sdk/v2";
+import type { AssistantMessage, Event, GlobalEvent } from "@opencode-ai/sdk/v2";
 import { Layer, Queue, ServiceMap } from "effect";
 
 export class OpencodeEventQueue extends ServiceMap.Service<

@@ -35,10 +35,7 @@ const defaultToolBridgeSocketPath = () =>
   `/tmp/opencode-discord-${process.pid}-${crypto.randomUUID().slice(0, 8)}/bridge.sock`;
 
 const positiveInteger = (name: string, fallback: number) =>
-  Config.withDefault(
-    Config.schema(Schema.Int.check(Schema.isGreaterThan(0)), name),
-    fallback,
-  );
+  Config.withDefault(Config.schema(Schema.Int.check(Schema.isGreaterThan(0)), name), fallback);
 
 const stringList = (name: string) =>
   Config.withDefault(Config.schema(Schema.Array(Schema.String), name), [] as Array<string>);
@@ -91,7 +88,4 @@ export const parseAppConfig = (
     })),
   );
 
-export const AppConfigLayer = Layer.effect(
-  AppConfig,
-  parseAppConfig(),
-);
+export const AppConfigLayer = Layer.effect(AppConfig, parseAppConfig());

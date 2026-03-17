@@ -9,6 +9,7 @@ import type {
 import { Deferred, Effect, Option, Queue, Ref } from "effect";
 import type { Message } from "discord.js";
 
+import type { SessionHandle } from "@/opencode/service.ts";
 import { createEventHandler } from "@/sessions/event-handler.ts";
 import { beginPendingPrompt, createPromptState } from "@/sessions/prompt-state.ts";
 import {
@@ -272,6 +273,11 @@ const makeToolEvent = (
     },
   });
 
+const noopIdleCompactionWorkflow = {
+  emitSummary: () => Effect.void,
+  handleCompacted: () => Effect.void,
+};
+
 describe("createEventHandler", () => {
   test("routes question asked events to the question coordinator", async () => {
     const { session } = await makeSession(false);
@@ -283,8 +289,7 @@ describe("createEventHandler", () => {
           sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
         ),
       handleQuestionEvent: (event) => Ref.update(questionEvents, (current) => [...current, event]),
-      finalizeIdleCompactionCard: () => Effect.void,
-      sendCompactionSummary: () => Effect.void,
+      idleCompactionWorkflow: noopIdleCompactionWorkflow,
       readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
       logger: {
         info: () => Effect.void,
@@ -315,8 +320,7 @@ describe("createEventHandler", () => {
           sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
         ),
       handleQuestionEvent: (event) => Ref.update(questionEvents, (current) => [...current, event]),
-      finalizeIdleCompactionCard: () => Effect.void,
-      sendCompactionSummary: () => Effect.void,
+      idleCompactionWorkflow: noopIdleCompactionWorkflow,
       readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
       logger: {
         info: () => Effect.void,
@@ -351,8 +355,7 @@ describe("createEventHandler", () => {
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
-      finalizeIdleCompactionCard: () => Effect.void,
-      sendCompactionSummary: () => Effect.void,
+      idleCompactionWorkflow: noopIdleCompactionWorkflow,
       readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
       logger: {
         info: () => Effect.void,
@@ -374,9 +377,7 @@ describe("createEventHandler", () => {
 
   test("updates the idle compaction card when compaction finishes outside an active run", async () => {
     const { session } = await makeSession(false);
-    const idleUpdates = await Effect.runPromise(
-      Ref.make<Array<{ sessionId: string; title: string; body: string }>>([]),
-    );
+    const idleUpdates = await Effect.runPromise(Ref.make<string[]>([]));
 
     const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
@@ -384,9 +385,11 @@ describe("createEventHandler", () => {
           sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
         ),
       handleQuestionEvent: () => Effect.void,
-      finalizeIdleCompactionCard: (sessionId, title, body) =>
-        Ref.update(idleUpdates, (current) => [...current, { sessionId, title, body }]),
-      sendCompactionSummary: () => Effect.void,
+      idleCompactionWorkflow: {
+        ...noopIdleCompactionWorkflow,
+        handleCompacted: (sessionId) =>
+          Ref.update(idleUpdates, (current) => [...current, sessionId]),
+      },
       readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
       logger: {
         info: () => Effect.void,
@@ -398,13 +401,7 @@ describe("createEventHandler", () => {
 
     await Effect.runPromise(runtime.handleEvent(makeSessionCompactedEvent()));
 
-    expect(await getRef(idleUpdates)).toEqual([
-      {
-        sessionId: "session-1",
-        title: "🗜️ Session compacted",
-        body: "OpenCode summarized earlier context for this session.",
-      },
-    ]);
+    expect(await getRef(idleUpdates)).toEqual(["session-1"]);
   });
 
   test("ignores events for sessions that are not currently tracked", async () => {
@@ -414,8 +411,10 @@ describe("createEventHandler", () => {
     const runtime = createEventHandler({
       getSessionContext: () => Effect.succeed(null),
       handleQuestionEvent: () => Ref.update(questionEvents, (count) => count + 1),
-      finalizeIdleCompactionCard: () => Ref.update(idleUpdates, (count) => count + 1),
-      sendCompactionSummary: () => Effect.void,
+      idleCompactionWorkflow: {
+        ...noopIdleCompactionWorkflow,
+        handleCompacted: () => Ref.update(idleUpdates, (count) => count + 1),
+      },
       readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
       logger: {
         info: () => Effect.void,
@@ -437,22 +436,42 @@ describe("createEventHandler", () => {
     const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]));
     const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]));
 
+    const readPromptResult = (_session: SessionHandle, messageId: string) =>
+      Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
+        Effect.as({
+          messageId,
+          transcript: "summary text",
+        }),
+      );
+    const sendCompactionSummary = (_session: ChannelSession, text: string) =>
+      Ref.update(sentSummaries, (current) => [...current, text]).pipe(Effect.asVoid);
+
     const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(
           sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
         ),
       handleQuestionEvent: () => Effect.void,
-      finalizeIdleCompactionCard: () => Effect.void,
-      sendCompactionSummary: (_session, text) =>
-        Ref.update(sentSummaries, (current) => [...current, text]),
-      readPromptResult: (_session, messageId) =>
-        Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
-          Effect.as({
-            messageId,
-            transcript: "summary text",
-          }),
-        ),
+      idleCompactionWorkflow: {
+        ...noopIdleCompactionWorkflow,
+        emitSummary: ({ session, messageId }) =>
+          Effect.sync(() => {
+            if (session.emittedCompactionSummaryMessageIds.has(messageId)) {
+              return false;
+            }
+            session.emittedCompactionSummaryMessageIds.add(messageId);
+            return session.channelSettings.showCompactionSummaries;
+          }).pipe(
+            Effect.flatMap((shouldProcess) =>
+              shouldProcess
+                ? readPromptResult(session.opencode, messageId).pipe(
+                    Effect.flatMap((result) => sendCompactionSummary(session, result.transcript)),
+                  )
+                : Effect.void,
+            ),
+          ),
+      },
+      readPromptResult,
       logger: {
         info: () => Effect.void,
         warn: () => Effect.void,
@@ -481,22 +500,42 @@ describe("createEventHandler", () => {
     const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]));
     const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]));
 
+    const readPromptResult = (_session: SessionHandle, messageId: string) =>
+      Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
+        Effect.as({
+          messageId,
+          transcript: "summary text",
+        }),
+      );
+    const sendCompactionSummary = (_session: ChannelSession, text: string) =>
+      Ref.update(sentSummaries, (current) => [...current, text]).pipe(Effect.asVoid);
+
     const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(
           sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
         ),
       handleQuestionEvent: () => Effect.void,
-      finalizeIdleCompactionCard: () => Effect.void,
-      sendCompactionSummary: (_session, text) =>
-        Ref.update(sentSummaries, (current) => [...current, text]),
-      readPromptResult: (_session, messageId) =>
-        Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
-          Effect.as({
-            messageId,
-            transcript: "summary text",
-          }),
-        ),
+      idleCompactionWorkflow: {
+        ...noopIdleCompactionWorkflow,
+        emitSummary: ({ session, messageId }) =>
+          Effect.sync(() => {
+            if (session.emittedCompactionSummaryMessageIds.has(messageId)) {
+              return false;
+            }
+            session.emittedCompactionSummaryMessageIds.add(messageId);
+            return session.channelSettings.showCompactionSummaries;
+          }).pipe(
+            Effect.flatMap((shouldProcess) =>
+              shouldProcess
+                ? readPromptResult(session.opencode, messageId).pipe(
+                    Effect.flatMap((result) => sendCompactionSummary(session, result.transcript)),
+                  )
+                : Effect.void,
+            ),
+          ),
+      },
+      readPromptResult,
       logger: {
         info: () => Effect.void,
         warn: () => Effect.void,
@@ -528,27 +567,47 @@ describe("createEventHandler", () => {
     const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]));
     const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]));
 
+    const readPromptResult = (_session: SessionHandle, messageId: string) =>
+      Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
+        Effect.as(
+          messageId === "summary-1"
+            ? {
+                messageId,
+                transcript: "summary text",
+              }
+            : {
+                messageId,
+                transcript: "final reply",
+              },
+        ),
+      );
+    const sendCompactionSummary = (_session: ChannelSession, text: string) =>
+      Ref.update(sentSummaries, (current) => [...current, text]).pipe(Effect.asVoid);
+
     const runtime = createEventHandler({
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
-      finalizeIdleCompactionCard: () => Effect.void,
-      sendCompactionSummary: (_session, text) =>
-        Ref.update(sentSummaries, (current) => [...current, text]),
-      readPromptResult: (_session, messageId) =>
-        Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
-          Effect.as(
-            messageId === "summary-1"
-              ? {
-                  messageId,
-                  transcript: "summary text",
-                }
-              : {
-                  messageId,
-                  transcript: "final reply",
-                },
+      idleCompactionWorkflow: {
+        ...noopIdleCompactionWorkflow,
+        emitSummary: ({ session, messageId }) =>
+          Effect.sync(() => {
+            if (session.emittedCompactionSummaryMessageIds.has(messageId)) {
+              return false;
+            }
+            session.emittedCompactionSummaryMessageIds.add(messageId);
+            return session.channelSettings.showCompactionSummaries;
+          }).pipe(
+            Effect.flatMap((shouldProcess) =>
+              shouldProcess
+                ? readPromptResult(session.opencode, messageId).pipe(
+                    Effect.flatMap((result) => sendCompactionSummary(session, result.transcript)),
+                  )
+                : Effect.void,
+            ),
           ),
-        ),
+      },
+      readPromptResult,
       logger: {
         info: () => Effect.void,
         warn: () => Effect.void,
@@ -572,9 +631,7 @@ describe("createEventHandler", () => {
 
     expect(await getRef(readPromptCalls)).toEqual(["summary-1"]);
     expect(await getRef(sentSummaries)).toEqual(["summary text"]);
-    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual(
-      [],
-    );
+    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual([]);
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
 
     await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent("user-2")));
@@ -608,8 +665,7 @@ describe("createEventHandler", () => {
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
-      finalizeIdleCompactionCard: () => Effect.void,
-      sendCompactionSummary: () => Effect.void,
+      idleCompactionWorkflow: noopIdleCompactionWorkflow,
       readPromptResult: (_session, messageId) =>
         Effect.succeed({
           messageId,
@@ -659,8 +715,7 @@ describe("createEventHandler", () => {
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
-      finalizeIdleCompactionCard: () => Effect.void,
-      sendCompactionSummary: () => Effect.void,
+      idleCompactionWorkflow: noopIdleCompactionWorkflow,
       readPromptResult: (_session, messageId) =>
         Effect.succeed({
           messageId,
@@ -693,9 +748,7 @@ describe("createEventHandler", () => {
       ),
     );
 
-    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual(
-      [],
-    );
+    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual([]);
     expect(activeRun?.observedToolCallIds.size).toBe(0);
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
   });
@@ -708,8 +761,7 @@ describe("createEventHandler", () => {
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
-      finalizeIdleCompactionCard: () => Effect.void,
-      sendCompactionSummary: () => Effect.void,
+      idleCompactionWorkflow: noopIdleCompactionWorkflow,
       readPromptResult: (_session, messageId) =>
         Effect.succeed({
           messageId,
@@ -741,17 +793,13 @@ describe("createEventHandler", () => {
       ),
     );
 
-    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual(
-      [],
-    );
+    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual([]);
     expect(activeRun?.observedToolCallIds.size).toBe(0);
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
 
     await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
 
-    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual(
-      [],
-    );
+    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual([]);
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
   });
 
@@ -763,8 +811,7 @@ describe("createEventHandler", () => {
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
-      finalizeIdleCompactionCard: () => Effect.void,
-      sendCompactionSummary: () => Effect.void,
+      idleCompactionWorkflow: noopIdleCompactionWorkflow,
       readPromptResult: (_session, messageId) =>
         Effect.succeed({
           messageId,
@@ -807,9 +854,7 @@ describe("createEventHandler", () => {
 
     await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
 
-    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual(
-      [],
-    );
+    expect(await Effect.runPromise(Queue.clear(progressQueue))).toEqual([]);
     expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
 
     await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent("session-1", "idle")));
@@ -829,8 +874,7 @@ describe("createEventHandler", () => {
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
-      finalizeIdleCompactionCard: () => Effect.void,
-      sendCompactionSummary: () => Effect.void,
+      idleCompactionWorkflow: noopIdleCompactionWorkflow,
       readPromptResult: () =>
         Ref.update(readPromptCalls, (count) => count + 1).pipe(
           Effect.flatMap(() => Effect.fail(new Error("unexpected prompt result load"))),
@@ -873,8 +917,7 @@ describe("createEventHandler", () => {
       getSessionContext: (sessionId) =>
         Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
       handleQuestionEvent: () => Effect.void,
-      finalizeIdleCompactionCard: () => Effect.void,
-      sendCompactionSummary: () => Effect.void,
+      idleCompactionWorkflow: noopIdleCompactionWorkflow,
       readPromptResult: (_session, messageId) =>
         Effect.succeed({
           messageId,

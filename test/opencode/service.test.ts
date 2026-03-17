@@ -284,9 +284,7 @@ describe("makeOpencodeService", () => {
           const streamStarted = yield* Deferred.make<void>();
           const firstEvent = yield* Deferred.make<IteratorResult<GlobalEvent, undefined>>();
           let firstPull = true;
-          let pendingNext:
-            | ((result: IteratorResult<GlobalEvent, undefined>) => void)
-            | null = null;
+          let pendingNext: ((result: IteratorResult<GlobalEvent, undefined>) => void) | null = null;
           let abortSeen = false;
 
           const service = yield* makeOpencodeService({
@@ -503,7 +501,9 @@ describe("makeOpencodeService", () => {
       ),
     );
 
-    expect(warnings.filter((entry) => entry.message === "opencode event stream closed unexpectedly")).toEqual([]);
+    expect(
+      warnings.filter((entry) => entry.message === "opencode event stream closed unexpectedly"),
+    ).toEqual([]);
   });
 
   test("surfaces SDK result errors through the Effect failure channel", async () => {

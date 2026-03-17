@@ -1,113 +1,92 @@
 import { Effect } from "effect";
 
-import { compactionCardContent } from "@/discord/compaction-card.ts";
+import { CommandContext } from "@/discord/commands/command-context.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
+import { OpencodeService } from "@/opencode/service.ts";
+import { IdleCompactionWorkflow } from "@/sessions/idle-compaction-workflow.ts";
 import {
+  GUILD_TEXT_COMMAND_ONLY_MESSAGE,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
-  decideInterruptEntry,
 } from "@/sessions/command-lifecycle.ts";
+import { QuestionStatus } from "@/sessions/question-status.ts";
+import { SessionControl } from "@/sessions/session-control.ts";
+import { formatError } from "@/util/errors.ts";
+import { defineGuildCommand } from "./definition.ts";
 
-import { defineSessionCommand, type GuildCommand } from "./definition.ts";
-import {
-  deferCommandInteraction,
-  editCommandInteraction,
-  replyToCommandInteraction,
-} from "./interaction.ts";
+export const interruptCommand = defineGuildCommand({
+  name: "interrupt",
+  description: "Interrupt the active OpenCode run in this channel",
+  execute: Effect.gen(function* () {
+    const context = yield* CommandContext;
+    const sessionControl = yield* SessionControl;
+    const idleCompaction = yield* IdleCompactionWorkflow;
+    const questionStatus = yield* QuestionStatus;
+    const opencode = yield* OpencodeService;
 
-const executeInterruptSession: GuildCommand["execute"] = (context) =>
-  Effect.gen(function* () {
-    const hasPendingQuestions = context.session?.activeRun
-      ? yield* context.deps.hasPendingQuestions(context.session.opencode.sessionId)
-      : false;
-    const interruptEntry = decideInterruptEntry({
-      inGuildTextChannel: context.inGuildTextChannel,
-      hasSession: !!context.session,
-      hasActiveRun: !!context.session?.activeRun,
-      hasPendingQuestions,
-      hasIdleCompaction:
-        context.session && !context.session.activeRun
-          ? yield* context.deps.hasIdleCompaction(context.session.opencode.sessionId)
-          : false,
-    });
-    if (interruptEntry.type === "reject") {
-      yield* replyToCommandInteraction(context.interaction, interruptEntry.message);
+    if (!context.inGuildTextChannel) {
+      yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
       return true;
     }
 
-    yield* deferCommandInteraction(context.interaction);
+    const session = yield* sessionControl.getOrRestore(context.channelId);
+    if (!session) {
+      yield* context.complete("No OpenCode session exists in this channel yet.");
+      return true;
+    }
 
-    const session = context.session!;
-    if (interruptEntry.target === "compaction") {
-      yield* context.deps.setIdleCompactionInterruptRequested(session.opencode.sessionId, true);
-      const interruptingCard = compactionCardContent("interrupting");
-      yield* context.deps.updateIdleCompactionCard(
+    if (session.activeRun) {
+      const hasPendingQuestions = yield* questionStatus.hasPendingQuestions(
         session.opencode.sessionId,
-        interruptingCard.title,
-        interruptingCard.body,
       );
-      const interruptResult = yield* context.deps
+      if (hasPendingQuestions) {
+        yield* context.complete(QUESTION_PENDING_INTERRUPT_MESSAGE);
+        return true;
+      }
+
+      yield* context.ack();
+      const activeRun = session.activeRun;
+      yield* sessionControl.setRunInterruptRequested(activeRun, true);
+      const interruptResult = yield* opencode
         .interruptSession(session.opencode)
         .pipe(Effect.result);
       if (interruptResult._tag === "Failure") {
-        yield* context.deps.setIdleCompactionInterruptRequested(session.opencode.sessionId, false);
-        const compactingCard = compactionCardContent("compacting");
-        yield* context.deps.updateIdleCompactionCard(
-          session.opencode.sessionId,
-          compactingCard.title,
-          compactingCard.body,
-        );
-        yield* editCommandInteraction(
-          context.interaction,
+        yield* sessionControl.setRunInterruptRequested(activeRun, false);
+        yield* context.complete(
           formatErrorResponse(
-            "## ❌ Failed to interrupt compaction",
-            context.deps.formatError(interruptResult.failure),
+            "## ❌ Failed to interrupt run",
+            formatError(interruptResult.failure),
           ),
         );
         return true;
       }
 
-      yield* editCommandInteraction(
-        context.interaction,
-        "Requested interruption of the active OpenCode compaction.",
+      const hasPendingQuestionsAfterInterrupt = yield* questionStatus.hasPendingQuestions(
+        session.opencode.sessionId,
       );
+      if (hasPendingQuestionsAfterInterrupt) {
+        yield* sessionControl.setRunInterruptRequested(activeRun, false);
+        yield* context.complete(QUESTION_PENDING_INTERRUPT_MESSAGE);
+        return true;
+      }
+
+      yield* context.complete("Requested interruption of the active OpenCode run.");
       return true;
     }
 
-    const activeRun = session.activeRun!;
-    activeRun.interruptRequested = true;
-    const interruptResult = yield* context.deps
-      .interruptSession(session.opencode)
-      .pipe(Effect.result);
-    if (interruptResult._tag === "Failure") {
-      activeRun.interruptRequested = false;
-      yield* editCommandInteraction(
-        context.interaction,
-        formatErrorResponse(
-          "## ❌ Failed to interrupt run",
-          context.deps.formatError(interruptResult.failure),
-        ),
-      );
+    const hasIdleCompaction = yield* idleCompaction.hasActive(session.opencode.sessionId);
+    if (!hasIdleCompaction) {
+      yield* context.complete("No active OpenCode run or compaction is running in this channel.");
       return true;
     }
 
-    const hasPendingQuestionsAfterInterrupt = yield* context.deps.hasPendingQuestions(
-      session.opencode.sessionId,
-    );
-    if (hasPendingQuestionsAfterInterrupt) {
-      activeRun.interruptRequested = false;
-      yield* editCommandInteraction(context.interaction, QUESTION_PENDING_INTERRUPT_MESSAGE);
+    yield* context.ack();
+    const result = yield* idleCompaction.requestInterrupt({ session });
+    if (result.type === "failed") {
+      yield* context.complete(result.message);
       return true;
     }
 
-    yield* editCommandInteraction(
-      context.interaction,
-      "Requested interruption of the active OpenCode run.",
-    );
+    yield* context.complete("Requested interruption of the active OpenCode compaction.");
     return true;
-  });
-
-export const interruptCommand = defineSessionCommand({
-  name: "interrupt",
-  description: "Interrupt the active OpenCode run in this channel",
-  execute: executeInterruptSession,
+  }),
 });

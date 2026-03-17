@@ -25,7 +25,9 @@ export type SessionStoreShape = {
   upsertChannelSettings: (settings: PersistedChannelSettings) => Effect.Effect<void>;
 };
 
-export class SessionStore extends ServiceMap.Service<SessionStore, SessionStoreShape>()("SessionStore") {}
+export class SessionStore extends ServiceMap.Service<SessionStore, SessionStoreShape>()(
+  "SessionStore",
+) {}
 
 type PersistedChannelSessionRow = {
   channel_id: string;

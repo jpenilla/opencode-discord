@@ -9,11 +9,7 @@ import {
   toggleThinkingCommand,
 } from "./commands/toggle-channel-setting.ts";
 
-export type {
-  GuildCommand,
-  GuildCommandExecutionContext,
-  GuildCommandDeps,
-} from "./commands/definition.ts";
+export type { GuildCommand } from "./commands/definition.ts";
 
 export const GUILD_COMMANDS = [
   compactCommand,

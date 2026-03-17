@@ -95,7 +95,9 @@ const questionBatchView = (batch: PendingQuestionBatch) => ({
   resolvedAnswers: batch.resolvedAnswers,
 });
 
-export const createQuestionCoordinator = (deps: QuestionCoordinatorDeps): Effect.Effect<QuestionCoordinator> =>
+export const createQuestionCoordinator = (
+  deps: QuestionCoordinatorDeps,
+): Effect.Effect<QuestionCoordinator> =>
   Effect.gen(function* () {
     const batchesRef = yield* Ref.make(new Map<string, PendingQuestionBatch>());
     const detachedFinalizedBatchesRef = yield* Ref.make(new Map<string, PendingQuestionBatch>());

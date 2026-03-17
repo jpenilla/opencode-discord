@@ -578,7 +578,8 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
         channelId: message.channelId,
         sessionId: persisted.opencodeSessionId,
         rootDir: persisted.rootDir,
-        error: attached.failure instanceof Error ? attached.failure.message : String(attached.failure),
+        error:
+          attached.failure instanceof Error ? attached.failure.message : String(attached.failure),
       });
 
       return yield* createSessionAt({

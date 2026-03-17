@@ -117,6 +117,8 @@ describe("writeWritableChunk", () => {
     if (Exit.isSuccess(exit)) {
       throw new Error("expected writeWritableChunk to fail");
     }
-    expect(Cause.pretty(exit.cause)).toContain("writable closed before the pending write completed");
+    expect(Cause.pretty(exit.cause)).toContain(
+      "writable closed before the pending write completed",
+    );
   });
 });

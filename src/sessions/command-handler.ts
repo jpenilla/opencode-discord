@@ -1,28 +1,20 @@
-import {
-  ChannelType,
-  type ChatInputCommandInteraction,
-  type Interaction,
-  type SendableChannels,
-} from "discord.js";
-import { Effect } from "effect";
+import { type Interaction } from "discord.js";
+import { Effect, Layer } from "effect";
 
-import { getGuildCommand, type GuildCommandDeps } from "@/discord/commands.ts";
-import type { ChannelSession } from "@/sessions/session.ts";
+import { getGuildCommand } from "@/discord/commands.ts";
+import { CommandContext, makeCommandContextLayer } from "@/discord/commands/command-context.ts";
+import type { GuildCommandDependencies } from "@/discord/commands/definition.ts";
 
 export type CommandHandler = {
   handleInteraction: (interaction: Interaction) => Effect.Effect<boolean, unknown>;
 };
 
-type CommandHandlerDeps = GuildCommandDeps;
-
-const attachProgressChannel = (
-  interaction: ChatInputCommandInteraction,
-  session: ChannelSession | null,
-) => {
-  if (session && interaction.channel?.type === ChannelType.GuildText) {
-    session.progressChannel = interaction.channel as SendableChannels;
-  }
+type CommandHandlerDeps = {
+  commandLayer: Layer.Layer<GuildCommandDependencies>;
 };
+
+const UNHANDLED_COMMAND_ERROR_MESSAGE =
+  "An unexpected error occurred while processing this command.";
 
 export const createCommandHandler = (deps: CommandHandlerDeps): CommandHandler => ({
   handleInteraction: (interaction) =>
@@ -36,16 +28,17 @@ export const createCommandHandler = (deps: CommandHandlerDeps): CommandHandler =
         return false;
       }
 
-      const inGuildTextChannel =
-        interaction.inGuild() && interaction.channel?.type === ChannelType.GuildText;
-      const session = yield* command.resolveSession(deps, interaction, inGuildTextChannel);
-
-      attachProgressChannel(interaction, session);
-      return yield* command.execute({
-        deps,
-        interaction,
-        inGuildTextChannel,
-        session,
-      });
+      const commandContextLayer = makeCommandContextLayer(interaction);
+      const commandEffect: Effect.Effect<boolean, unknown> = command.execute.pipe(
+        Effect.catchCause((cause) =>
+          Effect.gen(function* () {
+            const commandContext = yield* CommandContext;
+            yield* commandContext.completeIfAcked(UNHANDLED_COMMAND_ERROR_MESSAGE);
+            return yield* Effect.failCause(cause);
+          }),
+        ),
+        Effect.provide(Layer.merge(commandContextLayer, deps.commandLayer)),
+      );
+      return yield* commandEffect;
     }),
 });

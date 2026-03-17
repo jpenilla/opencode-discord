@@ -64,5 +64,7 @@ export const requestOk = (
   request: () => Promise<{ error?: unknown }>,
 ): Effect.Effect<void, Error> =>
   requestResult(request, (error) => requestError(message, error)).pipe(
-    Effect.flatMap(({ error }) => (error ? Effect.fail(requestError(message, error)) : Effect.void)),
+    Effect.flatMap(({ error }) =>
+      error ? Effect.fail(requestError(message, error)) : Effect.void,
+    ),
   );

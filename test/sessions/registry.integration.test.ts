@@ -14,6 +14,7 @@ import {
 import { Deferred, Effect, Layer, Queue, Redacted, Ref } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
+import { formatErrorResponse } from "@/discord/formatting.ts";
 import {
   buildOpencodePrompt,
   buildQueuedFollowUpPrompt,
@@ -298,9 +299,10 @@ const makeHarness = async (options: {
     callIndex: number;
   }) => Effect.Effect<SessionHandle>;
   compactSessionImpl?: () => Effect.Effect<void, unknown>;
-  interruptSessionImpl?: () => Effect.Effect<void>;
+  interruptSessionImpl?: () => Effect.Effect<void, unknown>;
   rejectQuestionImpl?: () => Effect.Effect<void>;
   failComponentReplies?: boolean;
+  failChannelSend?: boolean;
 }) => {
   const replies = await Effect.runPromise(Ref.make<string[]>([]));
   const replyPayloads = await Effect.runPromise(Ref.make<unknown[]>([]));
@@ -336,6 +338,9 @@ const makeHarness = async (options: {
 
   const sendOnChannel = (payload: MessageCreateOptions) =>
     Effect.runPromise(Ref.update(sentPayloads, (current) => [...current, payload])).then(() => {
+      if (options.failChannelSend) {
+        throw new Error("channel send failed");
+      }
       const content = payload.content;
       if (content) {
         return Effect.runPromise(Queue.offer(replyEvents, String(content))).then(() =>
@@ -1271,9 +1276,7 @@ describe("ChannelSessionsLayer integration", () => {
     );
   });
 
-  test(
-    "runs /interrupt through ChannelSessionsLayer, marks compaction interrupting, and allows later completion",
-    async () => {
+  test("runs /interrupt through ChannelSessionsLayer, marks compaction interrupting, and allows later completion", async () => {
     const compactStarted = await Effect.runPromise(Deferred.make<void>());
     const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
@@ -1327,9 +1330,48 @@ describe("ChannelSessionsLayer integration", () => {
     );
   });
 
-  test(
-    "runs /new-session through ChannelSessionsLayer and recreates the next message on the same workdir",
-    async () => {
+  test("formats compaction interrupt failures like other command errors", async () => {
+    const compactStarted = await Effect.runPromise(Deferred.make<void>());
+    const harness = await makeHarness({
+      promptImpl: ({ completePrompt }) =>
+        completePrompt({
+          messageId: "assistant-1",
+          transcript: "hello",
+        }),
+      compactSessionImpl: () =>
+        Deferred.succeed(compactStarted, undefined).pipe(Effect.andThen(Effect.never)),
+      interruptSessionImpl: () => Effect.fail(new Error("interrupt failed")),
+    });
+    const message = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    });
+    const compactCommand = harness.makeCommandInteraction("compact");
+    const interruptCommand = harness.makeCommandInteraction("interrupt");
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions;
+          yield* sessions.submit(message, { prompt: "hello" });
+          yield* Queue.take(harness.replyEvents);
+          yield* waitForNoActiveRun(sessions, "session-1");
+          yield* sessions.handleInteraction(compactCommand.interaction);
+          yield* Deferred.await(compactStarted);
+          yield* sessions.handleInteraction(interruptCommand.interaction);
+        }).pipe(Effect.provide(harness.harnessLayer)),
+      ),
+    );
+
+    expect(await getRef(interruptCommand.interactionEdits)).toEqual([
+      {
+        content: formatErrorResponse("## ❌ Failed to interrupt compaction", "interrupt failed"),
+        allowedMentions: { parse: [] },
+      },
+    ]);
+  });
+
+  test("runs /new-session through ChannelSessionsLayer and recreates the next message on the same workdir", async () => {
     const harness = await makeHarness({
       promptImpl: ({ callIndex, completePrompt }) =>
         completePrompt({
@@ -1557,9 +1599,7 @@ describe("ChannelSessionsLayer integration", () => {
     ]);
   });
 
-  test(
-    "processes queued question events through ChannelSessionsLayer and finalizes the question card",
-    async () => {
+  test("processes queued question events through ChannelSessionsLayer and finalizes the question card", async () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>());
     const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
@@ -1602,9 +1642,7 @@ describe("ChannelSessionsLayer integration", () => {
     );
   });
 
-  test(
-    "routes question interactions through ChannelSessionsLayer after command handling falls through",
-    async () => {
+  test("routes question interactions through ChannelSessionsLayer after command handling falls through", async () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>());
     const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
@@ -1646,9 +1684,7 @@ describe("ChannelSessionsLayer integration", () => {
     expect((await getRef(questionInteraction.interactionEdits)).length).toBe(1);
   });
 
-  test(
-    "expires active question cards during session shutdown even while the run is still active",
-    async () => {
+  test("expires active question cards during session shutdown even while the run is still active", async () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: () =>
@@ -1720,7 +1756,9 @@ describe("ChannelSessionsLayer integration", () => {
             Effect.timeoutOrElse({
               duration: "1 second",
               onTimeout: () =>
-                Effect.fail(new Error("Timed out waiting for the current question UI failure state")),
+                Effect.fail(
+                  new Error("Timed out waiting for the current question UI failure state"),
+                ),
             }),
           );
           yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore);

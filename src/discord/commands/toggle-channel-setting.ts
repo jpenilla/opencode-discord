@@ -1,59 +1,42 @@
 import { Effect } from "effect";
 
-import { GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/sessions/command-lifecycle.ts";
+import { AppConfig } from "@/config.ts";
+import { CommandContext } from "@/discord/commands/command-context.ts";
+import type { ChannelSettings } from "@/state/channel-settings.ts";
 import {
+  defaultChannelSettings,
   resolveChannelSettings,
-  type ChannelSettings,
   type PersistedChannelSettings,
 } from "@/state/channel-settings.ts";
+import { GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/sessions/command-lifecycle.ts";
+import { SessionControl } from "@/sessions/session-control.ts";
+import { SessionStore } from "@/state/store.ts";
 
-import { defineLoadedSessionCommand, type GuildCommand } from "./definition.ts";
-import { replyToCommandInteraction } from "./interaction.ts";
+import { defineGuildCommand } from "./definition.ts";
 
 type ToggleableChannelSetting = keyof Pick<
   ChannelSettings,
   "showThinking" | "showCompactionSummaries"
 >;
 
-const executeToggleChannelSetting =
-  (setting: ToggleableChannelSetting, label: string): GuildCommand["execute"] =>
-  (context) =>
-    Effect.gen(function* () {
-      if (!context.inGuildTextChannel) {
-        yield* replyToCommandInteraction(context.interaction, GUILD_TEXT_COMMAND_ONLY_MESSAGE);
-        return true;
-      }
+const resolveToggledSettings = (
+  defaults: ChannelSettings,
+  persisted: PersistedChannelSettings | null,
+  setting: ToggleableChannelSetting,
+) => {
+  const current = resolveChannelSettings(defaults, persisted);
+  const next: PersistedChannelSettings = {
+    channelId: persisted?.channelId ?? "",
+    showThinking: persisted?.showThinking,
+    showCompactionSummaries: persisted?.showCompactionSummaries,
+  };
+  next[setting] = !current[setting];
 
-      const persistedSettings = yield* context.deps.getChannelSettings(
-        context.interaction.channelId,
-      );
-      const currentSettings = resolveChannelSettings(
-        context.deps.channelSettingsDefaults,
-        persistedSettings,
-      );
-      const nextSettings: PersistedChannelSettings = {
-        channelId: context.interaction.channelId,
-        showThinking: persistedSettings?.showThinking,
-        showCompactionSummaries: persistedSettings?.showCompactionSummaries,
-      };
-      nextSettings[setting] = !currentSettings[setting];
-
-      yield* context.deps.upsertChannelSettings(nextSettings);
-
-      const resolvedSettings = resolveChannelSettings(
-        context.deps.channelSettingsDefaults,
-        nextSettings,
-      );
-      if (context.session) {
-        context.session.channelSettings = resolvedSettings;
-      }
-
-      yield* replyToCommandInteraction(
-        context.interaction,
-        `${label} are now ${resolvedSettings[setting] ? "enabled" : "disabled"} in this channel.`,
-      );
-      return true;
-    });
+  return {
+    next,
+    resolved: resolveChannelSettings(defaults, next),
+  };
+};
 
 const defineChannelSettingToggleCommand = <
   const TName extends string,
@@ -64,10 +47,39 @@ const defineChannelSettingToggleCommand = <
   setting: ToggleableChannelSetting;
   label: string;
 }) =>
-  defineLoadedSessionCommand({
+  defineGuildCommand({
     name: input.name,
     description: input.description,
-    execute: executeToggleChannelSetting(input.setting, input.label),
+    execute: Effect.gen(function* () {
+      const context = yield* CommandContext;
+      const config = yield* AppConfig;
+      const sessionControl = yield* SessionControl;
+      const sessionStore = yield* SessionStore;
+
+      if (!context.inGuildTextChannel) {
+        yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
+        return true;
+      }
+
+      const persisted = yield* sessionStore.getChannelSettings(context.channelId);
+      const { next, resolved } = resolveToggledSettings(
+        defaultChannelSettings(config),
+        persisted,
+        input.setting,
+      );
+      next.channelId = context.channelId;
+      yield* sessionStore.upsertChannelSettings(next);
+
+      const session = yield* sessionControl.getLoaded(context.channelId);
+      if (session) {
+        yield* sessionControl.setChannelSettings(session, resolved);
+      }
+
+      yield* context.complete(
+        `${input.label} are now ${resolved[input.setting] ? "enabled" : "disabled"} in this channel.`,
+      );
+      return true;
+    }),
   });
 
 export const toggleThinkingCommand = defineChannelSettingToggleCommand({

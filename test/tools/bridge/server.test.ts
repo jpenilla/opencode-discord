@@ -150,13 +150,15 @@ const makeDiscordApiError = () => ({
   rawError: { message: "Invalid Form Body" },
 });
 
-const runBridgeRequest = (input: {
-  request?: IncomingMessage;
-  pathname?: string;
-  activeRun?: ActiveRun | null;
-  loggedErrors?: Array<Record<string, unknown>>;
-  configBridgeToken?: string;
-} = {}) => {
+const runBridgeRequest = (
+  input: {
+    request?: IncomingMessage;
+    pathname?: string;
+    activeRun?: ActiveRun | null;
+    loggedErrors?: Array<Record<string, unknown>>;
+    configBridgeToken?: string;
+  } = {},
+) => {
   const configBridgeToken = input.configBridgeToken ?? bridgeToken;
   return Effect.runPromise(
     handleToolBridgeRequest({
@@ -313,10 +315,9 @@ describe("handleToolBridgeRequest", () => {
     request.headers = {
       "content-type": "application/octet-stream",
       "x-opencode-discord-token": bridgeToken,
-      [uploadMetadataHeader]: Buffer.from(
-        JSON.stringify(uploadMetadata),
-        "utf8",
-      ).toString("base64url"),
+      [uploadMetadataHeader]: Buffer.from(JSON.stringify(uploadMetadata), "utf8").toString(
+        "base64url",
+      ),
     };
 
     const response = await Effect.runPromise(
@@ -447,7 +448,8 @@ describe("handleToolBridgeRequest", () => {
         return yield* Fiber.join(fiber).pipe(
           Effect.timeoutOrElse({
             duration: "1 second",
-            onTimeout: () => Effect.fail(new Error("request stream failure did not return promptly")),
+            onTimeout: () =>
+              Effect.fail(new Error("request stream failure did not return promptly")),
           }),
         );
       }),
@@ -477,12 +479,13 @@ describe("handleToolBridgeRequest", () => {
           sessions: makeSessions(
             makeActiveRun(async (payload: MessageCreateOptions) => {
               const attachment = (
-                payload.files?.[0] as {
-                  attachment?: NodeJS.ReadableStream & {
-                    destroy: () => void;
-                    writableNeedDrain?: boolean;
-                  };
-                }
+                payload.files?.[0] as
+                  | {
+                      attachment?: NodeJS.ReadableStream & {
+                        destroy: () => void;
+                        writableNeedDrain?: boolean;
+                      };
+                    }
                   | undefined
               )?.attachment;
               if (!attachment) {
