@@ -120,7 +120,7 @@ const reasoningIds = (events: ReadonlyArray<RunProgressEvent>) =>
     return event.partId;
   });
 
-const runFinalizationScenario = async (reason: "interrupted" | "shutdown") => {
+const runFinalizationScenario = async (reason: "interrupted") => {
   const harness = await makeHarness();
 
   const result = await Effect.runPromise(
@@ -315,14 +315,14 @@ describe("runProgressWorker", () => {
     ]);
   });
 
-  test("updates live tool and compaction cards to stopped on shutdown", async () => {
-    const result = await runFinalizationScenario("shutdown");
+  test("updates live tool and compaction cards to interrupted on finalization", async () => {
+    const result = await runFinalizationScenario("interrupted");
 
     expect(result.edited.map(cardText)).toContain(
-      "**💻 🛑 `bash` Stopped**\n`pwd`\nPrint cwd\nNote: This tool did not complete because the bot shut down.",
+      "**💻 ‼️ `bash` Interrupted**\n`pwd`\nPrint cwd\nNote: This tool did not complete because the run was interrupted.",
     );
     expect(result.edited.map(cardText)).toContain(
-      "**🛑 Compaction stopped**\nOpenCode stopped compacting this session because the bot shut down.",
+      "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
     );
   });
 

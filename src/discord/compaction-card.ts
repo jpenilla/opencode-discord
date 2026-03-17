@@ -1,9 +1,4 @@
-export type CompactionCardState =
-  | "compacting"
-  | "interrupting"
-  | "compacted"
-  | "interrupted"
-  | "stopped";
+export type CompactionCardState = "compacting" | "interrupting" | "compacted" | "interrupted";
 
 export const compactionCardContent = (
   state: CompactionCardState,
@@ -28,11 +23,6 @@ export const compactionCardContent = (
       return {
         title: "‼️ Compaction interrupted",
         body: "OpenCode stopped compacting this session because the run was interrupted.",
-      };
-    case "stopped":
-      return {
-        title: "🛑 Compaction stopped",
-        body: "OpenCode stopped compacting this session because the bot shut down.",
       };
   }
 };

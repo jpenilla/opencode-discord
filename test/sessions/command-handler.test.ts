@@ -392,7 +392,6 @@ const makeHarness = async (options?: HarnessOptions) => {
       }),
     handleCompacted: () => Effect.void,
     handleInterrupted: () => Effect.void,
-    handleStopped: () => Effect.void,
     emitSummary: () => Effect.void,
     shutdown: () => Effect.void,
   };

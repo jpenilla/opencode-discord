@@ -57,9 +57,6 @@ export const formatStatus = (part: ToolPart, terminalState?: ToolCardTerminalSta
   if (terminalState === "interrupted") {
     return "Interrupted";
   }
-  if (terminalState === "shutdown") {
-    return "Stopped";
-  }
 
   switch (part.state.status) {
     case "pending":
@@ -76,9 +73,6 @@ export const formatStatus = (part: ToolPart, terminalState?: ToolCardTerminalSta
 export const statusEmoji = (part: ToolPart, terminalState?: ToolCardTerminalState) => {
   if (terminalState === "interrupted") {
     return "‼️";
-  }
-  if (terminalState === "shutdown") {
-    return "🛑";
   }
 
   switch (part.state.status) {

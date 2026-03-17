@@ -263,7 +263,7 @@ describe("makeIdleCompactionWorkflow", () => {
     );
 
     await Effect.runPromise(workflow.shutdown());
-    await Effect.runPromise(workflow.handleStopped(session.opencode.sessionId));
+    await Effect.runPromise(workflow.handleInterrupted(session.opencode.sessionId));
     await Effect.runPromise(Deferred.succeed(allowCardPost, undefined));
     await startPromise;
 
