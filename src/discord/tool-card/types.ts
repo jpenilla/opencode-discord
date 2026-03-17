@@ -2,8 +2,6 @@ import type { ToolPart } from "@opencode-ai/sdk/v2";
 
 import type { ResolvedSandboxBackend } from "@/sandbox/backend.ts";
 
-export type ToolCardTerminalState = "interrupted";
-
 export type ToolCardPathContext = {
   workdir: string;
   backend: ResolvedSandboxBackend;

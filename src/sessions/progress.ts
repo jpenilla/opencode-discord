@@ -265,7 +265,7 @@ const finalizeLiveCards = (
               part,
               workdir: pathContext.workdir,
               backend: pathContext.backend,
-              terminalState: "interrupted",
+              interrupted: true,
             }),
           ).pipe(Effect.ignore);
         },
