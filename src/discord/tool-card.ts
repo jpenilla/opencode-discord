@@ -66,6 +66,12 @@ const renderToolCard = (input: {
         statusLine("Note", "This tool did not complete because the bot shut down."),
       ),
     );
+  } else if (terminalState === "interrupted") {
+    lines.push(
+      renderToolCardLine(
+        statusLine("Note", "This tool did not complete because the run was interrupted."),
+      ),
+    );
   } else if (part.state.status === "error") {
     lines.push(
       renderToolCardLine(statusLine("Error", `\`${truncate(singleLine(part.state.error), 600)}\``)),

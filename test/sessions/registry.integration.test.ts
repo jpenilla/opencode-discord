@@ -1142,6 +1142,7 @@ describe("ChannelSessionsLayer integration", () => {
           yield* Deferred.await(promptStarted);
           yield* sessions.handleInteraction(command.interaction);
           yield* Deferred.await(promptFinished);
+          yield* waitForNoActiveRun(sessions, "session-1");
         }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
@@ -1685,9 +1686,15 @@ describe("ChannelSessionsLayer integration", () => {
 
   test("expires active question cards during session shutdown even while the run is still active", async () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>());
+    const interruptRequested = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: () =>
-        Deferred.succeed(promptStarted, undefined).pipe(Effect.andThen(Effect.never)),
+        Deferred.succeed(promptStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(interruptRequested)),
+          Effect.andThen(Effect.fail(new Error("interrupted"))),
+        ),
+      interruptSessionImpl: () =>
+        Deferred.succeed(interruptRequested, undefined).pipe(Effect.asVoid),
     });
     const message = harness.makeMessage({
       id: "message-1",
@@ -1715,6 +1722,39 @@ describe("ChannelSessionsLayer integration", () => {
         cardText(payload).includes("This question prompt expired before it was answered."),
       ),
     ).toBe(true);
+  });
+
+  test("uses shutdown-specific copy for run interrupt cards during graceful shutdown", async () => {
+    const promptStarted = await Effect.runPromise(Deferred.make<void>());
+    const interruptRequested = await Effect.runPromise(Deferred.make<void>());
+    const harness = await makeHarness({
+      promptImpl: () =>
+        Deferred.succeed(promptStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(interruptRequested)),
+          Effect.andThen(Effect.fail(new Error("interrupted"))),
+        ),
+      interruptSessionImpl: () =>
+        Deferred.succeed(interruptRequested, undefined).pipe(Effect.asVoid),
+    });
+    const message = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    });
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* ChannelSessions;
+          yield* sessions.submit(message, { prompt: "hello" });
+          yield* Deferred.await(promptStarted);
+          yield* sessions.shutdown();
+        }).pipe(Effect.provide(harness.harnessLayer)),
+      ),
+    );
+
+    expect((await getRef(harness.sentPayloads)).map(cardText)).toContain(
+      "**‼️ Run interrupted**\nOpenCode stopped the active run in this channel because the bot is shutting down.",
+    );
   });
 
   test("surfaces a question UI failure reply when posting the question card fails", async () => {

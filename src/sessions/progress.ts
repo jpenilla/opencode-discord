@@ -250,7 +250,7 @@ const finalizeLiveCards = (
   reason: RunFinalizationReason,
 ) =>
   Effect.gen(function* () {
-    if (reason === "shutdown") {
+    if (reason === "shutdown" || reason === "interrupted") {
       yield* Effect.forEach(
         state.activeToolParts.entries(),
         ([callId, part]) => {
@@ -265,7 +265,7 @@ const finalizeLiveCards = (
               part,
               workdir: pathContext.workdir,
               backend: pathContext.backend,
-              terminalState: "shutdown",
+              terminalState: reason === "shutdown" ? "shutdown" : "interrupted",
             }),
           ).pipe(Effect.ignore);
         },

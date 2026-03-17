@@ -142,7 +142,8 @@ const makeRuntime = async (options?: {
         record(`terminateQuestionBatches:${sessionId}:expired`),
       ensureSessionHealthAfterFailure: (_session: ChannelSession, _responseMessage: Message) =>
         record("ensureSessionHealthAfterFailure"),
-      sendRunInterruptedInfo: (_message: Message) => record("sendRunInterruptedInfo"),
+      sendRunInterruptedInfo: (_message: Message, source: "user" | "shutdown") =>
+        record(`sendRunInterruptedInfo:${source}`),
       sendFinalResponse: (message: Message, text: string) =>
         Ref.update(finalResponseMessageIds, (current) => [...current, message.id]).pipe(
           Effect.andThen(record(`sendFinalResponse:${text}`)),
@@ -304,7 +305,7 @@ describe("executeRunBatch", () => {
       "info:interrupted run",
       "typing:stop",
       "progress:run-finalizing",
-      "sendRunInterruptedInfo",
+      "sendRunInterruptedInfo:user",
       "typing:stop",
       "terminateQuestionBatches:session-1:expired",
       "setActiveRun:null",

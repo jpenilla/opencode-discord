@@ -72,6 +72,7 @@ const makeActiveRunState = async () => ({
   followUpQueue: await Effect.runPromise(Queue.unbounded<RunRequest>()),
   acceptFollowUps: await Effect.runPromise(Ref.make(true)),
   interruptRequested: false,
+  interruptSource: null,
 });
 
 describe("coordinateActiveRunPrompts", () => {
