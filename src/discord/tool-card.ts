@@ -9,7 +9,7 @@ import {
   searchResultInfo,
   statusLine,
 } from "./tool-card/formatters.ts";
-import type { ToolCardPathContext, ToolCardTerminalState } from "./tool-card/types.ts";
+import type { ToolCardPathContext } from "./tool-card/types.ts";
 import {
   formatDuration,
   formatStatus,
@@ -30,17 +30,17 @@ const pathContext = (workdir: string, backend: ResolvedSandboxBackend): ToolCard
 const renderToolCard = (input: {
   part: ToolPart;
   pathContext: ToolCardPathContext;
-  terminalState?: ToolCardTerminalState;
+  interrupted?: boolean;
 }) => {
-  const { part, terminalState } = input;
-  const duration = terminalState ? null : formatDuration(part);
+  const { part, interrupted = false } = input;
+  const duration = interrupted ? null : formatDuration(part);
   const statusLabel = duration
-    ? `${formatStatus(part, terminalState)} in ${duration}`
-    : formatStatus(part, terminalState);
+    ? `${formatStatus(part, interrupted)} in ${duration}`
+    : formatStatus(part, interrupted);
   const header =
     part.tool === "todowrite"
       ? "**📝 Todo list**"
-      : `**${toolEmoji(part.tool)} ${statusEmoji(part, terminalState)} \`${part.tool}\` ${statusLabel}**`;
+      : `**${toolEmoji(part.tool)} ${statusEmoji(part, interrupted)} \`${part.tool}\` ${statusLabel}**`;
   const lines = [header];
 
   const inputLines = formatToolInputLines(part, input.pathContext);
@@ -60,7 +60,7 @@ const renderToolCard = (input: {
     lines.push(renderToolCardLine(statusLine("Results Error", `\`${resultInfo.error}\``)));
   }
 
-  if (terminalState === "interrupted") {
+  if (interrupted) {
     lines.push(
       renderToolCardLine(
         statusLine("Note", "This tool did not complete because the run was interrupted."),
@@ -83,7 +83,7 @@ const createPayload = (input: {
   part: ToolPart;
   pathContext: ToolCardPathContext;
   includeNotificationSuppression: boolean;
-  terminalState?: ToolCardTerminalState;
+  interrupted?: boolean;
 }) => ({
   flags: input.includeNotificationSuppression
     ? MessageFlags.IsComponentsV2 | MessageFlags.SuppressNotifications
@@ -91,7 +91,7 @@ const createPayload = (input: {
   components: renderToolCard({
     part: input.part,
     pathContext: input.pathContext,
-    terminalState: input.terminalState,
+    interrupted: input.interrupted,
   }),
   allowedMentions: { parse: [] as Array<never> },
 });
@@ -103,7 +103,7 @@ export const upsertToolCard = async (input: {
   workdir: string;
   backend: ResolvedSandboxBackend;
   mode?: "edit-or-send" | "always-send";
-  terminalState?: ToolCardTerminalState;
+  interrupted?: boolean;
 }) => {
   const mode = input.mode ?? "edit-or-send";
   if (mode === "edit-or-send" && EDIT_TOOL_CARDS && input.existingCard) {
@@ -113,7 +113,7 @@ export const upsertToolCard = async (input: {
           part: input.part,
           pathContext: pathContext(input.workdir, input.backend),
           includeNotificationSuppression: false,
-          terminalState: input.terminalState,
+          interrupted: input.interrupted,
         }),
       );
       return input.existingCard;
@@ -131,7 +131,7 @@ export const upsertToolCard = async (input: {
       part: input.part,
       pathContext: pathContext(input.workdir, input.backend),
       includeNotificationSuppression: true,
-      terminalState: input.terminalState,
+      interrupted: input.interrupted,
     }),
   );
 };
@@ -141,15 +141,13 @@ export const editToolCard = (input: {
   part: ToolPart;
   workdir: string;
   backend: ResolvedSandboxBackend;
-  terminalState: ToolCardTerminalState;
+  interrupted: boolean;
 }) =>
   input.card.edit(
     createPayload({
       part: input.part,
       pathContext: pathContext(input.workdir, input.backend),
       includeNotificationSuppression: false,
-      terminalState: input.terminalState,
+      interrupted: input.interrupted,
     }),
   );
-
-export type { ToolCardTerminalState } from "./tool-card/types.ts";

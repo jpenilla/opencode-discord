@@ -1,7 +1,5 @@
 import type { ToolPart } from "@opencode-ai/sdk/v2";
 
-import type { ToolCardTerminalState } from "./types.ts";
-
 export const truncate = (value: string, maxLength: number) => {
   if (value.length <= maxLength) {
     return value;
@@ -53,8 +51,8 @@ export const titleForPart = (part: ToolPart) =>
     ? part.state.title
     : undefined;
 
-export const formatStatus = (part: ToolPart, terminalState?: ToolCardTerminalState) => {
-  if (terminalState === "interrupted") {
+export const formatStatus = (part: ToolPart, interrupted = false) => {
+  if (interrupted) {
     return "Interrupted";
   }
 
@@ -70,8 +68,8 @@ export const formatStatus = (part: ToolPart, terminalState?: ToolCardTerminalSta
   }
 };
 
-export const statusEmoji = (part: ToolPart, terminalState?: ToolCardTerminalState) => {
-  if (terminalState === "interrupted") {
+export const statusEmoji = (part: ToolPart, interrupted = false) => {
+  if (interrupted) {
     return "🛑";
   }
 
