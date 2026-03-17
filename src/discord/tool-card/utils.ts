@@ -70,7 +70,7 @@ export const formatStatus = (part: ToolPart, interrupted = false) => {
 
 export const statusEmoji = (part: ToolPart, interrupted = false) => {
   if (interrupted) {
-    return "🛑";
+    return "‼️";
   }
 
   switch (part.state.status) {

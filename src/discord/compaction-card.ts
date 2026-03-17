@@ -11,7 +11,7 @@ export const compactionCardContent = (
       };
     case "interrupting":
       return {
-        title: "🛑 Interrupting compaction",
+        title: "‼️ Interrupting compaction",
         body: "OpenCode is stopping session compaction.",
       };
     case "compacted":
@@ -21,7 +21,7 @@ export const compactionCardContent = (
       };
     case "interrupted":
       return {
-        title: "🛑 Compaction interrupted",
+        title: "‼️ Compaction interrupted",
         body: "OpenCode stopped compacting this session because the run was interrupted.",
       };
   }
