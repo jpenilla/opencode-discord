@@ -4,10 +4,7 @@ import type { Message, SendableChannels } from "discord.js";
 
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { InfoCards, type InfoCardsShape } from "@/discord/info-cards.ts";
-import {
-  IdleCompactionWorkflow,
-  makeIdleCompactionWorkflow,
-} from "@/sessions/idle-compaction-workflow.ts";
+import { makeIdleCompactionWorkflow } from "@/sessions/idle-compaction-workflow.ts";
 import { OpencodeService, type OpencodeServiceShape } from "@/opencode/service.ts";
 import type { ChannelSession } from "@/sessions/session.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";

@@ -278,11 +278,11 @@ export const ChannelSessionsLayer = Layer.effect(
       (message: string) =>
       <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | Error, R> =>
         effect.pipe(
-        Effect.timeoutOption(SHUTDOWN_RPC_TIMEOUT),
-        Effect.flatMap((result) =>
-          Option.isSome(result) ? Effect.succeed(result.value) : Effect.fail(new Error(message)),
-        ),
-      );
+          Effect.timeoutOption(SHUTDOWN_RPC_TIMEOUT),
+          Effect.flatMap((result) =>
+            Option.isSome(result) ? Effect.succeed(result.value) : Effect.fail(new Error(message)),
+          ),
+        );
 
     const startShutdown = (): Effect.Effect<boolean> =>
       Ref.modify(shutdownStartedRef, (started): readonly [boolean, boolean] =>
@@ -315,12 +315,12 @@ export const ChannelSessionsLayer = Layer.effect(
         const results = yield* Effect.forEach(
           requestIds,
           (requestId) =>
-            opencode.rejectQuestion(session.opencode, requestId).pipe(
-              withShutdownRpcTimeout(
-                `Timed out rejecting question ${requestId}`,
+            opencode
+              .rejectQuestion(session.opencode, requestId)
+              .pipe(
+                withShutdownRpcTimeout(`Timed out rejecting question ${requestId}`),
+                Effect.result,
               ),
-              Effect.result,
-            ),
           { concurrency: "unbounded", discard: false },
         );
 
@@ -342,12 +342,12 @@ export const ChannelSessionsLayer = Layer.effect(
         activeRun.interruptRequested = true;
         activeRun.interruptSource = "shutdown";
 
-        const result = yield* opencode.interruptSession(session.opencode).pipe(
-          withShutdownRpcTimeout(
-            "Timed out interrupting active run during shutdown",
-          ),
-          Effect.result,
-        );
+        const result = yield* opencode
+          .interruptSession(session.opencode)
+          .pipe(
+            withShutdownRpcTimeout("Timed out interrupting active run during shutdown"),
+            Effect.result,
+          );
         if (result._tag === "Success") {
           return;
         }
@@ -362,22 +362,22 @@ export const ChannelSessionsLayer = Layer.effect(
 
     const interruptIdleCompactionForShutdown = (session: ChannelSession) =>
       idleCompactionWorkflow.requestInterrupt({ session }).pipe(
-        withShutdownRpcTimeout(
-          "Timed out interrupting idle compaction during shutdown",
-        ),
+        withShutdownRpcTimeout("Timed out interrupting idle compaction during shutdown"),
         Effect.flatMap((result) =>
           result.type === "failed" ? Effect.fail(new Error(result.message)) : Effect.void,
         ),
         Effect.catch((error) =>
-          logger.warn("idle compaction interrupt was unresponsive during shutdown", {
-            channelId: session.channelId,
-            sessionId: session.opencode.sessionId,
-            error: formatError(error),
-          }).pipe(
-            Effect.andThen(
-              forceCloseSessionHandle(session, "idle compaction interrupt timed out or failed"),
+          logger
+            .warn("idle compaction interrupt was unresponsive during shutdown", {
+              channelId: session.channelId,
+              sessionId: session.opencode.sessionId,
+              error: formatError(error),
+            })
+            .pipe(
+              Effect.andThen(
+                forceCloseSessionHandle(session, "idle compaction interrupt timed out or failed"),
+              ),
             ),
-          ),
         ),
       );
 
@@ -401,21 +401,19 @@ export const ChannelSessionsLayer = Layer.effect(
         const sessionIds = [...state.sessionsBySessionId.keys()];
         const hasActiveRuns = state.activeRunsBySessionId.size > 0;
         const hasIdleCompactions = state.idleCompactionsBySessionId.size > 0;
-        const hasPendingQuestions = sessionIds.length === 0
-          ? false
-          : (yield* Effect.forEach(
-              sessionIds,
-              (sessionId) => questionCoordinator.hasPendingQuestionsForSession(sessionId),
-              { concurrency: "unbounded", discard: false },
-            )).some(Boolean);
+        const hasPendingQuestions =
+          sessionIds.length === 0
+            ? false
+            : (yield* Effect.forEach(
+                sessionIds,
+                (sessionId) => questionCoordinator.hasPendingQuestionsForSession(sessionId),
+                { concurrency: "unbounded", discard: false },
+              )).some(Boolean);
 
         if (hasActiveRuns || hasIdleCompactions || hasPendingQuestions) {
           return yield* Effect.fail(new Error("shutdown work is still draining"));
         }
-      }).pipe(
-        Effect.eventually,
-        Effect.timeoutOption(SHUTDOWN_GRACE_PERIOD),
-      );
+      }).pipe(Effect.eventually, Effect.timeoutOption(SHUTDOWN_GRACE_PERIOD));
 
     const finalizeLingeringShutdownUi = () =>
       Effect.gen(function* () {

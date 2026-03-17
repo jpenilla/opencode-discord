@@ -7,7 +7,6 @@ import type {
 } from "@opencode-ai/sdk/v2";
 import { Deferred, Effect, Queue } from "effect";
 
-import { compactionCardContent } from "@/discord/compaction-card.ts";
 import {
   getEventSessionId,
   getEventByType,

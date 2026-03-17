@@ -469,9 +469,7 @@ describe("createQuestionCoordinator", () => {
       }),
     );
     await Effect.runPromise(harness.runtime.beginShutdown());
-    await Effect.runPromise(
-      harness.runtime.markShutdownRejectedRequests([harness.request.id]),
-    );
+    await Effect.runPromise(harness.runtime.markShutdownRejectedRequests([harness.request.id]));
     await Effect.runPromise(
       harness.runtime.handleEvent({
         type: "rejected",
