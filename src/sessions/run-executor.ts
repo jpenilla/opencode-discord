@@ -11,6 +11,7 @@ import {
   noQuestionOutcome,
   type ActiveRun,
   type ChannelSession,
+  type RunInterruptSource,
   type RunFinalizationReason,
   type RunProgressEvent,
   type RunRequest,
@@ -47,7 +48,10 @@ type RunExecutorDeps = {
     session: ChannelSession,
     responseMessage: Message,
   ) => Effect.Effect<void, unknown>;
-  sendRunInterruptedInfo: (message: Message) => Effect.Effect<void, unknown>;
+  sendRunInterruptedInfo: (
+    message: Message,
+    source: RunInterruptSource,
+  ) => Effect.Effect<void, unknown>;
   sendFinalResponse: (message: Message, text: string) => Effect.Effect<void, unknown>;
   sendRunFailure: (message: Message, error: unknown) => Effect.Effect<void, unknown>;
   sendQuestionUiFailure: (message: Message, error: unknown) => Effect.Effect<void, unknown>;
@@ -121,6 +125,7 @@ export const executeRunBatch =
         finalizeProgress,
         questionOutcome: noQuestionOutcome(),
         interruptRequested: false,
+        interruptSource: null,
       };
       yield* deps.setActiveRun(session, activeRun);
 
@@ -162,6 +167,7 @@ export const executeRunBatch =
 
         if (activeRun.interruptRequested) {
           activeRun.interruptRequested = false;
+          activeRun.interruptSource = null;
           yield* deps.logger.warn("interrupt request did not stop run", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
@@ -180,6 +186,9 @@ export const executeRunBatch =
       if (runResult._tag === "Failure") {
         const error = runResult.failure;
         if (activeRun.interruptRequested) {
+          const interruptSource = activeRun.interruptSource ?? "user";
+          activeRun.interruptRequested = false;
+          activeRun.interruptSource = null;
           yield* deps.logger.info("interrupted run", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
@@ -187,7 +196,7 @@ export const executeRunBatch =
           });
           yield* stopTyping;
           yield* finalizeProgress("interrupted");
-          yield* deps.sendRunInterruptedInfo(originMessage);
+          yield* deps.sendRunInterruptedInfo(originMessage, interruptSource);
         } else {
           yield* deps.logger.error("run failed", {
             channelId: session.channelId,

@@ -41,6 +41,8 @@ export const questionUiFailureOutcome = (message: string, notified = false): Que
   notified,
 });
 
+export type RunInterruptSource = "user" | "shutdown";
+
 export type RunFinalizationReason = "interrupted" | "shutdown";
 
 export type ActiveRun = {
@@ -61,6 +63,7 @@ export type ActiveRun = {
   finalizeProgress: (reason?: RunFinalizationReason) => Effect.Effect<void, unknown>;
   questionOutcome: QuestionOutcome;
   interruptRequested: boolean;
+  interruptSource: RunInterruptSource | null;
 };
 
 export const currentPromptReplyTargetMessage = (

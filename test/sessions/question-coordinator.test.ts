@@ -113,6 +113,7 @@ const makeHarness = async (options?: {
     finalizeProgress: () => Effect.void,
     questionOutcome: noQuestionOutcome(),
     interruptRequested: false,
+    interruptSource: null,
   };
 
   const session: ChannelSession = {
@@ -455,6 +456,36 @@ describe("createQuestionCoordinator", () => {
     );
 
     expect(await getRef(harness.postedPayloads)).toHaveLength(0);
+  });
+
+  test("renders shutdown-rejected questions as expired when the rejection event arrives", async () => {
+    const harness = await makeHarness();
+
+    await Effect.runPromise(
+      harness.runtime.handleEvent({
+        type: "asked",
+        sessionId: harness.session.opencode.sessionId,
+        request: harness.request,
+      }),
+    );
+    await Effect.runPromise(harness.runtime.beginShutdown());
+    await Effect.runPromise(
+      harness.runtime.markShutdownRejectedRequests([harness.request.id]),
+    );
+    await Effect.runPromise(
+      harness.runtime.handleEvent({
+        type: "rejected",
+        sessionId: harness.session.opencode.sessionId,
+        requestId: harness.request.id,
+      }),
+    );
+
+    const edits = await getRef(harness.editedPayloads);
+    expect(edits).toHaveLength(1);
+    expect(JSON.stringify(edits[0])).toContain("Questions expired");
+    expect(JSON.stringify(edits[0])).toContain(
+      "This question prompt expired before it was answered.",
+    );
   });
 
   test("finalizes a late-posted question card when a reply event wins the race", async () => {

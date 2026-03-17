@@ -1,4 +1,4 @@
-import { Effect, FiberSet, Layer, Queue, Ref, ServiceMap } from "effect";
+import { Effect, FiberSet, Layer, Option, Queue, Ref, ServiceMap } from "effect";
 import { type Interaction, type Message, type SendableChannels } from "discord.js";
 
 import { AppConfig } from "@/config.ts";
@@ -52,6 +52,9 @@ export class ChannelSessions extends ServiceMap.Service<ChannelSessions, Channel
 type FallibleEffect<A> = Effect.Effect<A, unknown>;
 
 type ChannelSessionsState = SessionLifecycleState;
+
+const SHUTDOWN_RPC_TIMEOUT = "1 second";
+const SHUTDOWN_GRACE_PERIOD = "10 seconds";
 
 const createChannelSessionsState = (): ChannelSessionsState => ({
   sessionsByChannelId: new Map(),
@@ -223,12 +226,14 @@ export const ChannelSessionsLayer = Layer.effect(
           "run failed with unhealthy opencode session",
           false,
         ),
-      sendRunInterruptedInfo: (message) =>
+      sendRunInterruptedInfo: (message, source) =>
         infoCards
           .send(
             message.channel as SendableChannels,
             "‼️ Run interrupted",
-            "OpenCode stopped the active run in this channel.",
+            source === "shutdown"
+              ? "OpenCode stopped the active run in this channel because the bot is shutting down."
+              : "OpenCode stopped the active run in this channel.",
           )
           .pipe(
             Effect.catch((error) =>
@@ -269,62 +274,245 @@ export const ChannelSessionsLayer = Layer.effect(
         Effect.flatMap((session) => ensureSessionHealth(session, message, reason)),
       );
 
-    const shutdown = () =>
-      Ref.modify(shutdownStartedRef, (started): readonly [Effect.Effect<void, unknown>, boolean] =>
-        started
-          ? [Effect.void, true]
-          : [
-              Effect.gen(function* () {
-                const state = yield* Ref.get(stateRef);
-                const activeRuns = [...state.activeRunsBySessionId.entries()];
-                const idleCompactionIds = [...state.idleCompactionsBySessionId.keys()];
+    const withShutdownRpcTimeout =
+      (message: string) =>
+      <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | Error, R> =>
+        effect.pipe(
+        Effect.timeoutOption(SHUTDOWN_RPC_TIMEOUT),
+        Effect.flatMap((result) =>
+          Option.isSome(result) ? Effect.succeed(result.value) : Effect.fail(new Error(message)),
+        ),
+      );
 
-                yield* questionCoordinator.shutdown().pipe(
+    const startShutdown = (): Effect.Effect<boolean> =>
+      Ref.modify(shutdownStartedRef, (started): readonly [boolean, boolean] =>
+        started ? [false, true] : [true, true],
+      );
+
+    const forceCloseSessionHandle = (session: ChannelSession, reason: string) =>
+      session.opencode.close().pipe(
+        Effect.catch((error) =>
+          logger.warn("failed to force-close opencode session during shutdown", {
+            channelId: session.channelId,
+            sessionId: session.opencode.sessionId,
+            reason,
+            error: formatError(error),
+          }),
+        ),
+      );
+
+    const rejectPendingQuestionsForShutdown = (session: ChannelSession) =>
+      Effect.gen(function* () {
+        const requestIds = yield* questionCoordinator.getPendingRequestIdsForSession(
+          session.opencode.sessionId,
+        );
+        yield* questionCoordinator.markShutdownRejectedRequests(requestIds);
+
+        if (requestIds.length === 0) {
+          return;
+        }
+
+        const results = yield* Effect.forEach(
+          requestIds,
+          (requestId) =>
+            opencode.rejectQuestion(session.opencode, requestId).pipe(
+              withShutdownRpcTimeout(
+                `Timed out rejecting question ${requestId}`,
+              ),
+              Effect.result,
+            ),
+          { concurrency: "unbounded", discard: false },
+        );
+
+        const failure = results.find((result) => result._tag === "Failure");
+        if (!failure) {
+          return;
+        }
+
+        yield* logger.warn("question rejection was unresponsive during shutdown", {
+          channelId: session.channelId,
+          sessionId: session.opencode.sessionId,
+          error: formatError(failure.failure),
+        });
+        yield* forceCloseSessionHandle(session, "question rejection timed out or failed");
+      });
+
+    const interruptRunForShutdown = (session: ChannelSession, activeRun: ActiveRun) =>
+      Effect.gen(function* () {
+        activeRun.interruptRequested = true;
+        activeRun.interruptSource = "shutdown";
+
+        const result = yield* opencode.interruptSession(session.opencode).pipe(
+          withShutdownRpcTimeout(
+            "Timed out interrupting active run during shutdown",
+          ),
+          Effect.result,
+        );
+        if (result._tag === "Success") {
+          return;
+        }
+
+        yield* logger.warn("run interrupt was unresponsive during shutdown", {
+          channelId: session.channelId,
+          sessionId: session.opencode.sessionId,
+          error: formatError(result.failure),
+        });
+        yield* forceCloseSessionHandle(session, "run interrupt timed out or failed");
+      });
+
+    const interruptIdleCompactionForShutdown = (session: ChannelSession) =>
+      idleCompactionWorkflow.requestInterrupt({ session }).pipe(
+        withShutdownRpcTimeout(
+          "Timed out interrupting idle compaction during shutdown",
+        ),
+        Effect.flatMap((result) =>
+          result.type === "failed" ? Effect.fail(new Error(result.message)) : Effect.void,
+        ),
+        Effect.catch((error) =>
+          logger.warn("idle compaction interrupt was unresponsive during shutdown", {
+            channelId: session.channelId,
+            sessionId: session.opencode.sessionId,
+            error: formatError(error),
+          }).pipe(
+            Effect.andThen(
+              forceCloseSessionHandle(session, "idle compaction interrupt timed out or failed"),
+            ),
+          ),
+        ),
+      );
+
+    const requestSessionShutdown = (session: ChannelSession) =>
+      Effect.gen(function* () {
+        yield* rejectPendingQuestionsForShutdown(session);
+
+        if (session.activeRun) {
+          yield* interruptRunForShutdown(session, session.activeRun);
+          return;
+        }
+
+        if (yield* hasIdleCompaction(session.opencode.sessionId)) {
+          yield* interruptIdleCompactionForShutdown(session);
+        }
+      });
+
+    const awaitShutdownDrain = () =>
+      Effect.gen(function* () {
+        const state = yield* Ref.get(stateRef);
+        const sessionIds = [...state.sessionsBySessionId.keys()];
+        const hasActiveRuns = state.activeRunsBySessionId.size > 0;
+        const hasIdleCompactions = state.idleCompactionsBySessionId.size > 0;
+        const hasPendingQuestions = sessionIds.length === 0
+          ? false
+          : (yield* Effect.forEach(
+              sessionIds,
+              (sessionId) => questionCoordinator.hasPendingQuestionsForSession(sessionId),
+              { concurrency: "unbounded", discard: false },
+            )).some(Boolean);
+
+        if (hasActiveRuns || hasIdleCompactions || hasPendingQuestions) {
+          return yield* Effect.fail(new Error("shutdown work is still draining"));
+        }
+      }).pipe(
+        Effect.eventually,
+        Effect.timeoutOption(SHUTDOWN_GRACE_PERIOD),
+      );
+
+    const finalizeLingeringShutdownUi = () =>
+      Effect.gen(function* () {
+        yield* questionCoordinator.shutdown().pipe(
+          Effect.catch((error) =>
+            logger.warn("failed to expire pending questions during shutdown", {
+              error: formatError(error),
+            }),
+          ),
+        );
+
+        const state = yield* Ref.get(stateRef);
+        const activeRuns = [...state.activeRunsBySessionId.entries()];
+        const idleCompactions = [...state.idleCompactionsBySessionId.entries()];
+
+        yield* Effect.forEach(
+          activeRuns,
+          ([sessionId, activeRun]) =>
+            Effect.gen(function* () {
+              yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore);
+              yield* activeRun.finalizeProgress("interrupted").pipe(
+                Effect.catch((error) =>
+                  logger.warn("failed to finalize interrupted run progress during shutdown", {
+                    sessionId,
+                    error: formatError(error),
+                  }),
+                ),
+              );
+              yield* infoCards
+                .send(
+                  activeRun.originMessage.channel as SendableChannels,
+                  "‼️ Run interrupted",
+                  "OpenCode stopped the active run in this channel because the bot is shutting down.",
+                )
+                .pipe(
                   Effect.catch((error) =>
-                    logger.warn("failed to shut down question coordinator", {
+                    logger.warn("failed to post shutdown interrupt info card", {
+                      channelId: activeRun.originMessage.channelId,
+                      sessionId,
                       error: formatError(error),
                     }),
                   ),
+                  Effect.ignore,
                 );
+            }),
+          { concurrency: "unbounded", discard: true },
+        );
 
-                yield* Effect.forEach(
-                  activeRuns,
-                  ([sessionId, activeRun]) =>
-                    Effect.gen(function* () {
-                      yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore);
-                      yield* activeRun.finalizeProgress("shutdown").pipe(
-                        Effect.catch((error) =>
-                          logger.warn("failed to finalize active run progress on shutdown", {
-                            sessionId,
-                            error: formatError(error),
-                          }),
-                        ),
-                      );
+        yield* Effect.forEach(
+          idleCompactions,
+          ([sessionId, idleCompaction]) =>
+            (idleCompaction.interruptRequested
+              ? idleCompactionWorkflow.handleInterrupted(sessionId)
+              : idleCompactionWorkflow.handleStopped(sessionId)
+            ).pipe(
+              Effect.catch((error) =>
+                logger.warn("failed to finalize idle compaction on shutdown", {
+                  sessionId,
+                  error: formatError(error),
+                }),
+              ),
+            ),
+          { concurrency: "unbounded", discard: true },
+        );
+      });
+
+    const shutdown: ChannelSessionsShape["shutdown"] = () =>
+      startShutdown().pipe(
+        Effect.flatMap((shouldRun) =>
+          !shouldRun
+            ? Effect.void
+            : Effect.gen(function* () {
+                yield* questionCoordinator.beginShutdown().pipe(
+                  Effect.catch((error) =>
+                    logger.warn("failed to begin question coordinator shutdown", {
+                      error: formatError(error),
                     }),
-                  { concurrency: "unbounded", discard: true },
+                  ),
                 );
 
                 yield* idleCompactionWorkflow.shutdown().pipe(
                   Effect.catch((error) =>
-                    logger.warn("failed to shut down idle compaction workflow", {
+                    logger.warn("failed to begin idle compaction shutdown", {
                       error: formatError(error),
                     }),
                   ),
                 );
 
-                yield* Effect.forEach(
-                  idleCompactionIds,
-                  (sessionId) =>
-                    idleCompactionWorkflow.handleStopped(sessionId).pipe(
-                      Effect.catch((error) =>
-                        logger.warn("failed to finalize idle compaction on shutdown", {
-                          sessionId,
-                          error: formatError(error),
-                        }),
-                      ),
-                    ),
-                  { concurrency: "unbounded", discard: true },
-                );
+                const state = yield* Ref.get(stateRef);
+                const sessions = [...state.sessionsBySessionId.values()];
+                yield* Effect.forEach(sessions, requestSessionShutdown, {
+                  concurrency: "unbounded",
+                  discard: true,
+                });
+
+                yield* awaitShutdownDrain();
+                yield* finalizeLingeringShutdownUi();
 
                 yield* FiberSet.clear(fiberSet).pipe(
                   Effect.catch((error) =>
@@ -341,10 +529,7 @@ export const ChannelSessionsLayer = Layer.effect(
                   ),
                 );
               }),
-              true,
-            ],
-      ).pipe(
-        Effect.flatten,
+        ),
         Effect.catch((error) =>
           logger.warn("channel sessions shutdown failed", {
             error: formatError(error),
@@ -352,64 +537,74 @@ export const ChannelSessionsLayer = Layer.effect(
         ),
       );
 
-    yield* Effect.addFinalizer(() => shutdown());
-
     return {
       submit: (message, invocation): FallibleEffect<void> =>
-        Effect.acquireUseRelease(
-          Effect.sync(() => startTypingLoop(message.channel)),
-          () =>
-            Effect.gen(function* () {
-              const session = yield* getUsableSession(
-                message,
-                "health probe failed before queueing run",
-              );
-              session.progressChannel = message.channel.isSendable()
-                ? (message.channel as SendableChannels)
-                : null;
-              session.progressMentionContext = message;
-              const attachmentMessages = yield* collectAttachmentMessages(message);
-              const referencedMessage =
-                attachmentMessages.find((candidate) => candidate.id !== message.id) ?? null;
-              const prompt = buildOpencodePrompt({
-                message: promptMessageContext(message, invocation.prompt),
-                referencedMessage: referencedMessage
-                  ? promptMessageContext(referencedMessage)
-                  : undefined,
-              });
+        Ref.get(shutdownStartedRef).pipe(
+          Effect.flatMap((shutdownStarted) =>
+            shutdownStarted
+              ? Effect.void
+              : Effect.acquireUseRelease(
+                  Effect.sync(() => startTypingLoop(message.channel)),
+                  () =>
+                    Effect.gen(function* () {
+                      const session = yield* getUsableSession(
+                        message,
+                        "health probe failed before queueing run",
+                      );
+                      session.progressChannel = message.channel.isSendable()
+                        ? (message.channel as SendableChannels)
+                        : null;
+                      session.progressMentionContext = message;
+                      const attachmentMessages = yield* collectAttachmentMessages(message);
+                      const referencedMessage =
+                        attachmentMessages.find((candidate) => candidate.id !== message.id) ?? null;
+                      const prompt = buildOpencodePrompt({
+                        message: promptMessageContext(message, invocation.prompt),
+                        referencedMessage: referencedMessage
+                          ? promptMessageContext(referencedMessage)
+                          : undefined,
+                      });
 
-              const request = {
-                message,
-                prompt,
-                attachmentMessages,
-              } satisfies RunRequest;
+                      const request = {
+                        message,
+                        prompt,
+                        attachmentMessages,
+                      } satisfies RunRequest;
 
-              const destination = yield* enqueueRunRequest(session, request);
-              if (destination === "follow-up") {
-                yield* logger.info("queued follow-up on active run", {
-                  channelId: message.channelId,
-                  sessionId: session.opencode.sessionId,
-                  author: message.author.tag,
-                });
-              } else {
-                yield* logger.info("queued run", {
-                  channelId: message.channelId,
-                  sessionId: session.opencode.sessionId,
-                  author: message.author.tag,
-                });
-              }
-            }),
-          (typing) => Effect.promise(() => typing.stop()).pipe(Effect.ignore),
+                      const destination = yield* enqueueRunRequest(session, request);
+                      if (destination === "follow-up") {
+                        yield* logger.info("queued follow-up on active run", {
+                          channelId: message.channelId,
+                          sessionId: session.opencode.sessionId,
+                          author: message.author.tag,
+                        });
+                      } else {
+                        yield* logger.info("queued run", {
+                          channelId: message.channelId,
+                          sessionId: session.opencode.sessionId,
+                          author: message.author.tag,
+                        });
+                      }
+                    }),
+                  (typing) => Effect.promise(() => typing.stop()).pipe(Effect.ignore),
+                ),
+          ),
         ),
       getActiveRunBySessionId,
       handleInteraction: (interaction) =>
-        interaction.isChatInputCommand()
-          ? commandHandler.handleInteraction(interaction)
-          : interaction.isButton() ||
-              interaction.isStringSelectMenu() ||
-              interaction.isModalSubmit()
-            ? questionCoordinator.handleInteraction(interaction)
-            : Effect.void,
+        Ref.get(shutdownStartedRef).pipe(
+          Effect.flatMap((shutdownStarted) =>
+            interaction.isChatInputCommand()
+              ? shutdownStarted
+                ? Effect.void
+                : commandHandler.handleInteraction(interaction)
+              : interaction.isButton() ||
+                  interaction.isStringSelectMenu() ||
+                  interaction.isModalSubmit()
+                ? questionCoordinator.handleInteraction(interaction)
+                : Effect.void,
+          ),
+        ),
       shutdown,
     } satisfies ChannelSessionsShape;
   }),

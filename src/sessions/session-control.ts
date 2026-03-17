@@ -1,7 +1,7 @@
 import type { SendableChannels } from "discord.js";
 import { Effect, Queue, ServiceMap } from "effect";
 
-import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
+import type { ActiveRun, ChannelSession, RunInterruptSource } from "@/sessions/session.ts";
 import type { ChannelSettings } from "@/state/channel-settings.ts";
 
 export type SessionControlShape = {
@@ -14,7 +14,11 @@ export type SessionControlShape = {
   ) => Effect.Effect<void>;
   hasQueuedWork: (session: ChannelSession) => Effect.Effect<boolean, unknown>;
   setChannelSettings: (session: ChannelSession, settings: ChannelSettings) => Effect.Effect<void>;
-  setRunInterruptRequested: (activeRun: ActiveRun, requested: boolean) => Effect.Effect<void>;
+  setRunInterruptRequested: (
+    activeRun: ActiveRun,
+    requested: boolean,
+    source?: RunInterruptSource | null,
+  ) => Effect.Effect<void>;
 };
 
 export class SessionControl extends ServiceMap.Service<SessionControl, SessionControlShape>()(
@@ -38,8 +42,9 @@ export const makeSessionControl = (deps: {
     Effect.sync(() => {
       session.channelSettings = settings;
     }),
-  setRunInterruptRequested: (activeRun, requested) =>
+  setRunInterruptRequested: (activeRun, requested, source = requested ? "user" : null) =>
     Effect.sync(() => {
       activeRun.interruptRequested = requested;
+      activeRun.interruptSource = requested ? source : null;
     }),
 });

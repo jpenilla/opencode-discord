@@ -65,6 +65,9 @@ export type QuestionCoordinator = {
   handleEvent: (event: QuestionCoordinatorEvent) => Effect.Effect<void, unknown>;
   handleInteraction: (interaction: Interaction) => Effect.Effect<void, unknown>;
   hasPendingQuestionsForSession: (sessionId: string) => Effect.Effect<boolean>;
+  beginShutdown: () => Effect.Effect<void, unknown>;
+  getPendingRequestIdsForSession: (sessionId: string) => Effect.Effect<ReadonlyArray<string>>;
+  markShutdownRejectedRequests: (requestIds: ReadonlyArray<string>) => Effect.Effect<void, unknown>;
   terminateForSession: (sessionId: string) => Effect.Effect<void, unknown>;
   shutdown: () => Effect.Effect<void, unknown>;
 };
@@ -101,6 +104,7 @@ export const createQuestionCoordinator = (
   Effect.gen(function* () {
     const batchesRef = yield* Ref.make(new Map<string, PendingQuestionBatch>());
     const detachedFinalizedBatchesRef = yield* Ref.make(new Map<string, PendingQuestionBatch>());
+    const shutdownRejectedRequestIdsRef = yield* Ref.make(new Set<string>());
     const shutdownStartedRef = yield* Ref.make(false);
 
     type PersistQuestionBatchResult =
@@ -328,6 +332,7 @@ export const createQuestionCoordinator = (
 
         if (activeRun.interruptRequested) {
           activeRun.interruptRequested = false;
+          activeRun.interruptSource = null;
           yield* deps.logger.info("question prompt superseded interrupt request", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
@@ -461,14 +466,31 @@ export const createQuestionCoordinator = (
         yield* syncTypingForSession(session.opencode.sessionId);
       });
 
+    const completeShutdownRejectedRequest = (requestId: string) =>
+      Ref.modify(
+        shutdownRejectedRequestIdsRef,
+        (current): readonly [boolean, Set<string>] => {
+          if (!current.has(requestId)) {
+            return [false, current];
+          }
+
+          const next = new Set(current);
+          next.delete(requestId);
+          return [true, next];
+        },
+      );
+
     const finalizeQuestionBatch = (
       requestId: string,
       status: "answered" | "rejected",
       resolvedAnswers?: ReadonlyArray<QuestionAnswer>,
     ) =>
       Effect.gen(function* () {
+        const renderExpired = status === "rejected" && (yield* completeShutdownRejectedRequest(requestId));
         const batch = yield* updateQuestionBatch(requestId, (current) =>
-          setQuestionBatchStatus(current, status, resolvedAnswers),
+          renderExpired
+            ? terminateQuestionBatch(current, "expired")
+            : setQuestionBatchStatus(current, status, resolvedAnswers),
         );
         if (!batch) {
           return;
@@ -567,6 +589,11 @@ export const createQuestionCoordinator = (
 
         const action = parseQuestionActionId(interaction.customId);
         if (!action) {
+          return;
+        }
+
+        if (yield* Ref.get(shutdownStartedRef)) {
+          yield* replyToQuestionInteraction(interaction, "This question prompt has expired.");
           return;
         }
 
@@ -893,10 +920,13 @@ export const createQuestionCoordinator = (
     const terminateForSession = (sessionId: string) =>
       terminateMatchingBatches((batch) => batch.session.opencode.sessionId === sessionId);
 
-    const shutdown = () =>
-      Ref.modify(shutdownStartedRef, (started): readonly [Effect.Effect<void, unknown>, boolean] =>
-        started ? [Effect.void, true] : [terminateMatchingBatches(() => true), true],
+    const beginShutdown = () =>
+      Ref.modify(shutdownStartedRef, (started): readonly [Effect.Effect<void>, boolean] =>
+        started ? [Effect.void, true] : [Effect.void, true],
       ).pipe(Effect.flatten);
+
+    const shutdown = () =>
+      beginShutdown().pipe(Effect.andThen(terminateMatchingBatches(() => true)));
 
     return {
       handleEvent: (event) => {
@@ -918,6 +948,29 @@ export const createQuestionCoordinator = (
       },
       handleInteraction,
       hasPendingQuestionsForSession,
+      beginShutdown,
+      getPendingRequestIdsForSession: (sessionId) =>
+        Ref.get(batchesRef).pipe(
+          Effect.map((batches) =>
+            [...batches.values()]
+              .filter(
+                (batch) =>
+                  batch.session.opencode.sessionId === sessionId &&
+                  (batch.status === "active" || batch.status === "submitting"),
+              )
+              .map((batch) => batch.request.id),
+          ),
+        ),
+      markShutdownRejectedRequests: (requestIds) =>
+        requestIds.length === 0
+          ? Effect.void
+          : Ref.update(shutdownRejectedRequestIdsRef, (current) => {
+              const next = new Set(current);
+              for (const requestId of requestIds) {
+                next.add(requestId);
+              }
+              return next;
+            }),
       terminateForSession,
       shutdown,
     } satisfies QuestionCoordinator;

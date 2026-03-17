@@ -30,6 +30,7 @@ export type IdleCompactionWorkflowShape = {
     session: ChannelSession;
   }) => Effect.Effect<IdleCompactionWorkflowInterruptResult, unknown>;
   handleCompacted: (sessionId: string) => Effect.Effect<void, unknown>;
+  handleInterrupted: (sessionId: string) => Effect.Effect<void, unknown>;
   handleStopped: (sessionId: string) => Effect.Effect<void, unknown>;
   emitSummary: (input: {
     session: ChannelSession;
@@ -323,6 +324,10 @@ export const makeIdleCompactionWorkflow = (
       handleCompacted: (sessionId) => {
         const compactedCard = compactionCardContent("compacted");
         return finalizeCard(sessionId, compactedCard.title, compactedCard.body);
+      },
+      handleInterrupted: (sessionId) => {
+        const interruptedCard = compactionCardContent("interrupted");
+        return finalizeCard(sessionId, interruptedCard.title, interruptedCard.body);
       },
       handleStopped: (sessionId) => {
         const stoppedCard = compactionCardContent("stopped");

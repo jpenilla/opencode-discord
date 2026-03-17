@@ -52,6 +52,7 @@ const makeSession = async (withActiveRun: boolean, showCompactionSummaries = tru
         },
         questionOutcome: noQuestionOutcome(),
         interruptRequested: false,
+        interruptSource: null,
       })
     : null;
 

@@ -177,6 +177,7 @@ const makeHarness = async (options?: HarnessOptions) => {
     finalizeProgress: () => Effect.void,
     questionOutcome: noQuestionOutcome(),
     interruptRequested: false,
+    interruptSource: null,
   };
 
   const session: ChannelSession = {
@@ -390,6 +391,7 @@ const makeHarness = async (options?: HarnessOptions) => {
         return { type: "interrupted" } satisfies IdleCompactionWorkflowInterruptResult;
       }),
     handleCompacted: () => Effect.void,
+    handleInterrupted: () => Effect.void,
     handleStopped: () => Effect.void,
     emitSummary: () => Effect.void,
     shutdown: () => Effect.void,
