@@ -43,7 +43,7 @@ export const questionUiFailureOutcome = (message: string, notified = false): Que
 
 export type RunInterruptSource = "user" | "shutdown";
 
-export type RunFinalizationReason = "interrupted" | "shutdown";
+export type RunFinalizationReason = "interrupted";
 
 export type ActiveRun = {
   originMessage: Message;

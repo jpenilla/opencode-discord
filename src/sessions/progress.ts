@@ -250,7 +250,7 @@ const finalizeLiveCards = (
   reason: RunFinalizationReason,
 ) =>
   Effect.gen(function* () {
-    if (reason === "shutdown" || reason === "interrupted") {
+    if (reason === "interrupted") {
       yield* Effect.forEach(
         state.activeToolParts.entries(),
         ([callId, part]) => {
@@ -265,7 +265,7 @@ const finalizeLiveCards = (
               part,
               workdir: pathContext.workdir,
               backend: pathContext.backend,
-              terminalState: reason === "shutdown" ? "shutdown" : "interrupted",
+              terminalState: "interrupted",
             }),
           ).pipe(Effect.ignore);
         },
@@ -280,8 +280,7 @@ const finalizeLiveCards = (
       return;
     }
 
-    const compactionState = reason === "interrupted" ? "interrupted" : "stopped";
-    const { title, body } = compactionCardContent(compactionState);
+    const { title, body } = compactionCardContent("interrupted");
     yield* Effect.promise(() => editInfoCard(state.compactionCard!, title, body)).pipe(
       Effect.ignore,
     );

@@ -464,11 +464,8 @@ export const ChannelSessionsLayer = Layer.effect(
 
         yield* Effect.forEach(
           idleCompactions,
-          ([sessionId, idleCompaction]) =>
-            (idleCompaction.interruptRequested
-              ? idleCompactionWorkflow.handleInterrupted(sessionId)
-              : idleCompactionWorkflow.handleStopped(sessionId)
-            ).pipe(
+          ([sessionId]) =>
+            idleCompactionWorkflow.handleInterrupted(sessionId).pipe(
               Effect.catch((error) =>
                 logger.warn("failed to finalize idle compaction on shutdown", {
                   sessionId,
