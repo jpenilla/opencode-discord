@@ -28,13 +28,10 @@ export const compactCommand = defineGuildCommand({
       yield* context.complete(entry.message);
       return;
     }
-    if (channelActivity.type !== "present") {
-      return;
-    }
 
     yield* context.ack();
     const result = yield* sessionRuntime.startCompaction(
-      channelActivity.session,
+      context.channelId,
       context.guildTextChannel!,
     );
 

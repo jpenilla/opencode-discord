@@ -22,7 +22,6 @@ const presentChannelActivity = (activity: {
 }) =>
   ({
     type: "present",
-    session: {} as never,
     activity,
   }) as const;
 
