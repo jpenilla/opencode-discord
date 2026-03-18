@@ -13,7 +13,7 @@ import { AppConfig } from "@/config.ts";
 import { syncGuildCommands } from "@/discord/commands.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { detectInvocation } from "@/discord/triggers.ts";
-import { ChannelSessions } from "@/sessions/registry.ts";
+import { SessionOrchestrator } from "@/sessions/session-orchestrator.ts";
 import { Logger } from "@/util/logging.ts";
 
 const formatError = (error: unknown) => {
@@ -27,7 +27,7 @@ export const DiscordBotLayer = Layer.effectDiscard(
   Effect.gen(function* () {
     const config = yield* AppConfig;
     const logger = yield* Logger;
-    const sessions = yield* ChannelSessions;
+    const sessions = yield* SessionOrchestrator;
 
     const client = new Client({
       intents: [
