@@ -8,14 +8,14 @@ import {
 import { Deferred, Effect, Layer, Queue, Redacted, Ref } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
-import { InfoCards, type InfoCardsShape } from "@/discord/info-cards.ts";
-import { formatErrorResponse } from "@/discord/formatting.ts";
-import { createCommandHandler } from "@/sessions/command-handler.ts";
 import {
   NEW_SESSION_BUSY_MESSAGE,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
   QUESTION_PENDING_NEW_SESSION_MESSAGE,
-} from "@/sessions/command-lifecycle.ts";
+} from "@/channels/command-policy.ts";
+import { createCommandHandler } from "@/channels/command-handler.ts";
+import { InfoCards, type InfoCardsShape } from "@/discord/info-cards.ts";
+import { formatErrorResponse } from "@/discord/formatting.ts";
 import { createPromptState } from "@/sessions/prompt-state.ts";
 import {
   type IdleCompactionWorkflowShape,

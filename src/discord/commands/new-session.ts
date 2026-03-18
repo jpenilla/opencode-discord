@@ -1,12 +1,12 @@
 import { Effect } from "effect";
 
-import { CommandContext } from "@/discord/commands/command-context.ts";
-import { InfoCards } from "@/discord/info-cards.ts";
 import {
   decideNewSessionEntry,
   GUILD_TEXT_COMMAND_ONLY_MESSAGE,
   NEW_SESSION_BUSY_MESSAGE,
-} from "@/sessions/command-lifecycle.ts";
+} from "@/channels/command-policy.ts";
+import { CommandContext } from "@/discord/commands/command-context.ts";
+import { InfoCards } from "@/discord/info-cards.ts";
 import { SessionRuntime } from "@/sessions/session-runtime.ts";
 import { formatError } from "@/util/errors.ts";
 import { Logger } from "@/util/logging.ts";

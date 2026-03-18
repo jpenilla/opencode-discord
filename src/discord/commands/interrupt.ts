@@ -1,12 +1,12 @@
 import { Effect } from "effect";
 
-import { CommandContext } from "@/discord/commands/command-context.ts";
-import { formatErrorResponse } from "@/discord/formatting.ts";
 import {
   decideInterruptEntry,
   GUILD_TEXT_COMMAND_ONLY_MESSAGE,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
-} from "@/sessions/command-lifecycle.ts";
+} from "@/channels/command-policy.ts";
+import { CommandContext } from "@/discord/commands/command-context.ts";
+import { formatErrorResponse } from "@/discord/formatting.ts";
 import { SessionRuntime } from "@/sessions/session-runtime.ts";
 import { formatError } from "@/util/errors.ts";
 import { defineGuildCommand } from "./definition.ts";

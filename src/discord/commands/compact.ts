@@ -1,10 +1,7 @@
 import { Effect } from "effect";
 
 import { CommandContext } from "@/discord/commands/command-context.ts";
-import {
-  decideCompactEntry,
-  GUILD_TEXT_COMMAND_ONLY_MESSAGE,
-} from "@/sessions/command-lifecycle.ts";
+import { decideCompactEntry, GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/channels/command-policy.ts";
 import { SessionRuntime } from "@/sessions/session-runtime.ts";
 import { defineGuildCommand } from "./definition.ts";
 
