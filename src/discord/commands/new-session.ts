@@ -1,64 +1,12 @@
 import { Effect } from "effect";
 
-import { CommandContext, type CommandContextShape } from "@/discord/commands/command-context.ts";
+import { CommandContext } from "@/discord/commands/command-context.ts";
 import { InfoCards } from "@/discord/info-cards.ts";
-import { IdleCompactionWorkflow } from "@/sessions/idle-compaction-workflow.ts";
 import { decideNewSessionEntry, NEW_SESSION_BUSY_MESSAGE } from "@/sessions/command-lifecycle.ts";
-import { SessionControl, type SessionControlShape } from "@/sessions/session-control.ts";
+import { SessionControl } from "@/sessions/session-control.ts";
 import { formatError } from "@/util/errors.ts";
 import { Logger } from "@/util/logging.ts";
-import type { IdleCompactionWorkflowShape } from "@/sessions/idle-compaction-workflow.ts";
 import { defineGuildCommand } from "./definition.ts";
-
-const readNewSessionEntry = (
-  context: CommandContextShape,
-  sessionControl: SessionControlShape,
-  idleCompaction: IdleCompactionWorkflowShape,
-) =>
-  Effect.gen(function* () {
-    if (!context.inGuildTextChannel || !context.guildTextChannel) {
-      return decideNewSessionEntry({
-        inGuildTextChannel: false,
-        hasPendingQuestions: false,
-        hasActiveRun: false,
-        hasIdleCompaction: false,
-        hasQueuedWork: false,
-        hasOtherBusyState: false,
-      });
-    }
-
-    const session = yield* sessionControl.getLoaded(context.channelId);
-    if (!session) {
-      return decideNewSessionEntry({
-        inGuildTextChannel: true,
-        hasPendingQuestions: false,
-        hasActiveRun: false,
-        hasIdleCompaction: false,
-        hasQueuedWork: false,
-        hasOtherBusyState: false,
-      });
-    }
-
-    const { hasPendingQuestions, hasIdleCompaction, hasQueuedWork } = yield* Effect.all({
-      hasPendingQuestions: sessionControl.hasPendingQuestions(session.opencode.sessionId),
-      hasIdleCompaction: idleCompaction.hasActive(session.opencode.sessionId),
-      hasQueuedWork: sessionControl.hasQueuedWork(session),
-    });
-    const hasActiveRun = Boolean(session.activeRun);
-    const hasOtherBusyState =
-      hasPendingQuestions || hasActiveRun || hasIdleCompaction
-        ? false
-        : yield* sessionControl.isSessionBusy(session);
-
-    return decideNewSessionEntry({
-      inGuildTextChannel: true,
-      hasPendingQuestions,
-      hasActiveRun,
-      hasIdleCompaction,
-      hasQueuedWork,
-      hasOtherBusyState,
-    });
-  });
 
 export const newSessionCommand = defineGuildCommand({
   name: "new-session",
@@ -66,11 +14,17 @@ export const newSessionCommand = defineGuildCommand({
   execute: Effect.gen(function* () {
     const context = yield* CommandContext;
     const sessionControl = yield* SessionControl;
-    const idleCompaction = yield* IdleCompactionWorkflow;
     const infoCards = yield* InfoCards;
     const logger = yield* Logger;
 
-    const entry = yield* readNewSessionEntry(context, sessionControl, idleCompaction);
+    const channelActivity =
+      context.inGuildTextChannel && context.guildTextChannel
+        ? yield* sessionControl.readLoadedChannelActivity(context.channelId)
+        : ({ type: "missing" } as const);
+    const entry = decideNewSessionEntry({
+      inGuildTextChannel: context.inGuildTextChannel && Boolean(context.guildTextChannel),
+      channelActivity,
+    });
     if (entry.type === "reject") {
       yield* context.complete(entry.message);
       return;
@@ -82,7 +36,14 @@ export const newSessionCommand = defineGuildCommand({
       "requested a fresh session via /new-session",
     );
     if (!invalidated) {
-      const refreshedEntry = yield* readNewSessionEntry(context, sessionControl, idleCompaction);
+      const refreshedChannelActivity =
+        context.inGuildTextChannel && context.guildTextChannel
+          ? yield* sessionControl.readLoadedChannelActivity(context.channelId)
+          : ({ type: "missing" } as const);
+      const refreshedEntry = decideNewSessionEntry({
+        inGuildTextChannel: context.inGuildTextChannel && Boolean(context.guildTextChannel),
+        channelActivity: refreshedChannelActivity,
+      });
       yield* context.complete(
         refreshedEntry.type === "reject" ? refreshedEntry.message : NEW_SESSION_BUSY_MESSAGE,
       );

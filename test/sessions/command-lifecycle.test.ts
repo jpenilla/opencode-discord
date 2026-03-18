@@ -11,13 +11,33 @@ import {
   QUESTION_PENDING_INTERRUPT_MESSAGE,
 } from "@/sessions/command-lifecycle.ts";
 
+const missingChannelActivity = { type: "missing" } as const;
+
+const presentChannelActivity = (activity: {
+  hasActiveRun: boolean;
+  hasPendingQuestions: boolean;
+  hasIdleCompaction: boolean;
+  hasQueuedWork: boolean;
+  isBusy: boolean;
+}) =>
+  ({
+    type: "present",
+    session: {} as never,
+    activity,
+  }) as const;
+
 describe("decideCompactEntry", () => {
   test("rejects non-standard guild text channels", () => {
     expect(
       decideCompactEntry({
         inGuildTextChannel: false,
-        hasSession: true,
-        hasActiveRun: false,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: false,
+          hasPendingQuestions: false,
+          hasIdleCompaction: false,
+          hasQueuedWork: false,
+          isBusy: false,
+        }),
       }),
     ).toEqual({
       type: "reject",
@@ -29,8 +49,7 @@ describe("decideCompactEntry", () => {
     expect(
       decideCompactEntry({
         inGuildTextChannel: true,
-        hasSession: false,
-        hasActiveRun: false,
+        channelActivity: missingChannelActivity,
       }),
     ).toEqual({
       type: "reject",
@@ -42,8 +61,13 @@ describe("decideCompactEntry", () => {
     expect(
       decideCompactEntry({
         inGuildTextChannel: true,
-        hasSession: true,
-        hasActiveRun: true,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: true,
+          hasPendingQuestions: false,
+          hasIdleCompaction: false,
+          hasQueuedWork: false,
+          isBusy: true,
+        }),
       }),
     ).toEqual({
       type: "reject",
@@ -56,8 +80,13 @@ describe("decideCompactEntry", () => {
     expect(
       decideCompactEntry({
         inGuildTextChannel: true,
-        hasSession: true,
-        hasActiveRun: false,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: false,
+          hasPendingQuestions: false,
+          hasIdleCompaction: false,
+          hasQueuedWork: false,
+          isBusy: false,
+        }),
       }),
     ).toEqual({ type: "defer-and-check-health" });
   });
@@ -82,10 +111,13 @@ describe("decideInterruptEntry", () => {
     expect(
       decideInterruptEntry({
         inGuildTextChannel: false,
-        hasSession: true,
-        hasActiveRun: true,
-        hasPendingQuestions: false,
-        hasIdleCompaction: false,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: true,
+          hasPendingQuestions: false,
+          hasIdleCompaction: false,
+          hasQueuedWork: false,
+          isBusy: true,
+        }),
       }),
     ).toEqual({
       type: "reject",
@@ -97,10 +129,7 @@ describe("decideInterruptEntry", () => {
     expect(
       decideInterruptEntry({
         inGuildTextChannel: true,
-        hasSession: false,
-        hasActiveRun: false,
-        hasPendingQuestions: false,
-        hasIdleCompaction: false,
+        channelActivity: missingChannelActivity,
       }),
     ).toEqual({
       type: "reject",
@@ -112,10 +141,13 @@ describe("decideInterruptEntry", () => {
     expect(
       decideInterruptEntry({
         inGuildTextChannel: true,
-        hasSession: true,
-        hasActiveRun: false,
-        hasPendingQuestions: false,
-        hasIdleCompaction: false,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: false,
+          hasPendingQuestions: false,
+          hasIdleCompaction: false,
+          hasQueuedWork: false,
+          isBusy: false,
+        }),
       }),
     ).toEqual({
       type: "reject",
@@ -127,10 +159,13 @@ describe("decideInterruptEntry", () => {
     expect(
       decideInterruptEntry({
         inGuildTextChannel: true,
-        hasSession: true,
-        hasActiveRun: true,
-        hasPendingQuestions: false,
-        hasIdleCompaction: false,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: true,
+          hasPendingQuestions: false,
+          hasIdleCompaction: false,
+          hasQueuedWork: false,
+          isBusy: true,
+        }),
       }),
     ).toEqual({ type: "defer-and-interrupt", target: "run" });
   });
@@ -139,10 +174,13 @@ describe("decideInterruptEntry", () => {
     expect(
       decideInterruptEntry({
         inGuildTextChannel: true,
-        hasSession: true,
-        hasActiveRun: true,
-        hasPendingQuestions: true,
-        hasIdleCompaction: false,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: true,
+          hasPendingQuestions: true,
+          hasIdleCompaction: false,
+          hasQueuedWork: false,
+          isBusy: true,
+        }),
       }),
     ).toEqual({
       type: "reject",
@@ -154,10 +192,13 @@ describe("decideInterruptEntry", () => {
     expect(
       decideInterruptEntry({
         inGuildTextChannel: true,
-        hasSession: true,
-        hasActiveRun: false,
-        hasPendingQuestions: true,
-        hasIdleCompaction: false,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: false,
+          hasPendingQuestions: true,
+          hasIdleCompaction: false,
+          hasQueuedWork: false,
+          isBusy: true,
+        }),
       }),
     ).toEqual({
       type: "reject",
@@ -169,10 +210,13 @@ describe("decideInterruptEntry", () => {
     expect(
       decideInterruptEntry({
         inGuildTextChannel: true,
-        hasSession: true,
-        hasActiveRun: false,
-        hasPendingQuestions: false,
-        hasIdleCompaction: true,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: false,
+          hasPendingQuestions: false,
+          hasIdleCompaction: true,
+          hasQueuedWork: false,
+          isBusy: true,
+        }),
       }),
     ).toEqual({ type: "defer-and-interrupt", target: "compaction" });
   });
@@ -183,11 +227,7 @@ describe("decideNewSessionEntry", () => {
     expect(
       decideNewSessionEntry({
         inGuildTextChannel: false,
-        hasPendingQuestions: false,
-        hasActiveRun: false,
-        hasIdleCompaction: false,
-        hasQueuedWork: false,
-        hasOtherBusyState: false,
+        channelActivity: missingChannelActivity,
       }),
     ).toEqual({
       type: "reject",
@@ -199,11 +239,13 @@ describe("decideNewSessionEntry", () => {
     expect(
       decideNewSessionEntry({
         inGuildTextChannel: true,
-        hasPendingQuestions: true,
-        hasActiveRun: false,
-        hasIdleCompaction: false,
-        hasQueuedWork: false,
-        hasOtherBusyState: false,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: false,
+          hasPendingQuestions: true,
+          hasIdleCompaction: false,
+          hasQueuedWork: false,
+          isBusy: true,
+        }),
       }),
     ).toEqual({
       type: "reject",
@@ -215,11 +257,13 @@ describe("decideNewSessionEntry", () => {
     expect(
       decideNewSessionEntry({
         inGuildTextChannel: true,
-        hasPendingQuestions: false,
-        hasActiveRun: true,
-        hasIdleCompaction: false,
-        hasQueuedWork: false,
-        hasOtherBusyState: false,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: true,
+          hasPendingQuestions: false,
+          hasIdleCompaction: false,
+          hasQueuedWork: false,
+          isBusy: true,
+        }),
       }),
     ).toEqual({
       type: "reject",
@@ -232,11 +276,13 @@ describe("decideNewSessionEntry", () => {
     expect(
       decideNewSessionEntry({
         inGuildTextChannel: true,
-        hasPendingQuestions: false,
-        hasActiveRun: false,
-        hasIdleCompaction: true,
-        hasQueuedWork: false,
-        hasOtherBusyState: false,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: false,
+          hasPendingQuestions: false,
+          hasIdleCompaction: true,
+          hasQueuedWork: false,
+          isBusy: true,
+        }),
       }),
     ).toEqual({
       type: "reject",
@@ -249,11 +295,13 @@ describe("decideNewSessionEntry", () => {
     expect(
       decideNewSessionEntry({
         inGuildTextChannel: true,
-        hasPendingQuestions: false,
-        hasActiveRun: false,
-        hasIdleCompaction: false,
-        hasQueuedWork: true,
-        hasOtherBusyState: false,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: false,
+          hasPendingQuestions: false,
+          hasIdleCompaction: false,
+          hasQueuedWork: true,
+          isBusy: false,
+        }),
       }),
     ).toEqual({
       type: "reject",
@@ -266,11 +314,13 @@ describe("decideNewSessionEntry", () => {
     expect(
       decideNewSessionEntry({
         inGuildTextChannel: true,
-        hasPendingQuestions: false,
-        hasActiveRun: false,
-        hasIdleCompaction: false,
-        hasQueuedWork: false,
-        hasOtherBusyState: true,
+        channelActivity: presentChannelActivity({
+          hasActiveRun: false,
+          hasPendingQuestions: false,
+          hasIdleCompaction: false,
+          hasQueuedWork: false,
+          isBusy: true,
+        }),
       }),
     ).toEqual({
       type: "reject",
@@ -282,11 +332,7 @@ describe("decideNewSessionEntry", () => {
     expect(
       decideNewSessionEntry({
         inGuildTextChannel: true,
-        hasPendingQuestions: false,
-        hasActiveRun: false,
-        hasIdleCompaction: false,
-        hasQueuedWork: false,
-        hasOtherBusyState: false,
+        channelActivity: missingChannelActivity,
       }),
     ).toEqual({ type: "defer-and-invalidate" });
   });

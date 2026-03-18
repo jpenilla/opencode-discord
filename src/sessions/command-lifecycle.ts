@@ -1,3 +1,4 @@
+import type { ChannelActivity } from "@/sessions/session-control.ts";
 import type { QuestionOutcome } from "@/sessions/session.ts";
 
 export type CommandRejection = { type: "reject"; message: string };
@@ -12,16 +13,15 @@ export const NEW_SESSION_BUSY_MESSAGE =
 
 export const decideCompactEntry = (input: {
   inGuildTextChannel: boolean;
-  hasSession: boolean;
-  hasActiveRun: boolean;
+  channelActivity: ChannelActivity;
 }): CommandRejection | { type: "defer-and-check-health" } => {
   if (!input.inGuildTextChannel) {
     return { type: "reject", message: GUILD_TEXT_COMMAND_ONLY_MESSAGE };
   }
-  if (!input.hasSession) {
+  if (input.channelActivity.type === "missing") {
     return { type: "reject", message: "No OpenCode session exists in this channel yet." };
   }
-  if (input.hasActiveRun) {
+  if (input.channelActivity.activity.hasActiveRun) {
     return {
       type: "reject",
       message:
@@ -44,27 +44,24 @@ export const decideCompactAfterHealthCheck = (
 
 export const decideInterruptEntry = (input: {
   inGuildTextChannel: boolean;
-  hasSession: boolean;
-  hasActiveRun: boolean;
-  hasPendingQuestions: boolean;
-  hasIdleCompaction: boolean;
+  channelActivity: ChannelActivity;
 }): CommandRejection | { type: "defer-and-interrupt"; target: "run" | "compaction" } => {
   if (!input.inGuildTextChannel) {
     return { type: "reject", message: GUILD_TEXT_COMMAND_ONLY_MESSAGE };
   }
-  if (!input.hasSession) {
+  if (input.channelActivity.type === "missing") {
     return { type: "reject", message: "No OpenCode session exists in this channel yet." };
   }
-  if (input.hasPendingQuestions) {
+  if (input.channelActivity.activity.hasPendingQuestions) {
     return {
       type: "reject",
       message: QUESTION_PENDING_INTERRUPT_MESSAGE,
     };
   }
-  if (input.hasActiveRun) {
+  if (input.channelActivity.activity.hasActiveRun) {
     return { type: "defer-and-interrupt", target: "run" };
   }
-  if (input.hasIdleCompaction) {
+  if (input.channelActivity.activity.hasIdleCompaction) {
     return { type: "defer-and-interrupt", target: "compaction" };
   }
   return {
@@ -75,43 +72,42 @@ export const decideInterruptEntry = (input: {
 
 export const decideNewSessionEntry = (input: {
   inGuildTextChannel: boolean;
-  hasPendingQuestions: boolean;
-  hasActiveRun: boolean;
-  hasIdleCompaction: boolean;
-  hasQueuedWork: boolean;
-  hasOtherBusyState: boolean;
+  channelActivity: ChannelActivity;
 }): CommandRejection | { type: "defer-and-invalidate" } => {
   if (!input.inGuildTextChannel) {
     return { type: "reject", message: GUILD_TEXT_COMMAND_ONLY_MESSAGE };
   }
-  if (input.hasPendingQuestions) {
+  if (input.channelActivity.type === "missing") {
+    return { type: "defer-and-invalidate" };
+  }
+  if (input.channelActivity.activity.hasPendingQuestions) {
     return {
       type: "reject",
       message: QUESTION_PENDING_NEW_SESSION_MESSAGE,
     };
   }
-  if (input.hasActiveRun) {
+  if (input.channelActivity.activity.hasActiveRun) {
     return {
       type: "reject",
       message:
         "OpenCode is busy in this channel right now. Wait for the current run to finish or use /interrupt before starting a fresh session.",
     };
   }
-  if (input.hasIdleCompaction) {
+  if (input.channelActivity.activity.hasIdleCompaction) {
     return {
       type: "reject",
       message:
         "OpenCode is compacting this channel right now. Wait for compaction to finish or use /interrupt before starting a fresh session.",
     };
   }
-  if (input.hasQueuedWork) {
+  if (input.channelActivity.activity.hasQueuedWork) {
     return {
       type: "reject",
       message:
         "OpenCode still has queued work for this channel. Wait for it to finish before starting a fresh session.",
     };
   }
-  if (input.hasOtherBusyState) {
+  if (input.channelActivity.activity.isBusy) {
     return {
       type: "reject",
       message: NEW_SESSION_BUSY_MESSAGE,
