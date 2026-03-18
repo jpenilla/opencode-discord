@@ -1,8 +1,8 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import type { Message } from "discord.js";
-import { Deferred, Effect, Queue, Ref } from "effect";
+import type { Interaction, Message, SendableChannels } from "discord.js";
+import { Deferred, Effect, Queue, Ref, ServiceMap } from "effect";
 
 import { buildSessionSystemAppend } from "@/discord/system-context.ts";
 import type { OpencodeServiceShape, SessionHandle } from "@/opencode/service.ts";
@@ -34,6 +34,50 @@ export type SessionContext = {
   session: ChannelSession;
   activeRun: ActiveRun | null;
 };
+
+export type SessionActivity = {
+  hasActiveRun: boolean;
+  hasPendingQuestions: boolean;
+  hasIdleCompaction: boolean;
+  hasQueuedWork: boolean;
+  isBusy: boolean;
+};
+
+export type ChannelActivity =
+  | { type: "missing" }
+  | {
+      type: "present";
+      session: ChannelSession;
+      activity: SessionActivity;
+    };
+
+export type SessionRuntimeShape = {
+  getLoaded: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
+  getOrRestore: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
+  readSessionActivity: (session: ChannelSession) => Effect.Effect<SessionActivity, unknown>;
+  readLoadedChannelActivity: (channelId: string) => Effect.Effect<ChannelActivity, unknown>;
+  readRestoredChannelActivity: (channelId: string) => Effect.Effect<ChannelActivity, unknown>;
+  getUsableSession: (message: Message, reason: string) => Effect.Effect<ChannelSession, unknown>;
+  getActiveRunBySessionId: (sessionId: string) => Effect.Effect<ActiveRun | null, unknown>;
+  routeQuestionInteraction: (interaction: Interaction) => Effect.Effect<void, unknown>;
+  invalidate: (channelId: string, reason: string) => Effect.Effect<boolean, unknown>;
+  attachProgressChannel: (
+    session: ChannelSession,
+    channel: SendableChannels,
+  ) => Effect.Effect<void>;
+  setChannelSettings: (session: ChannelSession, settings: ChannelSettings) => Effect.Effect<void>;
+  setRunInterruptRequested: (
+    activeRun: ActiveRun,
+    requested: boolean,
+    source?: "user" | "shutdown" | null,
+  ) => Effect.Effect<void>;
+  isShuttingDown: () => Effect.Effect<boolean>;
+  shutdown: () => Effect.Effect<void, unknown>;
+};
+
+export class SessionRuntime extends ServiceMap.Service<SessionRuntime, SessionRuntimeShape>()(
+  "SessionRuntime",
+) {}
 
 type SessionGateDecision = {
   gate: SessionGate;
@@ -684,4 +728,82 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     closeExpiredSessions,
     shutdownSessions,
   } as const;
+};
+
+export const makeSessionRuntime = (deps: {
+  getLoaded: SessionRuntimeShape["getLoaded"];
+  getOrRestore: SessionRuntimeShape["getOrRestore"];
+  getUsableSession: SessionRuntimeShape["getUsableSession"];
+  getActiveRunBySessionId: SessionRuntimeShape["getActiveRunBySessionId"];
+  routeQuestionInteraction: SessionRuntimeShape["routeQuestionInteraction"];
+  invalidate: SessionRuntimeShape["invalidate"];
+  isSessionBusy: (session: ChannelSession) => Effect.Effect<boolean, unknown>;
+  hasPendingQuestions: (sessionId: string) => Effect.Effect<boolean, unknown>;
+  hasIdleCompaction: (sessionId: string) => Effect.Effect<boolean, unknown>;
+  isShuttingDown: SessionRuntimeShape["isShuttingDown"];
+  shutdown: SessionRuntimeShape["shutdown"];
+}): SessionRuntimeShape => {
+  const readSessionActivity: SessionRuntimeShape["readSessionActivity"] = (session) =>
+    Effect.all({
+      hasPendingQuestions: deps.hasPendingQuestions(session.opencode.sessionId),
+      hasIdleCompaction: deps.hasIdleCompaction(session.opencode.sessionId),
+      hasQueuedWork: Queue.size(session.queue).pipe(Effect.map((size) => size > 0)),
+      isBusy: deps.isSessionBusy(session),
+    }).pipe(
+      Effect.map(
+        ({ hasPendingQuestions, hasIdleCompaction, hasQueuedWork, isBusy }) =>
+          ({
+            hasActiveRun: Boolean(session.activeRun),
+            hasPendingQuestions,
+            hasIdleCompaction,
+            hasQueuedWork,
+            isBusy,
+          }) satisfies SessionActivity,
+      ),
+    );
+
+  const toChannelActivity = (
+    session: ChannelSession | null,
+  ): Effect.Effect<ChannelActivity, unknown> =>
+    !session
+      ? Effect.succeed({ type: "missing" } satisfies ChannelActivity)
+      : readSessionActivity(session).pipe(
+          Effect.map(
+            (activity) =>
+              ({
+                type: "present",
+                session,
+                activity,
+              }) satisfies ChannelActivity,
+          ),
+        );
+
+  return {
+    getLoaded: deps.getLoaded,
+    getOrRestore: deps.getOrRestore,
+    readSessionActivity,
+    readLoadedChannelActivity: (channelId) =>
+      deps.getLoaded(channelId).pipe(Effect.flatMap(toChannelActivity)),
+    readRestoredChannelActivity: (channelId) =>
+      deps.getOrRestore(channelId).pipe(Effect.flatMap(toChannelActivity)),
+    getUsableSession: deps.getUsableSession,
+    getActiveRunBySessionId: deps.getActiveRunBySessionId,
+    routeQuestionInteraction: deps.routeQuestionInteraction,
+    invalidate: deps.invalidate,
+    attachProgressChannel: (session, channel) =>
+      Effect.sync(() => {
+        session.progressChannel = channel;
+      }),
+    setChannelSettings: (session, settings) =>
+      Effect.sync(() => {
+        session.channelSettings = settings;
+      }),
+    setRunInterruptRequested: (activeRun, requested, source = requested ? "user" : null) =>
+      Effect.sync(() => {
+        activeRun.interruptRequested = requested;
+        activeRun.interruptSource = requested ? source : null;
+      }),
+    isShuttingDown: deps.isShuttingDown,
+    shutdown: deps.shutdown,
+  };
 };

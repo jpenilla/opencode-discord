@@ -6,7 +6,7 @@ import {
   decideCompactEntry,
   GUILD_TEXT_COMMAND_ONLY_MESSAGE,
 } from "@/sessions/command-lifecycle.ts";
-import { SessionControl } from "@/sessions/session-control.ts";
+import { SessionRuntime } from "@/sessions/session-runtime.ts";
 import { defineGuildCommand } from "./definition.ts";
 
 export const compactCommand = defineGuildCommand({
@@ -14,7 +14,7 @@ export const compactCommand = defineGuildCommand({
   description: "Compact the current OpenCode session in this channel",
   execute: Effect.gen(function* () {
     const context = yield* CommandContext;
-    const sessionControl = yield* SessionControl;
+    const sessionRuntime = yield* SessionRuntime;
     const idleCompaction = yield* IdleCompactionWorkflow;
 
     if (!context.inGuildTextChannel || !context.guildTextChannel) {
@@ -22,7 +22,7 @@ export const compactCommand = defineGuildCommand({
       return;
     }
 
-    const channelActivity = yield* sessionControl.readRestoredChannelActivity(context.channelId);
+    const channelActivity = yield* sessionRuntime.readRestoredChannelActivity(context.channelId);
     const entry = decideCompactEntry({
       channelActivity,
     });
@@ -35,7 +35,7 @@ export const compactCommand = defineGuildCommand({
     }
 
     yield* context.ack();
-    yield* sessionControl.attachProgressChannel(channelActivity.session, context.guildTextChannel!);
+    yield* sessionRuntime.attachProgressChannel(channelActivity.session, context.guildTextChannel!);
     const result = yield* idleCompaction.start({
       session: channelActivity.session,
       channel: context.guildTextChannel!,

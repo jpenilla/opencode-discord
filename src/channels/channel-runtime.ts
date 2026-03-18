@@ -2,6 +2,7 @@ import { Effect, FiberSet, Layer, Option, Queue, Ref, ServiceMap } from "effect"
 import { type Interaction, type Message, type SendableChannels } from "discord.js";
 
 import { AppConfig } from "@/config.ts";
+import { createCommandHandler } from "@/sessions/command-handler.ts";
 import { InfoCards, makeInfoCards } from "@/discord/info-cards.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import {
@@ -10,10 +11,9 @@ import {
   sendFinalResponse,
   startTypingLoop,
 } from "@/discord/messages.ts";
-import { OpencodeEventQueue } from "@/opencode/events.ts";
 import type { Invocation } from "@/discord/triggers.ts";
+import { OpencodeEventQueue } from "@/opencode/events.ts";
 import { OpencodeService } from "@/opencode/service.ts";
-import { createCommandHandler } from "@/sessions/command-handler.ts";
 import {
   IdleCompactionWorkflow,
   type IdleCompactionWorkflowShape,
@@ -31,11 +31,13 @@ import { makeQuestionRuntime, type QuestionRuntime } from "@/sessions/question-r
 import { enqueueRunRequest } from "@/sessions/request-routing.ts";
 import { executeRunBatch } from "@/sessions/run-executor.ts";
 import { takeQueuedRunBatch } from "@/sessions/run-batch.ts";
-import { SessionControl, makeSessionControl } from "@/sessions/session-control.ts";
 import {
   createSessionLifecycle,
+  makeSessionRuntime,
+  SessionRuntime,
   type SessionLifecycleState,
-} from "@/sessions/session-lifecycle.ts";
+  type SessionRuntimeShape,
+} from "@/sessions/session-runtime.ts";
 import { createSessionShutdown } from "@/sessions/session-shutdown.ts";
 import { type ActiveRun, type ChannelSession, type RunRequest } from "@/sessions/session.ts";
 import { defaultChannelSettings } from "@/state/channel-settings.ts";
@@ -44,37 +46,35 @@ import { Logger } from "@/util/logging.ts";
 import { resolveStatePaths } from "@/state/paths.ts";
 import { SessionStore } from "@/state/store.ts";
 
-export type SessionOrchestratorShape = {
+export type ChannelRuntimeShape = {
   submit: (message: Message, invocation: Invocation) => Effect.Effect<void, unknown>;
-  getActiveRunBySessionId: (sessionId: string) => Effect.Effect<ActiveRun | null>;
+  getActiveRunBySessionId: (sessionId: string) => Effect.Effect<ActiveRun | null, unknown>;
   handleInteraction: (interaction: Interaction) => Effect.Effect<void, unknown>;
   shutdown: () => Effect.Effect<void, unknown>;
 };
 
-export class SessionOrchestrator extends ServiceMap.Service<
-  SessionOrchestrator,
-  SessionOrchestratorShape
->()("SessionOrchestrator") {}
+export class ChannelRuntime extends ServiceMap.Service<ChannelRuntime, ChannelRuntimeShape>()(
+  "ChannelRuntime",
+) {}
 type FallibleEffect<A> = Effect.Effect<A, unknown>;
 
-type SessionOrchestratorState = SessionLifecycleState;
+type ChannelRuntimeState = SessionLifecycleState;
 
-const createSessionOrchestratorState = (): SessionOrchestratorState => ({
+const createChannelRuntimeState = (): ChannelRuntimeState => ({
   sessionsByChannelId: new Map(),
   sessionsBySessionId: new Map(),
   activeRunsBySessionId: new Map(),
   gatesByChannelId: new Map(),
 });
 
-export const SessionOrchestratorLayer = Layer.effect(
-  SessionOrchestrator,
+export const ChannelRuntimeLayer = Layer.unwrap(
   Effect.gen(function* () {
     const logger = yield* Logger;
     const config = yield* AppConfig;
     const opencode = yield* OpencodeService;
     const eventQueue = yield* OpencodeEventQueue;
     const sessionStore = yield* SessionStore;
-    const stateRef = yield* Ref.make(createSessionOrchestratorState());
+    const stateRef = yield* Ref.make(createChannelRuntimeState());
     const shutdownStartedRef = yield* Ref.make(false);
     const questionTypingPausedRef = yield* Ref.make(new Set<string>());
     const fiberSet = yield* FiberSet.make();
@@ -287,24 +287,6 @@ export const SessionOrchestratorLayer = Layer.effect(
       Layer.succeed(OpencodeService, opencode),
     );
     idleCompactionWorkflow = yield* makeIdleCompactionWorkflow().pipe(Effect.provide(serviceLayer));
-    const sessionControl = makeSessionControl({
-      getLoaded: (channelId) =>
-        getSession(channelId).pipe(Effect.map((session) => session ?? null)),
-      getOrRestore: getOrRestoreSession,
-      invalidate: invalidateSession,
-      isSessionBusy,
-      hasPendingQuestions,
-      hasIdleCompaction: (sessionId) => idleCompactionWorkflow.hasActive(sessionId),
-    });
-    const commandLayer = Layer.mergeAll(
-      Layer.succeed(AppConfig, config),
-      Layer.succeed(IdleCompactionWorkflow, idleCompactionWorkflow),
-      Layer.succeed(InfoCards, infoCards),
-      Layer.succeed(OpencodeService, opencode),
-      Layer.succeed(SessionControl, sessionControl),
-      Layer.succeed(SessionStore, sessionStore),
-      Layer.succeed(Logger, logger),
-    );
 
     const eventHandler = createEventHandler({
       getSessionContext,
@@ -411,10 +393,6 @@ export const SessionOrchestratorLayer = Layer.effect(
         ),
       );
 
-    const commandHandler = createCommandHandler({
-      commandLayer,
-    });
-
     const getUsableSession = (message: Message, reason: string): FallibleEffect<ChannelSession> =>
       createOrGetSession(message).pipe(
         Effect.flatMap((session) => ensureSessionHealth(session, message, reason)),
@@ -424,7 +402,7 @@ export const SessionOrchestratorLayer = Layer.effect(
       Ref.modify(shutdownStartedRef, (started): readonly [boolean, boolean] =>
         started ? [false, true] : [true, true],
       );
-    const shutdown: SessionOrchestratorShape["shutdown"] = createSessionShutdown({
+    const shutdown: ChannelRuntimeShape["shutdown"] = createSessionShutdown({
       startShutdown,
       getState: () => Ref.get(stateRef),
       questionRuntime,
@@ -437,10 +415,37 @@ export const SessionOrchestratorLayer = Layer.effect(
       shutdownSessions,
       formatError,
     });
-
-    return {
+    const isShuttingDown: SessionRuntimeShape["isShuttingDown"] = () => Ref.get(shutdownStartedRef);
+    const sessionRuntime = makeSessionRuntime({
+      getLoaded: (channelId) =>
+        getSession(channelId).pipe(Effect.map((session) => session ?? null)),
+      getOrRestore: getOrRestoreSession,
+      getUsableSession,
+      getActiveRunBySessionId,
+      routeQuestionInteraction: (interaction) =>
+        routeQuestionInteraction(interaction).pipe(Effect.asVoid),
+      invalidate: invalidateSession,
+      isSessionBusy,
+      hasPendingQuestions,
+      hasIdleCompaction: (sessionId) => idleCompactionWorkflow.hasActive(sessionId),
+      isShuttingDown,
+      shutdown,
+    });
+    const commandLayer = Layer.mergeAll(
+      Layer.succeed(AppConfig, config),
+      Layer.succeed(IdleCompactionWorkflow, idleCompactionWorkflow),
+      Layer.succeed(InfoCards, infoCards),
+      Layer.succeed(OpencodeService, opencode),
+      Layer.succeed(SessionRuntime, sessionRuntime),
+      Layer.succeed(SessionStore, sessionStore),
+      Layer.succeed(Logger, logger),
+    );
+    const commandHandler = createCommandHandler({
+      commandLayer,
+    });
+    const channelRuntime = {
       submit: (message, invocation): FallibleEffect<void> =>
-        Ref.get(shutdownStartedRef).pipe(
+        isShuttingDown().pipe(
           Effect.flatMap((shutdownStarted) =>
             shutdownStarted
               ? Effect.void
@@ -448,7 +453,7 @@ export const SessionOrchestratorLayer = Layer.effect(
                   Effect.sync(() => startTypingLoop(message.channel)),
                   () =>
                     Effect.gen(function* () {
-                      const session = yield* getUsableSession(
+                      const session = yield* sessionRuntime.getUsableSession(
                         message,
                         "health probe failed before queueing run",
                       );
@@ -493,20 +498,26 @@ export const SessionOrchestratorLayer = Layer.effect(
         ),
       getActiveRunBySessionId,
       handleInteraction: (interaction) =>
-        Ref.get(shutdownStartedRef).pipe(
+        isShuttingDown().pipe(
           Effect.flatMap((shutdownStarted) =>
-            interaction.isChatInputCommand()
-              ? shutdownStarted
-                ? Effect.void
-                : commandHandler.handleInteraction(interaction)
-              : interaction.isButton() ||
-                  interaction.isStringSelectMenu() ||
-                  interaction.isModalSubmit()
-                ? routeQuestionInteraction(interaction)
-                : Effect.void,
+            shutdownStarted
+              ? Effect.void
+              : interaction.isChatInputCommand()
+                ? commandHandler.handleInteraction(interaction)
+                : interaction.isButton() ||
+                    interaction.isStringSelectMenu() ||
+                    interaction.isModalSubmit()
+                  ? sessionRuntime.routeQuestionInteraction(interaction)
+                  : Effect.void,
           ),
         ),
       shutdown,
-    } satisfies SessionOrchestratorShape;
+    } satisfies ChannelRuntimeShape;
+
+    return Layer.mergeAll(
+      Layer.succeed(IdleCompactionWorkflow, idleCompactionWorkflow),
+      Layer.succeed(SessionRuntime, sessionRuntime),
+      Layer.succeed(ChannelRuntime, channelRuntime),
+    );
   }),
 );

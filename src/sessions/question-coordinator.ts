@@ -29,7 +29,7 @@ import {
   terminateQuestionBatch,
   type QuestionWorkflowBatch,
 } from "@/sessions/question-workflow-state.ts";
-import type { SessionContext } from "@/sessions/session-lifecycle.ts";
+import type { SessionContext } from "@/sessions/session-runtime.ts";
 import {
   currentPromptReplyTargetMessage,
   questionUiFailureOutcome,

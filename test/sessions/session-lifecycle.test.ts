@@ -3,10 +3,7 @@ import { ChannelType, type Message } from "discord.js";
 import { Deferred, Effect, Fiber, Ref } from "effect";
 
 import type { SessionHandle } from "@/opencode/service.ts";
-import {
-  createSessionLifecycle,
-  type SessionLifecycleState,
-} from "@/sessions/session-lifecycle.ts";
+import { createSessionLifecycle, type SessionLifecycleState } from "@/sessions/session-runtime.ts";
 import type { ActiveRun } from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import type { PersistedChannelSession } from "@/state/store.ts";

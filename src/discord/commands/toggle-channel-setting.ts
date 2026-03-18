@@ -9,7 +9,7 @@ import {
   type PersistedChannelSettings,
 } from "@/state/channel-settings.ts";
 import { GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/sessions/command-lifecycle.ts";
-import { SessionControl } from "@/sessions/session-control.ts";
+import { SessionRuntime } from "@/sessions/session-runtime.ts";
 import { SessionStore } from "@/state/store.ts";
 
 import { defineGuildCommand } from "./definition.ts";
@@ -53,7 +53,7 @@ const defineChannelSettingToggleCommand = <
     execute: Effect.gen(function* () {
       const context = yield* CommandContext;
       const config = yield* AppConfig;
-      const sessionControl = yield* SessionControl;
+      const sessionRuntime = yield* SessionRuntime;
       const sessionStore = yield* SessionStore;
 
       if (!context.inGuildTextChannel) {
@@ -70,9 +70,9 @@ const defineChannelSettingToggleCommand = <
       next.channelId = context.channelId;
       yield* sessionStore.upsertChannelSettings(next);
 
-      const session = yield* sessionControl.getLoaded(context.channelId);
+      const session = yield* sessionRuntime.getLoaded(context.channelId);
       if (session) {
-        yield* sessionControl.setChannelSettings(session, resolved);
+        yield* sessionRuntime.setChannelSettings(session, resolved);
       }
 
       yield* context.complete(
