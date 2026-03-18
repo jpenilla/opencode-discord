@@ -1,7 +1,7 @@
 import type { ChannelActivity } from "@/sessions/session-runtime.ts";
-import type { QuestionOutcome } from "@/sessions/session.ts";
 
 export type CommandRejection = { type: "reject"; message: string };
+
 export const GUILD_TEXT_COMMAND_ONLY_MESSAGE =
   "This command only works in standard guild text channels.";
 export const QUESTION_PENDING_INTERRUPT_MESSAGE =
@@ -102,27 +102,4 @@ export const decideNewSessionEntry = (input: {
     };
   }
   return { type: "defer-and-invalidate" };
-};
-
-export const decideRunCompletion = (input: {
-  transcript: string;
-  questionOutcome: QuestionOutcome;
-  interruptRequested: boolean;
-}):
-  | { type: "send-final-response" }
-  | { type: "send-question-ui-failure"; message: string }
-  | { type: "suppress-response" } => {
-  if (input.transcript.trim()) {
-    return { type: "send-final-response" };
-  }
-  if (input.questionOutcome._tag === "ui-failure" && !input.questionOutcome.notified) {
-    return {
-      type: "send-question-ui-failure",
-      message: input.questionOutcome.message,
-    };
-  }
-  if (input.interruptRequested || input.questionOutcome._tag === "user-rejected") {
-    return { type: "suppress-response" };
-  }
-  return { type: "send-final-response" };
 };

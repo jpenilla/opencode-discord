@@ -8,7 +8,7 @@ import {
   resolveChannelSettings,
   type PersistedChannelSettings,
 } from "@/state/channel-settings.ts";
-import { GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/sessions/command-lifecycle.ts";
+import { GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/channels/command-policy.ts";
 import { SessionRuntime } from "@/sessions/session-runtime.ts";
 import { SessionStore } from "@/state/store.ts";
 

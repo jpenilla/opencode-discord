@@ -15,6 +15,7 @@ import { Deferred, Effect, Fiber, Layer, Queue, Redacted, Ref } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
 import { ChannelRuntime, ChannelRuntimeLayer } from "@/channels/channel-runtime.ts";
+import { QUESTION_PENDING_INTERRUPT_MESSAGE } from "@/channels/command-policy.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { InfoCardsLayer } from "@/discord/info-cards.ts";
 import {
@@ -30,7 +31,6 @@ import {
   type PromptResult,
   type SessionHandle,
 } from "@/opencode/service.ts";
-import { QUESTION_PENDING_INTERRUPT_MESSAGE } from "@/sessions/command-lifecycle.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import {
   SessionStore,

@@ -6,10 +6,9 @@ import {
   decideInterruptEntry,
   decideNewSessionEntry,
   NEW_SESSION_BUSY_MESSAGE,
-  QUESTION_PENDING_NEW_SESSION_MESSAGE,
-  decideRunCompletion,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
-} from "@/sessions/command-lifecycle.ts";
+  QUESTION_PENDING_NEW_SESSION_MESSAGE,
+} from "@/channels/command-policy.ts";
 
 const missingChannelActivity = { type: "missing" } as const;
 
@@ -238,7 +237,7 @@ describe("decideNewSessionEntry", () => {
           hasPendingQuestions: false,
           hasIdleCompaction: false,
           hasQueuedWork: true,
-          isBusy: false,
+          isBusy: true,
         }),
       }),
     ).toEqual({
@@ -271,57 +270,5 @@ describe("decideNewSessionEntry", () => {
         channelActivity: missingChannelActivity,
       }),
     ).toEqual({ type: "defer-and-invalidate" });
-  });
-});
-
-describe("decideRunCompletion", () => {
-  test("sends the final response when transcript content is present", () => {
-    expect(
-      decideRunCompletion({
-        transcript: "hello",
-        questionOutcome: { _tag: "none" },
-        interruptRequested: true,
-      }),
-    ).toEqual({ type: "send-final-response" });
-  });
-
-  test("sends question UI failure when transcript is empty and the UI failure was not notified", () => {
-    expect(
-      decideRunCompletion({
-        transcript: "   ",
-        questionOutcome: { _tag: "ui-failure", message: "boom", notified: false },
-        interruptRequested: false,
-      }),
-    ).toEqual({ type: "send-question-ui-failure", message: "boom" });
-  });
-
-  test("suppresses empty interrupted runs", () => {
-    expect(
-      decideRunCompletion({
-        transcript: "",
-        questionOutcome: { _tag: "none" },
-        interruptRequested: true,
-      }),
-    ).toEqual({ type: "suppress-response" });
-  });
-
-  test("suppresses empty user-rejected question runs", () => {
-    expect(
-      decideRunCompletion({
-        transcript: "",
-        questionOutcome: { _tag: "user-rejected" },
-        interruptRequested: false,
-      }),
-    ).toEqual({ type: "suppress-response" });
-  });
-
-  test("sends the final response for empty normal runs", () => {
-    expect(
-      decideRunCompletion({
-        transcript: "",
-        questionOutcome: { _tag: "none" },
-        interruptRequested: false,
-      }),
-    ).toEqual({ type: "send-final-response" });
   });
 });

@@ -2,7 +2,7 @@ import { Effect, Layer, Ref, ServiceMap } from "effect";
 import { type Interaction, type Message } from "discord.js";
 
 import { AppConfig } from "@/config.ts";
-import { createCommandHandler } from "@/sessions/command-handler.ts";
+import { createCommandHandler } from "@/channels/command-handler.ts";
 import { InfoCards } from "@/discord/info-cards.ts";
 import { buildOpencodePrompt, promptMessageContext, startTypingLoop } from "@/discord/messages.ts";
 import type { Invocation } from "@/discord/triggers.ts";
