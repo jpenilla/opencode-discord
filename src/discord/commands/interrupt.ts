@@ -8,7 +8,6 @@ import {
   GUILD_TEXT_COMMAND_ONLY_MESSAGE,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
 } from "@/sessions/command-lifecycle.ts";
-import { QuestionStatus } from "@/sessions/question-status.ts";
 import { SessionControl } from "@/sessions/session-control.ts";
 import { formatError } from "@/util/errors.ts";
 import { defineGuildCommand } from "./definition.ts";
@@ -20,7 +19,6 @@ export const interruptCommand = defineGuildCommand({
     const context = yield* CommandContext;
     const sessionControl = yield* SessionControl;
     const idleCompaction = yield* IdleCompactionWorkflow;
-    const questionStatus = yield* QuestionStatus;
     const opencode = yield* OpencodeService;
 
     if (!context.inGuildTextChannel) {
@@ -35,7 +33,7 @@ export const interruptCommand = defineGuildCommand({
     }
 
     if (session.activeRun) {
-      const hasPendingQuestions = yield* questionStatus.hasPendingQuestions(
+      const hasPendingQuestions = yield* sessionControl.hasPendingQuestions(
         session.opencode.sessionId,
       );
       if (hasPendingQuestions) {
@@ -60,7 +58,7 @@ export const interruptCommand = defineGuildCommand({
         return;
       }
 
-      const hasPendingQuestionsAfterInterrupt = yield* questionStatus.hasPendingQuestions(
+      const hasPendingQuestionsAfterInterrupt = yield* sessionControl.hasPendingQuestions(
         session.opencode.sessionId,
       );
       if (hasPendingQuestionsAfterInterrupt) {

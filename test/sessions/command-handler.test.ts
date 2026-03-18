@@ -24,7 +24,6 @@ import {
   SessionControl,
   type SessionControlShape,
 } from "@/sessions/session-control.ts";
-import { makeQuestionStatus, QuestionStatus } from "@/sessions/question-status.ts";
 import {
   noQuestionOutcome,
   type ActiveRun,
@@ -89,7 +88,6 @@ const makeCommandsLayer = (deps: {
   idleCompaction: IdleCompactionWorkflowShape;
   infoCards: InfoCardsShape;
   opencode: OpencodeServiceShape;
-  questionStatus: ReturnType<typeof makeQuestionStatus>;
   sessionStore: SessionStoreShape;
   logger: LoggerShape;
   channelSettingsDefaults: { showThinking: boolean; showCompactionSummaries: boolean };
@@ -100,7 +98,6 @@ const makeCommandsLayer = (deps: {
     Layer.succeed(IdleCompactionWorkflow, deps.idleCompaction),
     Layer.succeed(InfoCards, deps.infoCards),
     Layer.succeed(OpencodeService, deps.opencode),
-    Layer.succeed(QuestionStatus, deps.questionStatus),
     Layer.succeed(SessionStore, deps.sessionStore),
     Layer.succeed(Logger, deps.logger),
   );
@@ -233,6 +230,16 @@ const makeHarness = async (options?: HarnessOptions) => {
           current && current.channelId === channelId ? null : current,
         );
       }),
+    hasPendingQuestions: () =>
+      Ref.updateAndGet(pendingQuestionCheckCount, (count) => count + 1).pipe(
+        Effect.map((count) => {
+          const sequence = options?.hasPendingQuestionsSequence;
+          if (sequence && sequence.length > 0) {
+            return sequence[Math.min(count - 1, sequence.length - 1)] ?? false;
+          }
+          return options?.hasPendingQuestions ?? false;
+        }),
+      ),
   });
 
   const infoCards: InfoCardsShape = {
@@ -288,18 +295,6 @@ const makeHarness = async (options?: HarnessOptions) => {
     isHealthy: () => Effect.succeed(true),
   };
 
-  const questionStatus = makeQuestionStatus(() =>
-    Ref.updateAndGet(pendingQuestionCheckCount, (count) => count + 1).pipe(
-      Effect.map((count) => {
-        const sequence = options?.hasPendingQuestionsSequence;
-        if (sequence && sequence.length > 0) {
-          return sequence[Math.min(count - 1, sequence.length - 1)] ?? false;
-        }
-        return options?.hasPendingQuestions ?? false;
-      }),
-    ),
-  );
-
   const sessionStore: SessionStoreShape = {
     getSession: () => Effect.succeed<PersistedChannelSession | null>(null),
     upsertSession: () => Effect.void,
@@ -317,6 +312,7 @@ const makeHarness = async (options?: HarnessOptions) => {
 
   const idleCompactionWorkflow: IdleCompactionWorkflowShape = {
     hasActive: () => Ref.get(idleCompactionActive),
+    awaitCompletion: () => Effect.void,
     start: ({ channel }: { session: ChannelSession; channel: SendableChannels }) =>
       Effect.gen(function* () {
         if (options?.sessionHealthy === false) {
@@ -401,7 +397,6 @@ const makeHarness = async (options?: HarnessOptions) => {
     idleCompaction: idleCompactionWorkflow,
     infoCards,
     opencode: opencodeService,
-    questionStatus,
     sessionStore,
     logger,
     channelSettingsDefaults: channelSettingsDefaults,
