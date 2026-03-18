@@ -1,7 +1,6 @@
 import { Effect } from "effect";
 
 import { CommandContext } from "@/discord/commands/command-context.ts";
-import { IdleCompactionWorkflow } from "@/sessions/idle-compaction-workflow.ts";
 import {
   decideCompactEntry,
   GUILD_TEXT_COMMAND_ONLY_MESSAGE,
@@ -15,7 +14,6 @@ export const compactCommand = defineGuildCommand({
   execute: Effect.gen(function* () {
     const context = yield* CommandContext;
     const sessionRuntime = yield* SessionRuntime;
-    const idleCompaction = yield* IdleCompactionWorkflow;
 
     if (!context.inGuildTextChannel || !context.guildTextChannel) {
       yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
@@ -35,11 +33,10 @@ export const compactCommand = defineGuildCommand({
     }
 
     yield* context.ack();
-    yield* sessionRuntime.attachProgressChannel(channelActivity.session, context.guildTextChannel!);
-    const result = yield* idleCompaction.start({
-      session: channelActivity.session,
-      channel: context.guildTextChannel!,
-    });
+    const result = yield* sessionRuntime.startCompaction(
+      channelActivity.session,
+      context.guildTextChannel!,
+    );
 
     if (result.type === "rejected") {
       yield* context.complete(result.message);

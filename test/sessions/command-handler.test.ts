@@ -18,7 +18,6 @@ import {
 } from "@/sessions/command-lifecycle.ts";
 import { createPromptState } from "@/sessions/prompt-state.ts";
 import {
-  IdleCompactionWorkflow,
   type IdleCompactionWorkflowShape,
   type IdleCompactionWorkflowInterruptResult,
   type IdleCompactionWorkflowStartResult,
@@ -34,12 +33,6 @@ import {
   type ChannelSession,
   type RunRequest,
 } from "@/sessions/session.ts";
-import {
-  OpencodeService,
-  type OpencodeServiceShape,
-  type PromptResult,
-  type SessionHandle,
-} from "@/opencode/service.ts";
 import {
   SessionStore,
   type PersistedChannelSession,
@@ -91,9 +84,7 @@ type HarnessOptions = {
 
 const makeCommandsLayer = (deps: {
   sessionRuntime: SessionRuntimeShape;
-  idleCompaction: IdleCompactionWorkflowShape;
   infoCards: InfoCardsShape;
-  opencode: OpencodeServiceShape;
   sessionStore: SessionStoreShape;
   logger: LoggerShape;
   channelSettingsDefaults: { showThinking: boolean; showCompactionSummaries: boolean };
@@ -101,9 +92,7 @@ const makeCommandsLayer = (deps: {
   Layer.mergeAll(
     Layer.succeed(AppConfig, makeConfig(deps.channelSettingsDefaults)),
     Layer.succeed(SessionRuntime, deps.sessionRuntime),
-    Layer.succeed(IdleCompactionWorkflow, deps.idleCompaction),
     Layer.succeed(InfoCards, deps.infoCards),
-    Layer.succeed(OpencodeService, deps.opencode),
     Layer.succeed(SessionStore, deps.sessionStore),
     Layer.succeed(Logger, deps.logger),
   );
@@ -242,6 +231,22 @@ const makeHarness = async (options?: HarnessOptions) => {
         );
         return true;
       }),
+    updateLoadedChannelSettings: (channelId, settings) =>
+      Ref.update(sessionRef, (current) => {
+        if (current && current.channelId === channelId) {
+          current.channelSettings = settings;
+        }
+        return current;
+      }),
+    interruptSession: () =>
+      options?.interruptResult === "failure"
+        ? Effect.fail(new Error("interrupt failed"))
+        : Effect.void,
+    setRunInterruptRequested: (currentActiveRun, requested, source = requested ? "user" : null) =>
+      Effect.sync(() => {
+        currentActiveRun.interruptRequested = requested;
+        currentActiveRun.interruptSource = requested ? source : null;
+      }),
     isSessionBusy: (currentSession) =>
       Ref.get(idleCompactionActive).pipe(
         Effect.map(
@@ -263,10 +268,13 @@ const makeHarness = async (options?: HarnessOptions) => {
         }),
       ),
     hasIdleCompaction: () => Ref.get(idleCompactionActive),
-    getUsableSession: () => Effect.fail(new Error("unused in command tests")),
     getActiveRunBySessionId: () => Effect.succeed(null),
+    queueMessageRunRequest: () => Effect.fail(new Error("unused in command tests")),
     routeQuestionInteraction: () => Effect.void,
-    isShuttingDown: () => Effect.succeed(false),
+    startCompaction: (currentSession, channel) =>
+      idleCompactionWorkflow.start({ session: currentSession, channel }),
+    requestCompactionInterrupt: (currentSession) =>
+      idleCompactionWorkflow.requestInterrupt({ session: currentSession }),
     shutdown: () => Effect.void,
   });
 
@@ -302,25 +310,6 @@ const makeHarness = async (options?: HarnessOptions) => {
     info: () => Effect.void,
     warn: (message) => Ref.update(warnings, (current) => [...current, message]),
     error: () => Effect.void,
-  };
-
-  const opencodeService: OpencodeServiceShape = {
-    createSession: () => Effect.succeed(session.opencode satisfies SessionHandle),
-    attachSession: () => Effect.succeed(session.opencode satisfies SessionHandle),
-    submitPrompt: () => Effect.void,
-    readPromptResult: () =>
-      Effect.succeed({
-        messageId: "prompt-result",
-        transcript: "",
-      } satisfies PromptResult),
-    interruptSession: () =>
-      options?.interruptResult === "failure"
-        ? Effect.fail(new Error("interrupt failed"))
-        : Effect.void,
-    compactSession: () => Effect.void,
-    replyToQuestion: () => Effect.void,
-    rejectQuestion: () => Effect.void,
-    isHealthy: () => Effect.succeed(true),
   };
 
   const sessionStore: SessionStoreShape = {
@@ -422,9 +411,7 @@ const makeHarness = async (options?: HarnessOptions) => {
 
   const commandsLayer = makeCommandsLayer({
     sessionRuntime,
-    idleCompaction: idleCompactionWorkflow,
     infoCards,
-    opencode: opencodeService,
     sessionStore,
     logger,
     channelSettingsDefaults: channelSettingsDefaults,

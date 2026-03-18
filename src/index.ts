@@ -4,26 +4,47 @@ import { Deferred, Effect, Layer } from "effect";
 import { DiscordBotLayer } from "@/app.ts";
 import { ChannelRuntime, ChannelRuntimeLayer } from "@/channels/channel-runtime.ts";
 import { AppConfigLayer } from "@/config.ts";
+import { InfoCardsLayer } from "@/discord/info-cards.ts";
 import { OpencodeEventQueueLayer } from "@/opencode/events.ts";
 import { OpencodeServiceLayer } from "@/opencode/service.ts";
+import { SessionRuntimeLayer } from "@/sessions/session-runtime.ts";
 import { installShutdownSignalHandlers } from "@/shutdown/signals.ts";
 import { SessionStoreLayer } from "@/state/store.ts";
 import { ToolBridgeLayer } from "@/tools/bridge/server.ts";
 import { Logger, LoggerLayer } from "@/util/logging.ts";
 
 const baseLayer = Layer.mergeAll(AppConfigLayer, LoggerLayer, OpencodeEventQueueLayer);
+const uiLayer = InfoCardsLayer;
 
 const opencodeLayer = OpencodeServiceLayer.pipe(Layer.provide(baseLayer));
 const sessionStoreLayer = SessionStoreLayer.pipe(Layer.provide(AppConfigLayer));
-const sessionsDependenciesLayer = Layer.mergeAll(baseLayer, opencodeLayer, sessionStoreLayer);
-const channelRuntimeLayer = ChannelRuntimeLayer.pipe(Layer.provide(sessionsDependenciesLayer));
+const sessionDependenciesLayer = Layer.mergeAll(
+  baseLayer,
+  uiLayer,
+  opencodeLayer,
+  sessionStoreLayer,
+);
+const sessionRuntimeLayer = SessionRuntimeLayer.pipe(Layer.provide(sessionDependenciesLayer));
+const channelDependenciesLayer = Layer.mergeAll(
+  baseLayer,
+  uiLayer,
+  opencodeLayer,
+  sessionStoreLayer,
+  sessionRuntimeLayer,
+);
+const channelRuntimeLayer = ChannelRuntimeLayer.pipe(Layer.provide(channelDependenciesLayer));
 const startupDependenciesLayer = Layer.mergeAll(baseLayer, channelRuntimeLayer);
-const toolBridgeLayer = ToolBridgeLayer.pipe(Layer.provide(startupDependenciesLayer));
+const toolBridgeLayer = ToolBridgeLayer.pipe(
+  Layer.provide(Layer.mergeAll(baseLayer, sessionRuntimeLayer)),
+);
 const discordBotLayer = DiscordBotLayer.pipe(Layer.provide(startupDependenciesLayer));
 
 const appLayer = Layer.mergeAll(
   baseLayer,
+  uiLayer,
   opencodeLayer,
+  sessionStoreLayer,
+  sessionRuntimeLayer,
   channelRuntimeLayer,
   toolBridgeLayer,
   discordBotLayer,
