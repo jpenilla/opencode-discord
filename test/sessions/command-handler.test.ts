@@ -271,10 +271,28 @@ const makeHarness = async (options?: HarnessOptions) => {
     getActiveRunBySessionId: () => Effect.succeed(null),
     queueMessageRunRequest: () => Effect.fail(new Error("unused in command tests")),
     routeQuestionInteraction: () => Effect.void,
-    startCompaction: (currentSession, channel) =>
-      idleCompactionWorkflow.start({ session: currentSession, channel }),
-    requestCompactionInterrupt: (currentSession) =>
-      idleCompactionWorkflow.requestInterrupt({ session: currentSession }),
+    startCompaction: (channelId, channel) =>
+      Ref.get(sessionRef).pipe(
+        Effect.flatMap((currentSession) =>
+          !currentSession || currentSession.channelId !== channelId
+            ? Effect.succeed({
+                type: "rejected",
+                message: "No OpenCode session exists in this channel yet.",
+              } satisfies IdleCompactionWorkflowStartResult)
+            : idleCompactionWorkflow.start({ session: currentSession, channel }),
+        ),
+      ),
+    requestCompactionInterrupt: (channelId) =>
+      Ref.get(sessionRef).pipe(
+        Effect.flatMap((currentSession) =>
+          !currentSession || currentSession.channelId !== channelId
+            ? Effect.succeed({
+                type: "failed",
+                message: "No active OpenCode run or compaction is running in this channel.",
+              } satisfies IdleCompactionWorkflowInterruptResult)
+            : idleCompactionWorkflow.requestInterrupt({ session: currentSession }),
+        ),
+      ),
     shutdown: () => Effect.void,
   });
 

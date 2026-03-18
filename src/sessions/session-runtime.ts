@@ -75,7 +75,6 @@ export type ChannelActivity =
   | { type: "missing" }
   | {
       type: "present";
-      session: ChannelSession;
       activity: SessionActivity;
     };
 
@@ -90,7 +89,6 @@ export type RunInterruptRequestResult =
   | { type: "failed"; error: unknown };
 
 export type SessionRuntimeShape = {
-  readSessionActivity: (session: ChannelSession) => Effect.Effect<SessionActivity, unknown>;
   readLoadedChannelActivity: (channelId: string) => Effect.Effect<ChannelActivity, unknown>;
   readRestoredChannelActivity: (channelId: string) => Effect.Effect<ChannelActivity, unknown>;
   getActiveRunBySessionId: (sessionId: string) => Effect.Effect<ActiveRun | null, unknown>;
@@ -105,15 +103,13 @@ export type SessionRuntimeShape = {
     channelId: string,
     settings: ChannelSettings,
   ) => Effect.Effect<void>;
-  requestRunInterrupt: (
-    session: ChannelSession,
-  ) => Effect.Effect<RunInterruptRequestResult, unknown>;
+  requestRunInterrupt: (channelId: string) => Effect.Effect<RunInterruptRequestResult, unknown>;
   startCompaction: (
-    session: ChannelSession,
+    channelId: string,
     channel: SendableChannels,
   ) => Effect.Effect<IdleCompactionWorkflowStartResult, unknown>;
   requestCompactionInterrupt: (
-    session: ChannelSession,
+    channelId: string,
   ) => Effect.Effect<IdleCompactionWorkflowInterruptResult, unknown>;
   shutdown: () => Effect.Effect<void, unknown>;
 };
@@ -790,11 +786,16 @@ export const makeSessionRuntime = (deps: {
   isSessionBusy: (session: ChannelSession) => Effect.Effect<boolean, unknown>;
   hasPendingQuestions: (sessionId: string) => Effect.Effect<boolean, unknown>;
   hasIdleCompaction: (sessionId: string) => Effect.Effect<boolean, unknown>;
-  startCompaction: SessionRuntimeShape["startCompaction"];
-  requestCompactionInterrupt: SessionRuntimeShape["requestCompactionInterrupt"];
+  startCompaction: (
+    channelId: string,
+    channel: SendableChannels,
+  ) => Effect.Effect<IdleCompactionWorkflowStartResult, unknown>;
+  requestCompactionInterrupt: (
+    channelId: string,
+  ) => Effect.Effect<IdleCompactionWorkflowInterruptResult, unknown>;
   shutdown: SessionRuntimeShape["shutdown"];
 }): SessionRuntimeShape => {
-  const readSessionActivity: SessionRuntimeShape["readSessionActivity"] = (session) =>
+  const readSessionActivity = (session: ChannelSession): Effect.Effect<SessionActivity, unknown> =>
     Effect.all({
       hasPendingQuestions: deps.hasPendingQuestions(session.opencode.sessionId),
       hasIdleCompaction: deps.hasIdleCompaction(session.opencode.sessionId),
@@ -823,14 +824,12 @@ export const makeSessionRuntime = (deps: {
             (activity) =>
               ({
                 type: "present",
-                session,
                 activity,
               }) satisfies ChannelActivity,
           ),
         );
 
   return {
-    readSessionActivity,
     readLoadedChannelActivity: (channelId) =>
       deps.getLoaded(channelId).pipe(Effect.flatMap(toChannelActivity)),
     readRestoredChannelActivity: (channelId) =>
@@ -840,38 +839,47 @@ export const makeSessionRuntime = (deps: {
     routeQuestionInteraction: deps.routeQuestionInteraction,
     invalidate: deps.invalidate,
     updateLoadedChannelSettings: deps.updateLoadedChannelSettings,
-    requestRunInterrupt: (session) =>
-      Effect.gen(function* () {
-        const activeRun = session.activeRun;
-        if (!activeRun) {
-          return {
-            type: "failed",
-            error: new Error("no active run for session"),
-          } satisfies RunInterruptRequestResult;
-        }
+    requestRunInterrupt: (channelId) =>
+      deps.getOrRestore(channelId).pipe(
+        Effect.flatMap((session) =>
+          !session
+            ? Effect.succeed({
+                type: "failed",
+                error: new Error("no session for channel"),
+              } satisfies RunInterruptRequestResult)
+            : Effect.gen(function* () {
+                const activeRun = session.activeRun;
+                if (!activeRun) {
+                  return {
+                    type: "failed",
+                    error: new Error("no active run for session"),
+                  } satisfies RunInterruptRequestResult;
+                }
 
-        yield* deps.setRunInterruptRequested(activeRun, true);
-        const interruptResult = yield* deps.interruptSession(session).pipe(Effect.result);
-        if (interruptResult._tag === "Failure") {
-          yield* deps.setRunInterruptRequested(activeRun, false);
-          return {
-            type: "failed",
-            error: interruptResult.failure,
-          } satisfies RunInterruptRequestResult;
-        }
+                yield* deps.setRunInterruptRequested(activeRun, true);
+                const interruptResult = yield* deps.interruptSession(session).pipe(Effect.result);
+                if (interruptResult._tag === "Failure") {
+                  yield* deps.setRunInterruptRequested(activeRun, false);
+                  return {
+                    type: "failed",
+                    error: interruptResult.failure,
+                  } satisfies RunInterruptRequestResult;
+                }
 
-        const updatedActivity = yield* readSessionActivity(session);
-        if (updatedActivity.hasPendingQuestions) {
-          yield* deps.setRunInterruptRequested(activeRun, false);
-          return {
-            type: "question-pending",
-          } satisfies RunInterruptRequestResult;
-        }
+                const updatedActivity = yield* readSessionActivity(session);
+                if (updatedActivity.hasPendingQuestions) {
+                  yield* deps.setRunInterruptRequested(activeRun, false);
+                  return {
+                    type: "question-pending",
+                  } satisfies RunInterruptRequestResult;
+                }
 
-        return {
-          type: "requested",
-        } satisfies RunInterruptRequestResult;
-      }),
+                return {
+                  type: "requested",
+                } satisfies RunInterruptRequestResult;
+              }),
+        ),
+      ),
     startCompaction: deps.startCompaction,
     requestCompactionInterrupt: deps.requestCompactionInterrupt,
     shutdown: deps.shutdown,
@@ -1280,11 +1288,30 @@ export const SessionRuntimeLayer = Layer.unwrap(
       isSessionBusy,
       hasPendingQuestions,
       hasIdleCompaction: (sessionId) => idleCompaction.hasActive(sessionId),
-      startCompaction: (session, channel) => {
-        session.progressChannel = channel;
-        return idleCompaction.start({ session, channel });
-      },
-      requestCompactionInterrupt: (session) => idleCompaction.requestInterrupt({ session }),
+      startCompaction: (channelId, channel) =>
+        getOrRestoreSession(channelId).pipe(
+          Effect.flatMap((session) =>
+            !session
+              ? Effect.succeed({
+                  type: "rejected",
+                  message: "No OpenCode session exists in this channel yet.",
+                } satisfies IdleCompactionWorkflowStartResult)
+              : Effect.sync(() => {
+                  session.progressChannel = channel;
+                }).pipe(Effect.andThen(idleCompaction.start({ session, channel }))),
+          ),
+        ),
+      requestCompactionInterrupt: (channelId) =>
+        getOrRestoreSession(channelId).pipe(
+          Effect.flatMap((session) =>
+            !session
+              ? Effect.succeed({
+                  type: "failed",
+                  message: "No active OpenCode run or compaction is running in this channel.",
+                } satisfies IdleCompactionWorkflowInterruptResult)
+              : idleCompaction.requestInterrupt({ session }),
+          ),
+        ),
       shutdown,
     });
 

@@ -31,13 +31,10 @@ export const interruptCommand = defineGuildCommand({
       yield* context.complete(entry.message);
       return;
     }
-    if (channelActivity.type !== "present") {
-      return;
-    }
 
     if (entry.target === "run") {
       yield* context.ack();
-      const interruptResult = yield* sessionRuntime.requestRunInterrupt(channelActivity.session);
+      const interruptResult = yield* sessionRuntime.requestRunInterrupt(context.channelId);
       if (interruptResult.type === "failed") {
         yield* context.complete(
           formatErrorResponse("## ❌ Failed to interrupt run", formatError(interruptResult.error)),
@@ -54,7 +51,7 @@ export const interruptCommand = defineGuildCommand({
     }
 
     yield* context.ack();
-    const result = yield* sessionRuntime.requestCompactionInterrupt(channelActivity.session);
+    const result = yield* sessionRuntime.requestCompactionInterrupt(context.channelId);
     if (result.type === "failed") {
       yield* context.complete(result.message);
       return;
