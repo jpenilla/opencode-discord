@@ -281,6 +281,12 @@ export const SessionOrchestratorLayer = Layer.effect(
         yield* applyQuestionWorkflowSignals(routed.sessionId, routed.signals);
       });
 
+    const serviceLayer = Layer.mergeAll(
+      Layer.succeed(Logger, logger),
+      Layer.succeed(InfoCards, infoCards),
+      Layer.succeed(OpencodeService, opencode),
+    );
+    idleCompactionWorkflow = yield* makeIdleCompactionWorkflow().pipe(Effect.provide(serviceLayer));
     const sessionControl = makeSessionControl({
       getLoaded: (channelId) =>
         getSession(channelId).pipe(Effect.map((session) => session ?? null)),
@@ -288,13 +294,8 @@ export const SessionOrchestratorLayer = Layer.effect(
       invalidate: invalidateSession,
       isSessionBusy,
       hasPendingQuestions,
+      hasIdleCompaction: (sessionId) => idleCompactionWorkflow.hasActive(sessionId),
     });
-    const serviceLayer = Layer.mergeAll(
-      Layer.succeed(Logger, logger),
-      Layer.succeed(InfoCards, infoCards),
-      Layer.succeed(OpencodeService, opencode),
-    );
-    idleCompactionWorkflow = yield* makeIdleCompactionWorkflow().pipe(Effect.provide(serviceLayer));
     const commandLayer = Layer.mergeAll(
       Layer.succeed(AppConfig, config),
       Layer.succeed(IdleCompactionWorkflow, idleCompactionWorkflow),

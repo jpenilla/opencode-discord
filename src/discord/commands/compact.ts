@@ -2,9 +2,9 @@ import { Effect } from "effect";
 
 import { CommandContext } from "@/discord/commands/command-context.ts";
 import { IdleCompactionWorkflow } from "@/sessions/idle-compaction-workflow.ts";
+import { decideCompactEntry } from "@/sessions/command-lifecycle.ts";
 import { SessionControl } from "@/sessions/session-control.ts";
 import { defineGuildCommand } from "./definition.ts";
-import { GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/sessions/command-lifecycle.ts";
 
 export const compactCommand = defineGuildCommand({
   name: "compact",
@@ -14,28 +14,26 @@ export const compactCommand = defineGuildCommand({
     const sessionControl = yield* SessionControl;
     const idleCompaction = yield* IdleCompactionWorkflow;
 
-    if (!context.inGuildTextChannel || !context.guildTextChannel) {
-      yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
+    const channelActivity = context.inGuildTextChannel
+      ? yield* sessionControl.readRestoredChannelActivity(context.channelId)
+      : ({ type: "missing" } as const);
+    const entry = decideCompactEntry({
+      inGuildTextChannel: context.inGuildTextChannel && Boolean(context.guildTextChannel),
+      channelActivity,
+    });
+    if (entry.type === "reject") {
+      yield* context.complete(entry.message);
       return;
     }
-
-    const session = yield* sessionControl.getOrRestore(context.channelId);
-    if (!session) {
-      yield* context.complete("No OpenCode session exists in this channel yet.");
-      return;
-    }
-    if (session.activeRun) {
-      yield* context.complete(
-        "OpenCode is busy in this channel right now. Use /interrupt first or wait for the current run to finish.",
-      );
+    if (channelActivity.type !== "present") {
       return;
     }
 
     yield* context.ack();
-    yield* sessionControl.attachProgressChannel(session, context.guildTextChannel);
+    yield* sessionControl.attachProgressChannel(channelActivity.session, context.guildTextChannel!);
     const result = yield* idleCompaction.start({
-      session,
-      channel: context.guildTextChannel,
+      session: channelActivity.session,
+      channel: context.guildTextChannel!,
     });
 
     if (result.type === "rejected") {

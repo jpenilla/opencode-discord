@@ -262,6 +262,7 @@ const makeHarness = async (options?: HarnessOptions) => {
           return options?.hasPendingQuestions ?? false;
         }),
       ),
+    hasIdleCompaction: () => Ref.get(idleCompactionActive),
   });
 
   const infoCards: InfoCardsShape = {
