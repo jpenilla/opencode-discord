@@ -11,7 +11,7 @@ import {
   MessageFlags,
   type SendableChannels,
 } from "discord.js";
-import { Deferred, Effect, Layer, Queue, Redacted, Ref } from "effect";
+import { Deferred, Effect, Fiber, Layer, Queue, Redacted, Ref } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
@@ -1684,17 +1684,33 @@ describe("SessionOrchestratorLayer integration", () => {
     expect((await getRef(questionInteraction.interactionEdits)).length).toBe(1);
   });
 
-  test("expires active question cards during session shutdown even while the run is still active", async () => {
+  test("waits for observed session idle before expiring active question cards during session shutdown", async () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>());
-    const interruptRequested = await Effect.runPromise(Deferred.make<void>());
+    const interruptStarted = await Effect.runPromise(Deferred.make<void>());
+    const allowIdleStatus = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
-      promptImpl: () =>
+      promptImpl: ({ messageId, publishEvent, sessionId, storePromptResult }) =>
         Deferred.succeed(promptStarted, undefined).pipe(
-          Effect.andThen(Deferred.await(interruptRequested)),
-          Effect.andThen(Effect.fail(new Error("interrupted"))),
+          Effect.andThen(
+            storePromptResult({
+              messageId: "assistant-1",
+              transcript: "",
+            }),
+          ),
+          Effect.andThen(
+            publishEvent(
+              makeAssistantMessageUpdatedEvent({
+                id: "assistant-1",
+                sessionId,
+                parentId: messageId,
+              }),
+            ),
+          ),
+          Effect.andThen(Deferred.await(interruptStarted)),
+          Effect.andThen(Deferred.await(allowIdleStatus)),
+          Effect.andThen(publishEvent(makeSessionIdleEvent(sessionId))),
         ),
-      interruptSessionImpl: () =>
-        Deferred.succeed(interruptRequested, undefined).pipe(Effect.asVoid),
+      interruptSessionImpl: () => Deferred.succeed(interruptStarted, undefined).pipe(Effect.asVoid),
     });
     const message = harness.makeMessage({
       id: "message-1",
@@ -1711,8 +1727,20 @@ describe("SessionOrchestratorLayer integration", () => {
           yield* waitForReplyPayload(harness.replyPayloads, (payload) =>
             cardText(payload).includes("❓ Questions need answers"),
           );
-          yield* sessions.shutdown();
+
+          const shutdownFiber = yield* sessions.shutdown().pipe(Effect.forkChild);
+          yield* Deferred.await(interruptStarted);
           yield* Effect.promise(() => Bun.sleep(0));
+
+          const editedPayloads = yield* Ref.get(harness.editedPayloads);
+          expect(
+            editedPayloads.some((payload) =>
+              cardText(payload).includes("This question prompt expired before it was answered."),
+            ),
+          ).toBe(false);
+
+          yield* Deferred.succeed(allowIdleStatus, undefined).pipe(Effect.ignore);
+          yield* Fiber.join(shutdownFiber);
         }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );

@@ -315,7 +315,7 @@ export const SessionOrchestratorLayer = Layer.effect(
     });
 
     yield* Queue.take(eventQueue).pipe(
-      Effect.flatMap((wrapped) => eventHandler.handleEvent(wrapped.payload)),
+      Effect.flatMap((event) => eventHandler.handleEvent(event.payload)),
       Effect.forever,
       Effect.catch((error) =>
         logger.error("opencode event dispatcher failed", {
@@ -388,10 +388,19 @@ export const SessionOrchestratorLayer = Layer.effect(
       formatError,
     });
 
+    const drainQueuedRunRequestsForShutdown = (session: ChannelSession) =>
+      Queue.clear(session.queue).pipe(Effect.asVoid);
+
     const worker = (session: ChannelSession): Effect.Effect<never> =>
       Effect.forever(
         takeQueuedRunBatch(session.queue).pipe(
-          Effect.flatMap((requests) => runExecutor(session, requests)),
+          Effect.flatMap((requests) =>
+            Ref.get(shutdownStartedRef).pipe(
+              Effect.flatMap((shutdownStarted) =>
+                shutdownStarted ? Effect.void : runExecutor(session, requests),
+              ),
+            ),
+          ),
           Effect.catch((error) =>
             logger.error("channel worker iteration failed", {
               channelId: session.channelId,
@@ -418,11 +427,11 @@ export const SessionOrchestratorLayer = Layer.effect(
       startShutdown,
       getState: () => Ref.get(stateRef),
       questionRuntime,
-      applyQuestionWorkflowSignals,
       idleCompactionWorkflow,
       opencode,
       logger,
       infoCards,
+      drainQueuedRunRequestsForShutdown,
       interruptSessionWorkers: () => FiberSet.clear(fiberSet),
       shutdownSessions,
       formatError,

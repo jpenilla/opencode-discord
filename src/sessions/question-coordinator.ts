@@ -56,11 +56,7 @@ export type QuestionWorkflow = {
     interaction: Interaction,
   ) => Effect.Effect<ReadonlyArray<QuestionWorkflowSignal>, unknown>;
   hasPendingQuestions: () => Effect.Effect<boolean>;
-  beginShutdown: () => Effect.Effect<void, unknown>;
-  shutdown: () => Effect.Effect<
-    { requestIds: ReadonlyArray<string>; signals: ReadonlyArray<QuestionWorkflowSignal> },
-    unknown
-  >;
+  shutdown: () => Effect.Effect<ReadonlyArray<string>, unknown>;
   terminate: () => Effect.Effect<ReadonlyArray<QuestionWorkflowSignal>, unknown>;
 };
 
@@ -102,7 +98,6 @@ export const createQuestionWorkflow = (
 ): Effect.Effect<QuestionWorkflow> =>
   Effect.gen(function* () {
     const batchesRef = yield* Ref.make(new Map<string, QuestionWorkflowBatch>());
-    const shutdownStartedRef = yield* Ref.make(false);
 
     const notifyIfDrained = () =>
       Ref.get(batchesRef).pipe(
@@ -233,7 +228,6 @@ export const createQuestionWorkflow = (
                 error: deps.formatError(error),
               }),
             ),
-            Effect.andThen(removeQuestionBatch(batch.domain.request.id).pipe(Effect.asVoid)),
           );
 
     const attachPostedQuestionMessage = (requestId: string, message: Message) =>
@@ -258,6 +252,7 @@ export const createQuestionWorkflow = (
         }
 
         yield* finalizeBatchIfAttached(batch);
+        yield* removeQuestionBatch(batch.domain.request.id).pipe(Effect.asVoid);
         return noSignals;
       });
 
@@ -272,6 +267,9 @@ export const createQuestionWorkflow = (
 
     const getQuestionSession = () =>
       deps.getSessionContext().pipe(Effect.map((context) => context?.session ?? null));
+
+    const expireQuestionBatch = (requestId: string) =>
+      updateQuestionBatch(requestId, (current) => terminateQuestionBatch(current));
 
     const submitQuestionBatch = (input: {
       interaction: Interaction;
@@ -296,12 +294,21 @@ export const createQuestionWorkflow = (
           return noSignals;
         }
 
-        yield* updateInteraction(input.interaction, submitting.batch);
         const session = yield* getQuestionSession();
         if (!session) {
-          yield* replyToQuestionInteraction(input.interaction, "This question prompt has expired.");
+          const expired = yield* expireQuestionBatch(input.requestId);
+          if (!expired) {
+            yield* replyToQuestionInteraction(
+              input.interaction,
+              "This question prompt has expired.",
+            );
+            return noSignals;
+          }
+          yield* updateInteraction(input.interaction, expired);
+          yield* removeQuestionBatch(input.requestId).pipe(Effect.asVoid);
           return noSignals;
         }
+        yield* updateInteraction(input.interaction, submitting.batch);
 
         const submitResult = yield* deps
           .replyToQuestion(session.opencode, submitting.batch.domain.request.id, input.answers)
@@ -355,12 +362,21 @@ export const createQuestionWorkflow = (
           return noSignals;
         }
 
-        yield* updateInteraction(input.interaction, rejecting.batch);
         const session = yield* getQuestionSession();
         if (!session) {
-          yield* replyToQuestionInteraction(input.interaction, "This question prompt has expired.");
+          const expired = yield* expireQuestionBatch(input.requestId);
+          if (!expired) {
+            yield* replyToQuestionInteraction(
+              input.interaction,
+              "This question prompt has expired.",
+            );
+            return noSignals;
+          }
+          yield* updateInteraction(input.interaction, expired);
+          yield* removeQuestionBatch(input.requestId).pipe(Effect.asVoid);
           return noSignals;
         }
+        yield* updateInteraction(input.interaction, rejecting.batch);
 
         const rejectResult = yield* deps
           .rejectQuestion(session.opencode, rejecting.batch.domain.request.id)
@@ -441,10 +457,6 @@ export const createQuestionWorkflow = (
       request: QuestionRequest,
     ) =>
       Effect.gen(function* () {
-        if (yield* Ref.get(shutdownStartedRef)) {
-          return noSignals;
-        }
-
         const batch = yield* Ref.modify(
           batchesRef,
           (
@@ -499,15 +511,9 @@ export const createQuestionWorkflow = (
         if (questionMessage._tag === "Success") {
           const attached = yield* attachPostedQuestionMessage(request.id, questionMessage.success);
           if (!attached) {
-            yield* deps.logger.warn("question batch was missing after successful post", {
-              channelId: session.channelId,
-              sessionId: session.opencode.sessionId,
-              requestId: request.id,
-            });
             return signals;
           }
 
-          yield* finalizeBatchIfAttached(attached);
           return signals;
         }
 
@@ -574,11 +580,6 @@ export const createQuestionWorkflow = (
 
         const action = parseQuestionActionId(interaction.customId);
         if (!action) {
-          return noSignals;
-        }
-
-        if (yield* Ref.get(shutdownStartedRef)) {
-          yield* replyToQuestionInteraction(interaction, "This question prompt has expired.");
           return noSignals;
         }
 
@@ -874,12 +875,8 @@ export const createQuestionWorkflow = (
                 requestIds.push(requestId);
               }
 
-              if (expired.runtime.attachment._tag === "attached") {
-                batches.delete(requestId);
-                releasedRequestIds.push(requestId);
-              } else {
-                batches.set(requestId, expired);
-              }
+              batches.delete(requestId);
+              releasedRequestIds.push(requestId);
             }
 
             return [{ terminated, requestIds, releasedRequestIds }, batches];
@@ -908,15 +905,10 @@ export const createQuestionWorkflow = (
         );
         yield* notifyIfDrained();
 
-        return {
-          requestIds,
-          signals: noSignals,
-        };
+        return requestIds;
       });
 
-    const terminate = () => expireMatchingBatches().pipe(Effect.map((result) => result.signals));
-
-    const beginShutdown = () => Ref.set(shutdownStartedRef, true);
+    const terminate = () => expireMatchingBatches().pipe(Effect.as(noSignals));
 
     return {
       handleEvent: (event) => {
@@ -938,8 +930,7 @@ export const createQuestionWorkflow = (
       },
       handleInteraction,
       hasPendingQuestions,
-      beginShutdown,
-      shutdown: () => beginShutdown().pipe(Effect.andThen(expireMatchingBatches(true))),
+      shutdown: () => expireMatchingBatches(true),
       terminate,
     } satisfies QuestionWorkflow;
   });

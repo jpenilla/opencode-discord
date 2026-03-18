@@ -1,12 +1,64 @@
 import { Effect } from "effect";
 
-import { CommandContext } from "@/discord/commands/command-context.ts";
+import { CommandContext, type CommandContextShape } from "@/discord/commands/command-context.ts";
 import { InfoCards } from "@/discord/info-cards.ts";
-import { GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/sessions/command-lifecycle.ts";
-import { SessionControl } from "@/sessions/session-control.ts";
+import { IdleCompactionWorkflow } from "@/sessions/idle-compaction-workflow.ts";
+import { decideNewSessionEntry, NEW_SESSION_BUSY_MESSAGE } from "@/sessions/command-lifecycle.ts";
+import { SessionControl, type SessionControlShape } from "@/sessions/session-control.ts";
 import { formatError } from "@/util/errors.ts";
 import { Logger } from "@/util/logging.ts";
+import type { IdleCompactionWorkflowShape } from "@/sessions/idle-compaction-workflow.ts";
 import { defineGuildCommand } from "./definition.ts";
+
+const readNewSessionEntry = (
+  context: CommandContextShape,
+  sessionControl: SessionControlShape,
+  idleCompaction: IdleCompactionWorkflowShape,
+) =>
+  Effect.gen(function* () {
+    if (!context.inGuildTextChannel || !context.guildTextChannel) {
+      return decideNewSessionEntry({
+        inGuildTextChannel: false,
+        hasPendingQuestions: false,
+        hasActiveRun: false,
+        hasIdleCompaction: false,
+        hasQueuedWork: false,
+        hasOtherBusyState: false,
+      });
+    }
+
+    const session = yield* sessionControl.getLoaded(context.channelId);
+    if (!session) {
+      return decideNewSessionEntry({
+        inGuildTextChannel: true,
+        hasPendingQuestions: false,
+        hasActiveRun: false,
+        hasIdleCompaction: false,
+        hasQueuedWork: false,
+        hasOtherBusyState: false,
+      });
+    }
+
+    const { hasPendingQuestions, hasIdleCompaction, hasQueuedWork } = yield* Effect.all({
+      hasPendingQuestions: sessionControl.hasPendingQuestions(session.opencode.sessionId),
+      hasIdleCompaction: idleCompaction.hasActive(session.opencode.sessionId),
+      hasQueuedWork: sessionControl.hasQueuedWork(session),
+    });
+    const hasActiveRun = Boolean(session.activeRun);
+    const hasOtherBusyState =
+      hasPendingQuestions || hasActiveRun || hasIdleCompaction
+        ? false
+        : yield* sessionControl.isSessionBusy(session);
+
+    return decideNewSessionEntry({
+      inGuildTextChannel: true,
+      hasPendingQuestions,
+      hasActiveRun,
+      hasIdleCompaction,
+      hasQueuedWork,
+      hasOtherBusyState,
+    });
+  });
 
 export const newSessionCommand = defineGuildCommand({
   name: "new-session",
@@ -14,26 +66,13 @@ export const newSessionCommand = defineGuildCommand({
   execute: Effect.gen(function* () {
     const context = yield* CommandContext;
     const sessionControl = yield* SessionControl;
+    const idleCompaction = yield* IdleCompactionWorkflow;
     const infoCards = yield* InfoCards;
     const logger = yield* Logger;
 
-    if (!context.inGuildTextChannel || !context.guildTextChannel) {
-      yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
-      return;
-    }
-
-    const session = yield* sessionControl.getLoaded(context.channelId);
-    if (session && (yield* sessionControl.isSessionBusy(session))) {
-      yield* context.complete(
-        "OpenCode is busy in this channel right now. Wait for the current run to finish or use /interrupt before starting a fresh session.",
-      );
-      return;
-    }
-
-    if (session && (yield* sessionControl.hasQueuedWork(session))) {
-      yield* context.complete(
-        "OpenCode still has queued work for this channel. Wait for it to finish before starting a fresh session.",
-      );
+    const entry = yield* readNewSessionEntry(context, sessionControl, idleCompaction);
+    if (entry.type === "reject") {
+      yield* context.complete(entry.message);
       return;
     }
 
@@ -43,14 +82,15 @@ export const newSessionCommand = defineGuildCommand({
       "requested a fresh session via /new-session",
     );
     if (!invalidated) {
+      const refreshedEntry = yield* readNewSessionEntry(context, sessionControl, idleCompaction);
       yield* context.complete(
-        "OpenCode is busy in this channel right now. Wait for the current run to finish or use /interrupt before starting a fresh session.",
+        refreshedEntry.type === "reject" ? refreshedEntry.message : NEW_SESSION_BUSY_MESSAGE,
       );
       return;
     }
     yield* infoCards
       .upsert({
-        channel: context.guildTextChannel,
+        channel: context.guildTextChannel!,
         existingCard: null,
         title: "🆕 Fresh session ready",
         body: "The next triggered message in this channel will start a new OpenCode session with fresh chat history. Workspace files were left in place.",
