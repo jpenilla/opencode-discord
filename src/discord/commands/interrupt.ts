@@ -9,7 +9,7 @@ import {
   GUILD_TEXT_COMMAND_ONLY_MESSAGE,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
 } from "@/sessions/command-lifecycle.ts";
-import { SessionControl } from "@/sessions/session-control.ts";
+import { SessionRuntime } from "@/sessions/session-runtime.ts";
 import { formatError } from "@/util/errors.ts";
 import { defineGuildCommand } from "./definition.ts";
 
@@ -18,7 +18,7 @@ export const interruptCommand = defineGuildCommand({
   description: "Interrupt the active OpenCode run in this channel",
   execute: Effect.gen(function* () {
     const context = yield* CommandContext;
-    const sessionControl = yield* SessionControl;
+    const sessionRuntime = yield* SessionRuntime;
     const idleCompaction = yield* IdleCompactionWorkflow;
     const opencode = yield* OpencodeService;
 
@@ -27,7 +27,7 @@ export const interruptCommand = defineGuildCommand({
       return;
     }
 
-    const channelActivity = yield* sessionControl.readRestoredChannelActivity(context.channelId);
+    const channelActivity = yield* sessionRuntime.readRestoredChannelActivity(context.channelId);
     const entry = decideInterruptEntry({
       channelActivity,
     });
@@ -42,12 +42,12 @@ export const interruptCommand = defineGuildCommand({
     if (entry.target === "run") {
       yield* context.ack();
       const activeRun = channelActivity.session.activeRun!;
-      yield* sessionControl.setRunInterruptRequested(activeRun, true);
+      yield* sessionRuntime.setRunInterruptRequested(activeRun, true);
       const interruptResult = yield* opencode
         .interruptSession(channelActivity.session.opencode)
         .pipe(Effect.result);
       if (interruptResult._tag === "Failure") {
-        yield* sessionControl.setRunInterruptRequested(activeRun, false);
+        yield* sessionRuntime.setRunInterruptRequested(activeRun, false);
         yield* context.complete(
           formatErrorResponse(
             "## ❌ Failed to interrupt run",
@@ -57,9 +57,9 @@ export const interruptCommand = defineGuildCommand({
         return;
       }
 
-      const updatedActivity = yield* sessionControl.readSessionActivity(channelActivity.session);
+      const updatedActivity = yield* sessionRuntime.readSessionActivity(channelActivity.session);
       if (updatedActivity.hasPendingQuestions) {
-        yield* sessionControl.setRunInterruptRequested(activeRun, false);
+        yield* sessionRuntime.setRunInterruptRequested(activeRun, false);
         yield* context.complete(QUESTION_PENDING_INTERRUPT_MESSAGE);
         return;
       }

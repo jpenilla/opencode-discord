@@ -10,10 +10,10 @@ import {
 import { Effect, Layer, Redacted } from "effect";
 
 import { AppConfig } from "@/config.ts";
+import { ChannelRuntime } from "@/channels/channel-runtime.ts";
 import { syncGuildCommands } from "@/discord/commands.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { detectInvocation } from "@/discord/triggers.ts";
-import { SessionOrchestrator } from "@/sessions/session-orchestrator.ts";
 import { Logger } from "@/util/logging.ts";
 
 const formatError = (error: unknown) => {
@@ -27,7 +27,7 @@ export const DiscordBotLayer = Layer.effectDiscard(
   Effect.gen(function* () {
     const config = yield* AppConfig;
     const logger = yield* Logger;
-    const sessions = yield* SessionOrchestrator;
+    const channels = yield* ChannelRuntime;
 
     const client = new Client({
       intents: [
@@ -102,7 +102,7 @@ export const DiscordBotLayer = Layer.effectDiscard(
             return;
           }
 
-          yield* sessions.submit(message, invocation).pipe(
+          yield* channels.submit(message, invocation).pipe(
             Effect.catch((error) => {
               const formattedError = formatError(error);
               return logger
@@ -131,7 +131,7 @@ export const DiscordBotLayer = Layer.effectDiscard(
 
     client.on(Events.InteractionCreate, (interaction) => {
       Effect.runFork(
-        sessions.handleInteraction(interaction).pipe(
+        channels.handleInteraction(interaction).pipe(
           Effect.catch((error) => {
             const formattedError = formatError(error);
             return logger

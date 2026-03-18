@@ -24,10 +24,10 @@ import {
   type IdleCompactionWorkflowStartResult,
 } from "@/sessions/idle-compaction-workflow.ts";
 import {
-  makeSessionControl,
-  SessionControl,
-  type SessionControlShape,
-} from "@/sessions/session-control.ts";
+  makeSessionRuntime,
+  SessionRuntime,
+  type SessionRuntimeShape,
+} from "@/sessions/session-runtime.ts";
 import {
   noQuestionOutcome,
   type ActiveRun,
@@ -90,7 +90,7 @@ type HarnessOptions = {
 };
 
 const makeCommandsLayer = (deps: {
-  sessionControl: SessionControlShape;
+  sessionRuntime: SessionRuntimeShape;
   idleCompaction: IdleCompactionWorkflowShape;
   infoCards: InfoCardsShape;
   opencode: OpencodeServiceShape;
@@ -100,7 +100,7 @@ const makeCommandsLayer = (deps: {
 }) =>
   Layer.mergeAll(
     Layer.succeed(AppConfig, makeConfig(deps.channelSettingsDefaults)),
-    Layer.succeed(SessionControl, deps.sessionControl),
+    Layer.succeed(SessionRuntime, deps.sessionRuntime),
     Layer.succeed(IdleCompactionWorkflow, deps.idleCompaction),
     Layer.succeed(InfoCards, deps.infoCards),
     Layer.succeed(OpencodeService, deps.opencode),
@@ -216,7 +216,7 @@ const makeHarness = async (options?: HarnessOptions) => {
     Ref.make((options?.hasSession ?? true) ? session : null),
   );
 
-  const sessionControl = makeSessionControl({
+  const sessionRuntime = makeSessionRuntime({
     getLoaded: (channelId) =>
       Ref.get(sessionRef).pipe(
         Effect.map((current) => (current && current.channelId === channelId ? current : null)),
@@ -263,6 +263,11 @@ const makeHarness = async (options?: HarnessOptions) => {
         }),
       ),
     hasIdleCompaction: () => Ref.get(idleCompactionActive),
+    getUsableSession: () => Effect.fail(new Error("unused in command tests")),
+    getActiveRunBySessionId: () => Effect.succeed(null),
+    routeQuestionInteraction: () => Effect.void,
+    isShuttingDown: () => Effect.succeed(false),
+    shutdown: () => Effect.void,
   });
 
   const infoCards: InfoCardsShape = {
@@ -416,7 +421,7 @@ const makeHarness = async (options?: HarnessOptions) => {
   };
 
   const commandsLayer = makeCommandsLayer({
-    sessionControl,
+    sessionRuntime,
     idleCompaction: idleCompactionWorkflow,
     infoCards,
     opencode: opencodeService,

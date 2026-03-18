@@ -8,8 +8,8 @@ import type { MessageCreateOptions, SendableChannels } from "discord.js";
 import { Deferred, Effect, Fiber, Option, Redacted } from "effect";
 
 import type { AppConfigShape } from "@/config.ts";
-import type { SessionOrchestratorShape } from "@/sessions/session-orchestrator.ts";
 import type { ActiveRun } from "@/sessions/session.ts";
+import type { SessionRuntimeShape } from "@/sessions/session-runtime.ts";
 import { uploadMetadataHeader } from "@/tools/bridge/handlers/uploads.ts";
 import { handleToolBridgeRequest, runToolBridgeHttpRequest } from "@/tools/bridge/server.ts";
 import type { LoggerShape } from "@/util/logging.ts";
@@ -124,12 +124,11 @@ const makeUploadRequest = (input: {
   return request;
 };
 
-const makeSessions = (activeRun: ActiveRun | null): SessionOrchestratorShape => ({
-  submit: () => Effect.void,
+const makeSessions = (
+  activeRun: ActiveRun | null,
+): Pick<SessionRuntimeShape, "getActiveRunBySessionId"> => ({
   getActiveRunBySessionId: (sessionId: string) =>
     Effect.succeed(sessionId === "session-1" ? activeRun : null),
-  handleInteraction: () => Effect.succeed(false),
-  shutdown: () => Effect.void,
 });
 
 const makeActiveRun = (send: (payload: MessageCreateOptions) => Promise<unknown>): ActiveRun =>

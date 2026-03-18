@@ -8,7 +8,7 @@ import {
   type QuestionWorkflowEvent,
   type QuestionWorkflowSignal,
 } from "@/sessions/question-coordinator.ts";
-import type { SessionContext } from "@/sessions/session-lifecycle.ts";
+import type { SessionContext } from "@/sessions/session-runtime.ts";
 import type { OpencodeServiceShape } from "@/opencode/service.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
