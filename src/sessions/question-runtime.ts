@@ -29,11 +29,7 @@ export type RoutedQuestionSignals = {
   signals: ReadonlyArray<QuestionWorkflowSignal>;
 };
 
-export type QuestionShutdownState = {
-  sessionId: string;
-  requestIds: ReadonlyArray<string>;
-  signals: ReadonlyArray<QuestionWorkflowSignal>;
-};
+const SHUTDOWN_QUESTION_RPC_TIMEOUT = "1 second";
 
 export type QuestionRuntime = {
   handleEvent: (
@@ -47,9 +43,8 @@ export type QuestionRuntime = {
   terminateSession: (
     sessionId: string,
   ) => Effect.Effect<ReadonlyArray<QuestionWorkflowSignal>, unknown>;
-  beginShutdown: () => Effect.Effect<void, unknown>;
-  shutdownSession: (sessionId: string) => Effect.Effect<QuestionShutdownState | null, unknown>;
-  finalizeShutdownUi: () => Effect.Effect<ReadonlyArray<RoutedQuestionSignals>, unknown>;
+  shutdownSession: (sessionId: string) => Effect.Effect<void, unknown>;
+  cleanupShutdownQuestions: () => Effect.Effect<void, unknown>;
 };
 
 type QuestionRuntimeDeps = {
@@ -180,11 +175,25 @@ const QuestionRuntimeState = {
 export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<QuestionRuntime> =>
   Effect.gen(function* () {
     const runtimeStateRef = yield* Ref.make(createQuestionRuntimeState());
+    const stoppedSessionEventIdsRef = yield* Ref.make(new Set<string>());
     const readState = () => Ref.get(runtimeStateRef);
     const updateState = (f: (state: QuestionRuntimeState) => QuestionRuntimeState) =>
       Ref.update(runtimeStateRef, f);
+    const readStoppedSessionEventIds = () => Ref.get(stoppedSessionEventIdsRef);
+    const stopHandlingSessionEvents = (sessionId: string) =>
+      Ref.update(stoppedSessionEventIdsRef, (current) => {
+        if (current.has(sessionId)) {
+          return current;
+        }
+
+        const next = new Set(current);
+        next.add(sessionId);
+        return next;
+      });
     const getQuestionWorkflow = (sessionId: string) =>
       readState().pipe(Effect.map((state) => QuestionRuntimeState.getWorkflow(state, sessionId)));
+    const getQuestionWorkflowGate = (sessionId: string) =>
+      readState().pipe(Effect.map((state) => state.gates.get(sessionId) ?? null));
     const getQuestionWorkflowByRequestId = (requestId: string) =>
       readState().pipe(Effect.map((state) => QuestionRuntimeState.lookupRequest(state, requestId)));
 
@@ -267,8 +276,77 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         Effect.map((pending) => pending.some(Boolean)),
       );
 
+    const getShutdownTargetWorkflow = (sessionId: string) =>
+      getQuestionWorkflow(sessionId).pipe(
+        Effect.flatMap((workflow) =>
+          workflow
+            ? Effect.succeed(workflow)
+            : getQuestionWorkflowGate(sessionId).pipe(
+                Effect.flatMap((gate) =>
+                  !gate
+                    ? Effect.succeed(null)
+                    : Deferred.await(gate).pipe(Effect.catch(() => Effect.succeed(null))),
+                ),
+              ),
+        ),
+      );
+
+    const rejectQuestionIdsForShutdown = (sessionId: string, requestIds: ReadonlyArray<string>) =>
+      deps.getSessionContext(sessionId).pipe(
+        Effect.flatMap((context) =>
+          !context || requestIds.length === 0
+            ? Effect.void
+            : Effect.forEach(
+                requestIds,
+                (requestId) =>
+                  deps.rejectQuestion(context.session.opencode, requestId).pipe(
+                    Effect.timeoutOption(SHUTDOWN_QUESTION_RPC_TIMEOUT),
+                    Effect.flatMap((result) =>
+                      result._tag === "Some"
+                        ? Effect.void
+                        : Effect.fail(new Error(`Timed out rejecting question ${requestId}`)),
+                    ),
+                    Effect.result,
+                  ),
+                { concurrency: "unbounded", discard: false },
+              ).pipe(
+                Effect.flatMap((results) => {
+                  const failure = results.find((result) => result._tag === "Failure");
+                  if (!failure) {
+                    return Effect.void;
+                  }
+
+                  return deps.logger
+                    .warn("question rejection was unresponsive during shutdown", {
+                      sessionId,
+                      error: deps.formatError(failure.failure),
+                    })
+                    .pipe(
+                      Effect.andThen(
+                        context.session.opencode.close().pipe(
+                          Effect.catch((error) =>
+                            deps.logger.warn(
+                              "failed to force-close opencode session during question shutdown",
+                              {
+                                sessionId,
+                                error: deps.formatError(error),
+                              },
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                }),
+              ),
+        ),
+      );
+
     const handleEvent = (event: { sessionId: string } & QuestionWorkflowEvent) =>
       Effect.gen(function* () {
+        if ((yield* readStoppedSessionEventIds()).has(event.sessionId)) {
+          return null;
+        }
+
         const workflow =
           event.type === "asked"
             ? yield* getOrCreateQuestionWorkflow(event.sessionId)
@@ -336,49 +414,37 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         Effect.flatMap((workflow) => (!workflow ? Effect.succeed([]) : workflow.terminate())),
       );
 
-    const beginShutdown = () =>
-      readState().pipe(
-        Effect.flatMap((state) =>
-          Effect.forEach(state.workflows.values(), (workflow) => workflow.beginShutdown(), {
-            concurrency: "unbounded",
-            discard: true,
-          }),
-        ),
-      );
-
-    const shutdownSession = (sessionId: string) =>
-      getQuestionWorkflow(sessionId).pipe(
+    const cleanupShutdownSession = (sessionId: string) =>
+      stopHandlingSessionEvents(sessionId).pipe(
+        Effect.andThen(getShutdownTargetWorkflow(sessionId)),
         Effect.flatMap((workflow) =>
           !workflow
-            ? Effect.succeed(null)
-            : workflow.shutdown().pipe(
-                Effect.map((state) => ({
-                  sessionId,
-                  requestIds: state.requestIds,
-                  signals: state.signals,
-                })),
-              ),
+            ? Effect.void
+            : workflow
+                .shutdown()
+                .pipe(
+                  Effect.flatMap((requestIds) =>
+                    rejectQuestionIdsForShutdown(sessionId, requestIds),
+                  ),
+                ),
         ),
       );
 
-    const finalizeShutdownUi = () =>
+    const shutdownSession = (sessionId: string) => cleanupShutdownSession(sessionId);
+
+    const cleanupShutdownQuestions = () =>
       readState().pipe(
         Effect.flatMap((state) =>
           Effect.forEach(
-            state.workflows.entries(),
-            ([sessionId, workflow]) =>
-              workflow.shutdown().pipe(
-                Effect.map((shutdownState) => ({
-                  sessionId,
-                  signals: shutdownState.signals,
-                })),
-              ),
+            new Set([...state.workflows.keys(), ...state.gates.keys()]),
+            cleanupShutdownSession,
             {
               concurrency: "unbounded",
-              discard: false,
+              discard: true,
             },
           ),
         ),
+        Effect.asVoid,
       );
 
     return {
@@ -387,8 +453,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
       hasPendingQuestions,
       hasPendingQuestionsAnywhere,
       terminateSession,
-      beginShutdown,
       shutdownSession,
-      finalizeShutdownUi,
+      cleanupShutdownQuestions,
     } satisfies QuestionRuntime;
   });

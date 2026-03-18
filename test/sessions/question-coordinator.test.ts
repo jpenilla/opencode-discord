@@ -144,10 +144,13 @@ const makeHarness = async (options?: {
     activeRun,
   };
   session.activeRun = activeRun;
+  const sessionContextRef = await Effect.runPromise(
+    Ref.make<{ session: ChannelSession; activeRun: ActiveRun } | null>({ session, activeRun }),
+  );
 
   const rawRuntime = await Effect.runPromise(
     createQuestionWorkflow({
-      getSessionContext: () => Effect.succeed({ session, activeRun }),
+      getSessionContext: () => Ref.get(sessionContextRef),
       replyToQuestion: (_opencode, requestId, _answers) =>
         Ref.update(replyCalls, (current) => [...current, requestId]),
       rejectQuestion: (_opencode, requestId) =>
@@ -226,6 +229,7 @@ const makeHarness = async (options?: {
     applySignals(signals).pipe(Effect.andThen(reconcileTyping()));
 
   const runtime = {
+    rawRuntime,
     handleEvent: (event: {
       type: "asked" | "replied" | "rejected";
       sessionId: string;
@@ -248,14 +252,9 @@ const makeHarness = async (options?: {
         .pipe(Effect.tap(applyWorkflowSignals)),
     handleInteraction: (interaction: Interaction) =>
       rawRuntime.handleInteraction(interaction).pipe(Effect.tap(applyWorkflowSignals)),
-    beginShutdown: () => rawRuntime.beginShutdown(),
     terminateForSession: (_sessionId: string) =>
       rawRuntime.terminate().pipe(Effect.tap(applyWorkflowSignals)),
-    shutdown: () =>
-      rawRuntime.shutdown().pipe(
-        Effect.tap((result) => applyWorkflowSignals(result.signals)),
-        Effect.asVoid,
-      ),
+    shutdown: () => rawRuntime.shutdown().pipe(Effect.asVoid),
   };
 
   const makeButtonInteraction = (input: {
@@ -330,6 +329,7 @@ const makeHarness = async (options?: {
   return {
     runtime,
     session,
+    sessionContextRef,
     activeRun,
     questionMessage,
     request: makeRequest(),
@@ -501,40 +501,9 @@ describe("createQuestionWorkflow", () => {
     expect(await getRef(harness.questionReplyTargetIds)).toEqual(["follow-up-message"]);
   });
 
-  test("expires a question batch even when shutdown lands while the Discord card post is in flight", async () => {
-    const harness = await makeHarness({
-      blockQuestionPost: true,
-    });
-
-    const asked = Effect.runPromise(
-      harness.runtime.handleEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
-
-    await Effect.runPromise(Deferred.await(harness.questionPostStarted));
-    await Effect.runPromise(
-      harness.runtime.terminateForSession(harness.session.opencode.sessionId),
-    );
-    await Effect.runPromise(
-      Deferred.succeed(harness.allowQuestionPost, undefined).pipe(Effect.ignore),
-    );
-    await asked;
-
-    const edits = await getRef(harness.editedPayloads);
-    expect(edits).toHaveLength(1);
-    expect(JSON.stringify(edits[0])).toContain("Questions expired");
-    expect(JSON.stringify(edits[0])).toContain(
-      "This question prompt expired before it was answered.",
-    );
-  });
-
-  test("ignores new question cards after shutdown begins", async () => {
+  test("expires a submitting batch if the session disappears before the reply RPC starts", async () => {
     const harness = await makeHarness();
 
-    await Effect.runPromise(harness.runtime.shutdown());
     await Effect.runPromise(
       harness.runtime.handleEvent({
         type: "asked",
@@ -542,8 +511,18 @@ describe("createQuestionWorkflow", () => {
         request: harness.request,
       }),
     );
+    await Effect.runPromise(Ref.set(harness.sessionContextRef, null));
 
-    expect(await getRef(harness.postedPayloads)).toHaveLength(0);
+    await Effect.runPromise(
+      harness.runtime.handleInteraction(
+        harness.makeButtonInteraction({
+          customId: `ocq:${harness.request.id}:0:submit`,
+        }),
+      ),
+    );
+
+    expect(await getRef(harness.replyCalls)).toEqual([]);
+    expect(await Effect.runPromise(harness.runtime.rawRuntime.hasPendingQuestions())).toBe(false);
   });
 
   test("renders shutdown-expired questions immediately when shutdown begins", async () => {
@@ -564,38 +543,6 @@ describe("createQuestionWorkflow", () => {
     expect(JSON.stringify(edits[0])).toContain(
       "This question prompt expired before it was answered.",
     );
-  });
-
-  test("finalizes a late-posted question card when a reply event wins the race", async () => {
-    const harness = await makeHarness({
-      blockQuestionPost: true,
-    });
-
-    const asked = Effect.runPromise(
-      harness.runtime.handleEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
-
-    await Effect.runPromise(Deferred.await(harness.questionPostStarted));
-    await Effect.runPromise(
-      harness.runtime.handleEvent({
-        type: "replied",
-        sessionId: harness.session.opencode.sessionId,
-        requestId: harness.request.id,
-        answers: [["Yes"]] satisfies ReadonlyArray<QuestionAnswer>,
-      }),
-    );
-    await Effect.runPromise(
-      Deferred.succeed(harness.allowQuestionPost, undefined).pipe(Effect.ignore),
-    );
-    await asked;
-
-    const edits = await getRef(harness.editedPayloads);
-    expect(edits).toHaveLength(1);
-    expect(JSON.stringify(edits[0])).toContain("✅ Questions answered");
   });
 
   test("replies with a stale-state error after a newer page action wins", async () => {

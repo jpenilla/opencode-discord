@@ -11,7 +11,11 @@ import { AppConfig, type AppConfigShape } from "@/config.ts";
 import { InfoCards, type InfoCardsShape } from "@/discord/info-cards.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { createCommandHandler } from "@/sessions/command-handler.ts";
-import { QUESTION_PENDING_INTERRUPT_MESSAGE } from "@/sessions/command-lifecycle.ts";
+import {
+  NEW_SESSION_BUSY_MESSAGE,
+  QUESTION_PENDING_INTERRUPT_MESSAGE,
+  QUESTION_PENDING_NEW_SESSION_MESSAGE,
+} from "@/sessions/command-lifecycle.ts";
 import { createPromptState } from "@/sessions/prompt-state.ts";
 import {
   IdleCompactionWorkflow,
@@ -76,11 +80,13 @@ type HarnessOptions = {
   hasActiveRun?: boolean;
   hasPendingQuestions?: boolean;
   hasPendingQuestionsSequence?: boolean[];
+  hasOtherBusyState?: boolean;
   hasSession?: boolean;
   hasQueuedWork?: boolean;
+  hasIdleCompaction?: boolean;
   initialChannelSettings?: PersistedChannelSettings | null;
   failInfoCardUpsert?: boolean;
-  failInvalidate?: boolean;
+  invalidateResult?: "success" | "busy" | "failure";
 };
 
 const makeCommandsLayer = (deps: {
@@ -114,7 +120,9 @@ const makeHarness = async (options?: HarnessOptions) => {
   );
   const typingStopCount = await Effect.runPromise(Ref.make(0));
   const idleCardRef = await Effect.runPromise(Ref.make<Message | null>(null));
-  const idleCompactionActive = await Effect.runPromise(Ref.make(false));
+  const idleCompactionActive = await Effect.runPromise(
+    Ref.make(options?.hasIdleCompaction ?? false),
+  );
   const idleInterruptRequested = await Effect.runPromise(Ref.make(false));
   const persistedSettings = await Effect.runPromise(
     Ref.make<Map<string, PersistedChannelSettings>>(new Map()),
@@ -219,8 +227,11 @@ const makeHarness = async (options?: HarnessOptions) => {
       ),
     invalidate: (channelId, reason) =>
       Effect.gen(function* () {
-        if (options?.failInvalidate) {
+        if (options?.invalidateResult === "failure") {
           return yield* Effect.fail(new Error("invalidate failed"));
+        }
+        if (options?.invalidateResult === "busy") {
+          return false;
         }
         yield* Ref.update(invalidatedSessions, (current) => [
           ...current,
@@ -237,7 +248,8 @@ const makeHarness = async (options?: HarnessOptions) => {
           (idleCompactionBusy) =>
             Boolean(currentSession.activeRun) ||
             idleCompactionBusy ||
-            (options?.hasPendingQuestions ?? false),
+            (options?.hasPendingQuestions ?? false) ||
+            (options?.hasOtherBusyState ?? false),
         ),
       ),
     hasPendingQuestions: () =>
@@ -557,6 +569,19 @@ describe("createCommandHandler", () => {
     expect(await getRef(harness.typingStopCount)).toBe(0);
   });
 
+  test("rejects interrupt while a question prompt is pending without an active run", async () => {
+    const harness = await makeHarness({
+      hasPendingQuestions: true,
+    });
+    harness.interaction.commandName = "interrupt";
+
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    expect(await getRef(harness.defers)).toBe(0);
+    expect(await getRef(harness.replies)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
+    expect(await getRef(harness.edits)).toEqual([]);
+    expect(await getRef(harness.typingStopCount)).toBe(0);
+  });
+
   test("reports a lost interrupt when questions become pending right after the interrupt request succeeds", async () => {
     const harness = await makeHarness({
       hasActiveRun: true,
@@ -666,7 +691,7 @@ describe("createCommandHandler", () => {
   test("completes a deferred command with a generic error when unhandled work fails after ack", async () => {
     const harness = await makeHarness({
       hasSession: false,
-      failInvalidate: true,
+      invalidateResult: "failure",
     });
     harness.interaction.commandName = "new-session";
 
@@ -695,6 +720,32 @@ describe("createCommandHandler", () => {
     expect(await getRef(harness.invalidatedSessions)).toEqual([]);
   });
 
+  test("rejects /new-session while a question prompt is pending", async () => {
+    const harness = await makeHarness({
+      hasPendingQuestions: true,
+    });
+    harness.interaction.commandName = "new-session";
+
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    expect(await getRef(harness.defers)).toBe(0);
+    expect(await getRef(harness.replies)).toEqual([QUESTION_PENDING_NEW_SESSION_MESSAGE]);
+    expect(await getRef(harness.invalidatedSessions)).toEqual([]);
+  });
+
+  test("rejects /new-session while compaction is active", async () => {
+    const harness = await makeHarness({
+      hasIdleCompaction: true,
+    });
+    harness.interaction.commandName = "new-session";
+
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    expect(await getRef(harness.defers)).toBe(0);
+    expect(await getRef(harness.replies)).toEqual([
+      "OpenCode is compacting this channel right now. Wait for compaction to finish or use /interrupt before starting a fresh session.",
+    ]);
+    expect(await getRef(harness.invalidatedSessions)).toEqual([]);
+  });
+
   test("rejects /new-session while queued work is still pending", async () => {
     const harness = await makeHarness({
       hasQueuedWork: true,
@@ -706,6 +757,32 @@ describe("createCommandHandler", () => {
     expect(await getRef(harness.replies)).toEqual([
       "OpenCode still has queued work for this channel. Wait for it to finish before starting a fresh session.",
     ]);
+    expect(await getRef(harness.invalidatedSessions)).toEqual([]);
+  });
+
+  test("rejects /new-session on other busy states", async () => {
+    const harness = await makeHarness({
+      hasOtherBusyState: true,
+    });
+    harness.interaction.commandName = "new-session";
+
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    expect(await getRef(harness.defers)).toBe(0);
+    expect(await getRef(harness.replies)).toEqual([NEW_SESSION_BUSY_MESSAGE]);
+    expect(await getRef(harness.invalidatedSessions)).toEqual([]);
+  });
+
+  test("rechecks busy state when /new-session loses the invalidate race", async () => {
+    const harness = await makeHarness({
+      invalidateResult: "busy",
+      hasPendingQuestionsSequence: [false, true],
+    });
+    harness.interaction.commandName = "new-session";
+
+    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    expect(await getRef(harness.defers)).toBe(1);
+    expect(await getRef(harness.replies)).toEqual([]);
+    expect(await getRef(harness.edits)).toEqual([QUESTION_PENDING_NEW_SESSION_MESSAGE]);
     expect(await getRef(harness.invalidatedSessions)).toEqual([]);
   });
 

@@ -4,7 +4,11 @@ export type CommandRejection = { type: "reject"; message: string };
 export const GUILD_TEXT_COMMAND_ONLY_MESSAGE =
   "This command only works in standard guild text channels.";
 export const QUESTION_PENDING_INTERRUPT_MESSAGE =
-  "A question prompt is awaiting input in this channel. Answer it or reject it instead of interrupting the run.";
+  "A question prompt is awaiting input in this channel. Answer it or reject it instead of using /interrupt.";
+export const QUESTION_PENDING_NEW_SESSION_MESSAGE =
+  "A question prompt is awaiting input in this channel. Answer it or reject it before starting a fresh session.";
+export const NEW_SESSION_BUSY_MESSAGE =
+  "OpenCode is busy in this channel right now. Wait for the current work to finish or use /interrupt before starting a fresh session.";
 
 export const decideCompactEntry = (input: {
   inGuildTextChannel: boolean;
@@ -51,13 +55,13 @@ export const decideInterruptEntry = (input: {
   if (!input.hasSession) {
     return { type: "reject", message: "No OpenCode session exists in this channel yet." };
   }
+  if (input.hasPendingQuestions) {
+    return {
+      type: "reject",
+      message: QUESTION_PENDING_INTERRUPT_MESSAGE,
+    };
+  }
   if (input.hasActiveRun) {
-    if (input.hasPendingQuestions) {
-      return {
-        type: "reject",
-        message: QUESTION_PENDING_INTERRUPT_MESSAGE,
-      };
-    }
     return { type: "defer-and-interrupt", target: "run" };
   }
   if (input.hasIdleCompaction) {
@@ -71,12 +75,20 @@ export const decideInterruptEntry = (input: {
 
 export const decideNewSessionEntry = (input: {
   inGuildTextChannel: boolean;
+  hasPendingQuestions: boolean;
   hasActiveRun: boolean;
   hasIdleCompaction: boolean;
   hasQueuedWork: boolean;
+  hasOtherBusyState: boolean;
 }): CommandRejection | { type: "defer-and-invalidate" } => {
   if (!input.inGuildTextChannel) {
     return { type: "reject", message: GUILD_TEXT_COMMAND_ONLY_MESSAGE };
+  }
+  if (input.hasPendingQuestions) {
+    return {
+      type: "reject",
+      message: QUESTION_PENDING_NEW_SESSION_MESSAGE,
+    };
   }
   if (input.hasActiveRun) {
     return {
@@ -97,6 +109,12 @@ export const decideNewSessionEntry = (input: {
       type: "reject",
       message:
         "OpenCode still has queued work for this channel. Wait for it to finish before starting a fresh session.",
+    };
+  }
+  if (input.hasOtherBusyState) {
+    return {
+      type: "reject",
+      message: NEW_SESSION_BUSY_MESSAGE,
     };
   }
   return { type: "defer-and-invalidate" };

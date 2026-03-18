@@ -17,17 +17,17 @@ const baseLayer = Layer.mergeAll(AppConfigLayer, LoggerLayer, OpencodeEventQueue
 const opencodeLayer = OpencodeServiceLayer.pipe(Layer.provide(baseLayer));
 const sessionStoreLayer = SessionStoreLayer.pipe(Layer.provide(AppConfigLayer));
 const sessionsDependenciesLayer = Layer.mergeAll(baseLayer, opencodeLayer, sessionStoreLayer);
-const channelSessionsLayer = SessionOrchestratorLayer.pipe(
+const sessionOrchestratorLayer = SessionOrchestratorLayer.pipe(
   Layer.provide(sessionsDependenciesLayer),
 );
-const startupDependenciesLayer = Layer.mergeAll(baseLayer, channelSessionsLayer);
+const startupDependenciesLayer = Layer.mergeAll(baseLayer, sessionOrchestratorLayer);
 const toolBridgeLayer = ToolBridgeLayer.pipe(Layer.provide(startupDependenciesLayer));
 const discordBotLayer = DiscordBotLayer.pipe(Layer.provide(startupDependenciesLayer));
 
 const appLayer = Layer.mergeAll(
   baseLayer,
   opencodeLayer,
-  channelSessionsLayer,
+  sessionOrchestratorLayer,
   toolBridgeLayer,
   discordBotLayer,
 );

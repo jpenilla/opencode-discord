@@ -4,6 +4,9 @@ import {
   decideCompactAfterHealthCheck,
   decideCompactEntry,
   decideInterruptEntry,
+  decideNewSessionEntry,
+  NEW_SESSION_BUSY_MESSAGE,
+  QUESTION_PENDING_NEW_SESSION_MESSAGE,
   decideRunCompletion,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
 } from "@/sessions/command-lifecycle.ts";
@@ -147,6 +150,21 @@ describe("decideInterruptEntry", () => {
     });
   });
 
+  test("rejects interrupts while a question prompt is pending without an active run", () => {
+    expect(
+      decideInterruptEntry({
+        inGuildTextChannel: true,
+        hasSession: true,
+        hasActiveRun: false,
+        hasPendingQuestions: true,
+        hasIdleCompaction: false,
+      }),
+    ).toEqual({
+      type: "reject",
+      message: QUESTION_PENDING_INTERRUPT_MESSAGE,
+    });
+  });
+
   test("allows active compactions through to interruption", () => {
     expect(
       decideInterruptEntry({
@@ -157,6 +175,120 @@ describe("decideInterruptEntry", () => {
         hasIdleCompaction: true,
       }),
     ).toEqual({ type: "defer-and-interrupt", target: "compaction" });
+  });
+});
+
+describe("decideNewSessionEntry", () => {
+  test("rejects non-standard guild text channels", () => {
+    expect(
+      decideNewSessionEntry({
+        inGuildTextChannel: false,
+        hasPendingQuestions: false,
+        hasActiveRun: false,
+        hasIdleCompaction: false,
+        hasQueuedWork: false,
+        hasOtherBusyState: false,
+      }),
+    ).toEqual({
+      type: "reject",
+      message: "This command only works in standard guild text channels.",
+    });
+  });
+
+  test("rejects while a question prompt is pending", () => {
+    expect(
+      decideNewSessionEntry({
+        inGuildTextChannel: true,
+        hasPendingQuestions: true,
+        hasActiveRun: false,
+        hasIdleCompaction: false,
+        hasQueuedWork: false,
+        hasOtherBusyState: false,
+      }),
+    ).toEqual({
+      type: "reject",
+      message: QUESTION_PENDING_NEW_SESSION_MESSAGE,
+    });
+  });
+
+  test("rejects while a run is active", () => {
+    expect(
+      decideNewSessionEntry({
+        inGuildTextChannel: true,
+        hasPendingQuestions: false,
+        hasActiveRun: true,
+        hasIdleCompaction: false,
+        hasQueuedWork: false,
+        hasOtherBusyState: false,
+      }),
+    ).toEqual({
+      type: "reject",
+      message:
+        "OpenCode is busy in this channel right now. Wait for the current run to finish or use /interrupt before starting a fresh session.",
+    });
+  });
+
+  test("rejects while compaction is active", () => {
+    expect(
+      decideNewSessionEntry({
+        inGuildTextChannel: true,
+        hasPendingQuestions: false,
+        hasActiveRun: false,
+        hasIdleCompaction: true,
+        hasQueuedWork: false,
+        hasOtherBusyState: false,
+      }),
+    ).toEqual({
+      type: "reject",
+      message:
+        "OpenCode is compacting this channel right now. Wait for compaction to finish or use /interrupt before starting a fresh session.",
+    });
+  });
+
+  test("rejects while queued work is pending", () => {
+    expect(
+      decideNewSessionEntry({
+        inGuildTextChannel: true,
+        hasPendingQuestions: false,
+        hasActiveRun: false,
+        hasIdleCompaction: false,
+        hasQueuedWork: true,
+        hasOtherBusyState: false,
+      }),
+    ).toEqual({
+      type: "reject",
+      message:
+        "OpenCode still has queued work for this channel. Wait for it to finish before starting a fresh session.",
+    });
+  });
+
+  test("rejects generic busy states after more specific cases are ruled out", () => {
+    expect(
+      decideNewSessionEntry({
+        inGuildTextChannel: true,
+        hasPendingQuestions: false,
+        hasActiveRun: false,
+        hasIdleCompaction: false,
+        hasQueuedWork: false,
+        hasOtherBusyState: true,
+      }),
+    ).toEqual({
+      type: "reject",
+      message: NEW_SESSION_BUSY_MESSAGE,
+    });
+  });
+
+  test("allows fresh-session invalidation when the channel is clear", () => {
+    expect(
+      decideNewSessionEntry({
+        inGuildTextChannel: true,
+        hasPendingQuestions: false,
+        hasActiveRun: false,
+        hasIdleCompaction: false,
+        hasQueuedWork: false,
+        hasOtherBusyState: false,
+      }),
+    ).toEqual({ type: "defer-and-invalidate" });
   });
 });
 

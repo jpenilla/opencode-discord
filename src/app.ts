@@ -165,13 +165,6 @@ export const DiscordBotLayer = Layer.effectDiscard(
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
         client.removeAllListeners();
-        yield* sessions.shutdown().pipe(
-          Effect.catch((error) =>
-            logger.warn("failed to shut down channel sessions before discord destroy", {
-              error: formatError(error),
-            }),
-          ),
-        );
         yield* Effect.promise(() => client.destroy());
       }),
     );
