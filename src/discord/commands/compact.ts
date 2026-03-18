@@ -2,7 +2,10 @@ import { Effect } from "effect";
 
 import { CommandContext } from "@/discord/commands/command-context.ts";
 import { IdleCompactionWorkflow } from "@/sessions/idle-compaction-workflow.ts";
-import { decideCompactEntry } from "@/sessions/command-lifecycle.ts";
+import {
+  decideCompactEntry,
+  GUILD_TEXT_COMMAND_ONLY_MESSAGE,
+} from "@/sessions/command-lifecycle.ts";
 import { SessionControl } from "@/sessions/session-control.ts";
 import { defineGuildCommand } from "./definition.ts";
 
@@ -14,11 +17,13 @@ export const compactCommand = defineGuildCommand({
     const sessionControl = yield* SessionControl;
     const idleCompaction = yield* IdleCompactionWorkflow;
 
-    const channelActivity = context.inGuildTextChannel
-      ? yield* sessionControl.readRestoredChannelActivity(context.channelId)
-      : ({ type: "missing" } as const);
+    if (!context.inGuildTextChannel || !context.guildTextChannel) {
+      yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
+      return;
+    }
+
+    const channelActivity = yield* sessionControl.readRestoredChannelActivity(context.channelId);
     const entry = decideCompactEntry({
-      inGuildTextChannel: context.inGuildTextChannel && Boolean(context.guildTextChannel),
       channelActivity,
     });
     if (entry.type === "reject") {

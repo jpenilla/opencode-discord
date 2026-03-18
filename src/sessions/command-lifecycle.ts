@@ -12,12 +12,8 @@ export const NEW_SESSION_BUSY_MESSAGE =
   "OpenCode is busy in this channel right now. Wait for the current work to finish or use /interrupt before starting a fresh session.";
 
 export const decideCompactEntry = (input: {
-  inGuildTextChannel: boolean;
   channelActivity: ChannelActivity;
 }): CommandRejection | { type: "defer-and-check-health" } => {
-  if (!input.inGuildTextChannel) {
-    return { type: "reject", message: GUILD_TEXT_COMMAND_ONLY_MESSAGE };
-  }
   if (input.channelActivity.type === "missing") {
     return { type: "reject", message: "No OpenCode session exists in this channel yet." };
   }
@@ -43,12 +39,8 @@ export const decideCompactAfterHealthCheck = (
       };
 
 export const decideInterruptEntry = (input: {
-  inGuildTextChannel: boolean;
   channelActivity: ChannelActivity;
 }): CommandRejection | { type: "defer-and-interrupt"; target: "run" | "compaction" } => {
-  if (!input.inGuildTextChannel) {
-    return { type: "reject", message: GUILD_TEXT_COMMAND_ONLY_MESSAGE };
-  }
   if (input.channelActivity.type === "missing") {
     return { type: "reject", message: "No OpenCode session exists in this channel yet." };
   }
@@ -71,12 +63,8 @@ export const decideInterruptEntry = (input: {
 };
 
 export const decideNewSessionEntry = (input: {
-  inGuildTextChannel: boolean;
   channelActivity: ChannelActivity;
 }): CommandRejection | { type: "defer-and-invalidate" } => {
-  if (!input.inGuildTextChannel) {
-    return { type: "reject", message: GUILD_TEXT_COMMAND_ONLY_MESSAGE };
-  }
   if (input.channelActivity.type === "missing") {
     return { type: "defer-and-invalidate" };
   }
