@@ -2,7 +2,6 @@ import { Effect } from "effect";
 
 import { CommandContext } from "@/discord/commands/command-context.ts";
 import { InfoCards } from "@/discord/info-cards.ts";
-import { IdleCompactionWorkflow } from "@/sessions/idle-compaction-workflow.ts";
 import { GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/sessions/command-lifecycle.ts";
 import { SessionControl } from "@/sessions/session-control.ts";
 import { formatError } from "@/util/errors.ts";
@@ -15,7 +14,6 @@ export const newSessionCommand = defineGuildCommand({
   execute: Effect.gen(function* () {
     const context = yield* CommandContext;
     const sessionControl = yield* SessionControl;
-    const idleCompaction = yield* IdleCompactionWorkflow;
     const infoCards = yield* InfoCards;
     const logger = yield* Logger;
 
@@ -25,16 +23,9 @@ export const newSessionCommand = defineGuildCommand({
     }
 
     const session = yield* sessionControl.getLoaded(context.channelId);
-    if (session?.activeRun) {
+    if (session && (yield* sessionControl.isSessionBusy(session))) {
       yield* context.complete(
         "OpenCode is busy in this channel right now. Wait for the current run to finish or use /interrupt before starting a fresh session.",
-      );
-      return;
-    }
-
-    if (session && (yield* idleCompaction.hasActive(session.opencode.sessionId))) {
-      yield* context.complete(
-        "OpenCode is compacting this channel right now. Wait for compaction to finish or use /interrupt before starting a fresh session.",
       );
       return;
     }
@@ -47,10 +38,16 @@ export const newSessionCommand = defineGuildCommand({
     }
 
     yield* context.ack();
-    yield* sessionControl.invalidate(
+    const invalidated = yield* sessionControl.invalidate(
       context.channelId,
       "requested a fresh session via /new-session",
     );
+    if (!invalidated) {
+      yield* context.complete(
+        "OpenCode is busy in this channel right now. Wait for the current run to finish or use /interrupt before starting a fresh session.",
+      );
+      return;
+    }
     yield* infoCards
       .upsert({
         channel: context.guildTextChannel,

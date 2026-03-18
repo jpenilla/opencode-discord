@@ -40,11 +40,16 @@ type ProgressState = {
   toolCards: Map<string, Message>;
   activeToolParts: Map<string, ToolPart>;
   todoCards: Message[];
-  compactionCard: Message | null;
-  compactionPartIds: Set<string>;
+  compaction: RunCompactionState;
   retryStatusKeys: Set<string>;
   completedReasoningPartIds: Set<string>;
 };
+
+type RunCompactionState =
+  | { type: "inactive" }
+  | { type: "active"; partIds: Set<string>; card: Message | null };
+
+const inactiveRunCompaction = (): RunCompactionState => ({ type: "inactive" });
 
 const createProgressState = (): ProgressState => ({
   patchPartIds: new Set<string>(),
@@ -53,16 +58,47 @@ const createProgressState = (): ProgressState => ({
   toolCards: new Map<string, Message>(),
   activeToolParts: new Map<string, ToolPart>(),
   todoCards: [],
-  compactionCard: null,
-  compactionPartIds: new Set<string>(),
+  compaction: inactiveRunCompaction(),
   retryStatusKeys: new Set<string>(),
   completedReasoningPartIds: new Set<string>(),
 });
 
 const isTodoTool = (tool: string) => tool === "todowrite";
 
-const hasLiveCompaction = (state: ProgressState) =>
-  state.compactionCard !== null || state.compactionPartIds.size > 0;
+const activeRunCompaction = (state: ProgressState) =>
+  state.compaction.type === "active" ? state.compaction : null;
+
+const beginRunCompaction = (state: ProgressState, partId: string) => {
+  const current = activeRunCompaction(state);
+  if (!current) {
+    state.compaction = {
+      type: "active",
+      partIds: new Set([partId]),
+      card: null,
+    };
+    return false;
+  }
+
+  if (current.partIds.has(partId)) {
+    return true;
+  }
+
+  current.partIds.add(partId);
+  return false;
+};
+
+const setRunCompactionCard = (state: ProgressState, card: Message) => {
+  const current = activeRunCompaction(state);
+  if (!current) {
+    return;
+  }
+
+  current.card = card;
+};
+
+const clearRunCompaction = (state: ProgressState) => {
+  state.compaction = inactiveRunCompaction();
+};
 
 const isTerminalToolPart = (part: ToolPart) =>
   part.state.status === "completed" || part.state.status === "error";
@@ -208,26 +244,28 @@ const handleCompactionCard = (
     const channel = message.channel as SendableChannels;
 
     if (event.type === "session-compacting") {
-      if (state.compactionPartIds.has(event.part.id)) {
+      if (beginRunCompaction(state, event.part.id)) {
         return;
       }
-      state.compactionPartIds.add(event.part.id);
       const compactingCard = compactionCardContent("compacting");
-      state.compactionCard = yield* Effect.promise(() =>
+      const current = activeRunCompaction(state);
+      const card = yield* Effect.promise(() =>
         upsertInfoCard({
           channel,
-          existingCard: state.compactionCard,
+          existingCard: current?.card ?? null,
           title: compactingCard.title,
           body: compactingCard.body,
         }),
       );
+      setRunCompactionCard(state, card);
       return;
     }
 
     // session.compacted is only keyed by session id upstream, so a delayed event from an
     // earlier or aborted compaction attempt can arrive while an unrelated later run is active.
     // Only treat completion as relevant if this worker already observed the matching compaction.
-    if (!hasLiveCompaction(state)) {
+    const current = activeRunCompaction(state);
+    if (!current) {
       return;
     }
 
@@ -235,13 +273,12 @@ const handleCompactionCard = (
     yield* Effect.promise(() =>
       upsertInfoCard({
         channel,
-        existingCard: state.compactionCard,
+        existingCard: current.card,
         title: compactedCard.title,
         body: compactedCard.body,
       }),
     );
-    state.compactionPartIds.clear();
-    state.compactionCard = null;
+    clearRunCompaction(state);
   });
 
 const finalizeLiveCards = (
@@ -274,17 +311,17 @@ const finalizeLiveCards = (
     }
 
     state.activeToolParts.clear();
-    state.compactionPartIds.clear();
 
-    if (!state.compactionCard) {
+    const currentCompaction = activeRunCompaction(state);
+    if (!currentCompaction?.card) {
+      clearRunCompaction(state);
       return;
     }
 
     const { title, body } = compactionCardContent("interrupted");
-    yield* Effect.promise(() => editInfoCard(state.compactionCard!, title, body)).pipe(
-      Effect.ignore,
-    );
-    state.compactionCard = null;
+    const card = currentCompaction.card;
+    yield* Effect.promise(() => editInfoCard(card, title, body)).pipe(Effect.ignore);
+    clearRunCompaction(state);
   });
 
 export const runProgressWorker = (

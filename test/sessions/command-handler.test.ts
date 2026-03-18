@@ -229,7 +229,17 @@ const makeHarness = async (options?: HarnessOptions) => {
         yield* Ref.update(sessionRef, (current) =>
           current && current.channelId === channelId ? null : current,
         );
+        return true;
       }),
+    isSessionBusy: (currentSession) =>
+      Ref.get(idleCompactionActive).pipe(
+        Effect.map(
+          (idleCompactionBusy) =>
+            Boolean(currentSession.activeRun) ||
+            idleCompactionBusy ||
+            (options?.hasPendingQuestions ?? false),
+        ),
+      ),
     hasPendingQuestions: () =>
       Ref.updateAndGet(pendingQuestionCheckCount, (count) => count + 1).pipe(
         Effect.map((count) => {

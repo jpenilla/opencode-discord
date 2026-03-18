@@ -28,7 +28,7 @@ import {
   type PromptResult,
   type SessionHandle,
 } from "@/opencode/service.ts";
-import { ChannelSessions, ChannelSessionsLayer } from "@/sessions/registry.ts";
+import { SessionOrchestrator, SessionOrchestratorLayer } from "@/sessions/session-orchestrator.ts";
 import { QUESTION_PENDING_INTERRUPT_MESSAGE } from "@/sessions/command-lifecycle.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import {
@@ -629,7 +629,7 @@ const makeHarness = async (options: {
     Layer.succeed(SessionStore, sessionStore),
     Layer.succeed(OpencodeEventQueue, eventQueue),
   );
-  const harnessLayer = Layer.merge(deps, ChannelSessionsLayer.pipe(Layer.provide(deps)));
+  const harnessLayer = Layer.merge(deps, SessionOrchestratorLayer.pipe(Layer.provide(deps)));
 
   return {
     replies,
@@ -654,7 +654,7 @@ const makeHarness = async (options: {
   };
 };
 
-describe("ChannelSessionsLayer integration", () => {
+describe("SessionOrchestratorLayer integration", () => {
   test("submits a message, prompts opencode, and replies with the final response", async () => {
     const harness = await makeHarness({
       promptImpl: ({ completePrompt }) =>
@@ -671,7 +671,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("done");
         }).pipe(Effect.provide(harness.harnessLayer)),
@@ -719,7 +719,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(firstMessage, { prompt: "hello" });
           yield* Deferred.await(firstPromptStarted);
           yield* sessions.submit(secondMessage, { prompt: "follow up" });
@@ -805,7 +805,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(firstMessage, { prompt: "hello" });
           yield* Deferred.await(assistantFinished);
 
@@ -897,7 +897,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(firstMessage, { prompt: "hello" });
           yield* Deferred.await(firstPromptStarted);
           yield* sessions.submit(secondMessage, { prompt: "follow up" });
@@ -946,7 +946,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("🗜️ Compacted Summary\nsummary text");
           expect(yield* Queue.take(harness.replyEvents)).toBe("final reply");
@@ -973,7 +973,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("final reply");
           yield* waitForNoActiveRun(sessions, "session-1");
@@ -1046,7 +1046,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("done");
         }).pipe(Effect.provide(harness.harnessLayer)),
@@ -1061,7 +1061,7 @@ describe("ChannelSessionsLayer integration", () => {
     );
   });
 
-  test("runs /compact through ChannelSessionsLayer and posts a channel info card", async () => {
+  test("runs /compact through SessionOrchestratorLayer and posts a channel info card", async () => {
     const compactStarted = await Effect.runPromise(Deferred.make<void>());
     const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
@@ -1084,7 +1084,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           yield* Queue.take(harness.replyEvents);
           yield* waitForNoActiveRun(sessions, "session-1");
@@ -1112,7 +1112,7 @@ describe("ChannelSessionsLayer integration", () => {
     );
   });
 
-  test("runs /interrupt through ChannelSessionsLayer and stops the active run", async () => {
+  test("runs /interrupt through SessionOrchestratorLayer and stops the active run", async () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>());
     const interruptRequested = await Effect.runPromise(Deferred.make<void>());
     const promptFinished = await Effect.runPromise(Deferred.make<void>());
@@ -1137,7 +1137,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
           yield* sessions.handleInteraction(command.interaction);
@@ -1192,7 +1192,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
           yield* sessions.handleInteraction(command.interaction);
@@ -1247,7 +1247,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));
@@ -1277,7 +1277,7 @@ describe("ChannelSessionsLayer integration", () => {
     );
   });
 
-  test("runs /interrupt through ChannelSessionsLayer, marks compaction interrupting, and allows later completion", async () => {
+  test("runs /interrupt through SessionOrchestratorLayer, marks compaction interrupting, and allows later completion", async () => {
     const compactStarted = await Effect.runPromise(Deferred.make<void>());
     const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
@@ -1303,7 +1303,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           yield* Queue.take(harness.replyEvents);
           yield* waitForNoActiveRun(sessions, "session-1");
@@ -1353,7 +1353,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           yield* Queue.take(harness.replyEvents);
           yield* waitForNoActiveRun(sessions, "session-1");
@@ -1372,7 +1372,7 @@ describe("ChannelSessionsLayer integration", () => {
     ]);
   });
 
-  test("runs /new-session through ChannelSessionsLayer and recreates the next message on the same workdir", async () => {
+  test("runs /new-session through SessionOrchestratorLayer and recreates the next message on the same workdir", async () => {
     const harness = await makeHarness({
       promptImpl: ({ callIndex, completePrompt }) =>
         completePrompt({
@@ -1393,7 +1393,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(firstMessage, { prompt: "first" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("first");
           yield* waitForNoActiveRun(sessions, "session-1");
@@ -1447,7 +1447,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           yield* Queue.take(harness.replyEvents);
           yield* waitForNoActiveRun(sessions, "session-1");
@@ -1506,7 +1506,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(initialMessage, { prompt: "hello" });
           yield* Queue.take(harness.replyEvents);
           yield* waitForNoActiveRun(sessions, "session-1");
@@ -1578,7 +1578,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(firstMessage, { prompt: "first" });
           expect(yield* Queue.take(harness.replyEvents)).toContain("Opencode failed");
           yield* waitForNoActiveRun(sessions, "session-1");
@@ -1600,7 +1600,7 @@ describe("ChannelSessionsLayer integration", () => {
     ]);
   });
 
-  test("processes queued question events through ChannelSessionsLayer and finalizes the question card", async () => {
+  test("processes queued question events through SessionOrchestratorLayer and finalizes the question card", async () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>());
     const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
@@ -1623,7 +1623,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));
@@ -1643,7 +1643,7 @@ describe("ChannelSessionsLayer integration", () => {
     );
   });
 
-  test("routes question interactions through ChannelSessionsLayer after command handling falls through", async () => {
+  test("routes question interactions through SessionOrchestratorLayer after command handling falls through", async () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>());
     const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>());
     const harness = await makeHarness({
@@ -1667,7 +1667,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));
@@ -1704,7 +1704,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));
@@ -1744,7 +1744,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
           yield* sessions.shutdown();
@@ -1781,7 +1781,7 @@ describe("ChannelSessionsLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelSessions;
+          const sessions = yield* SessionOrchestrator;
           yield* sessions.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));

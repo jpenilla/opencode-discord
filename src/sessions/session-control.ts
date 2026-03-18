@@ -7,7 +7,8 @@ import type { ChannelSettings } from "@/state/channel-settings.ts";
 export type SessionControlShape = {
   getLoaded: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
   getOrRestore: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
-  invalidate: (channelId: string, reason: string) => Effect.Effect<void, unknown>;
+  invalidate: (channelId: string, reason: string) => Effect.Effect<boolean, unknown>;
+  isSessionBusy: (session: ChannelSession) => Effect.Effect<boolean, unknown>;
   hasPendingQuestions: (sessionId: string) => Effect.Effect<boolean, unknown>;
   attachProgressChannel: (
     session: ChannelSession,
@@ -30,11 +31,13 @@ export const makeSessionControl = (deps: {
   getLoaded: SessionControlShape["getLoaded"];
   getOrRestore: SessionControlShape["getOrRestore"];
   invalidate: SessionControlShape["invalidate"];
+  isSessionBusy: SessionControlShape["isSessionBusy"];
   hasPendingQuestions: SessionControlShape["hasPendingQuestions"];
 }): SessionControlShape => ({
   getLoaded: deps.getLoaded,
   getOrRestore: deps.getOrRestore,
   invalidate: deps.invalidate,
+  isSessionBusy: deps.isSessionBusy,
   hasPendingQuestions: deps.hasPendingQuestions,
   attachProgressChannel: (session, channel) =>
     Effect.sync(() => {
