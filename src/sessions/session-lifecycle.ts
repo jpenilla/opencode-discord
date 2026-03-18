@@ -21,7 +21,7 @@ import { sessionRootDir, sessionWorkdirFromRoot } from "@/state/paths.ts";
 import type { PersistedChannelSession } from "@/state/store.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
-export type SessionGate = Deferred.Deferred<ChannelSession, unknown>;
+export type SessionGate = Deferred.Deferred<void, never>;
 
 export type SessionLifecycleState = {
   sessionsByChannelId: Map<string, ChannelSession>;
@@ -234,12 +234,12 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
       };
     });
 
-  const withSessionGate = (
+  const withSessionGate = <A>(
     channelId: string,
-    task: Effect.Effect<ChannelSession, unknown>,
-  ): Effect.Effect<ChannelSession, unknown> =>
+    task: Effect.Effect<A, unknown>,
+  ): Effect.Effect<A, unknown> =>
     Effect.gen(function* () {
-      const gate = yield* Deferred.make<ChannelSession, unknown>();
+      const gate = yield* Deferred.make<void, never>();
       const { gate: currentGate, owner } = yield* Ref.modify(
         deps.stateRef,
         (current): readonly [SessionGateDecision, State] => {
@@ -261,14 +261,17 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
       );
 
       if (owner) {
-        yield* task.pipe(
-          Effect.exit,
-          Effect.tap((exit) => Deferred.done(currentGate, exit).pipe(Effect.ignore)),
-          Effect.ensuring(clearSessionGate(channelId, currentGate)),
+        return yield* task.pipe(
+          Effect.ensuring(
+            clearSessionGate(channelId, currentGate).pipe(
+              Effect.andThen(Deferred.succeed(currentGate, undefined).pipe(Effect.ignore)),
+            ),
+          ),
         );
       }
 
-      return yield* Deferred.await(currentGate);
+      yield* Deferred.await(currentGate);
+      return yield* withSessionGate(channelId, task);
     });
 
   const touchSessionActivity = (session: ChannelSession, at = Date.now()) =>
@@ -276,6 +279,13 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
       session.lastActivityAt = at;
       yield* deps.touchPersistedSession(session.channelId, at);
     });
+
+  const isSessionBusy = (session: ChannelSession) =>
+    session.activeRun
+      ? Effect.succeed(true)
+      : deps.isSessionBusy
+        ? deps.isSessionBusy(session)
+        : Effect.succeed(false);
 
   const activateSession = (
     session: ChannelSession,
@@ -581,12 +591,9 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
           state.sessionsByChannelId.values(),
           (session) =>
             Effect.gen(function* () {
-              const externallyBusy = deps.isSessionBusy
-                ? yield* deps.isSessionBusy(session)
-                : false;
+              const busy = yield* isSessionBusy(session);
               if (
-                session.activeRun ||
-                externallyBusy ||
+                busy ||
                 !deps.idleTimeoutMs ||
                 now - session.lastActivityAt < deps.idleTimeoutMs
               ) {
@@ -609,37 +616,46 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     );
 
   const invalidateSession = (channelId: string, reason: string) =>
-    Effect.gen(function* () {
-      const loadedSession = yield* getSession(channelId);
-      const persisted = yield* deps.getPersistedSession(channelId);
+    withSessionGate(
+      channelId,
+      Effect.gen(function* () {
+        const loadedSession = yield* getSession(channelId);
+        const persisted = yield* deps.getPersistedSession(channelId);
 
-      if (loadedSession) {
-        yield* deleteSession(loadedSession);
-        yield* Queue.shutdown(loadedSession.queue).pipe(Effect.ignore);
-        yield* loadedSession.opencode.close().pipe(Effect.ignore);
-      }
+        if (loadedSession && (yield* isSessionBusy(loadedSession))) {
+          return false;
+        }
 
-      yield* deps.deletePersistedSession(channelId).pipe(Effect.ignore);
+        if (loadedSession) {
+          yield* deleteSession(loadedSession);
+          yield* Queue.shutdown(loadedSession.queue).pipe(Effect.ignore);
+          yield* loadedSession.opencode.close().pipe(Effect.ignore);
+        }
 
-      if (loadedSession) {
-        yield* deps.logger.info("invalidated loaded channel session", {
-          channelId,
-          sessionId: loadedSession.opencode.sessionId,
-          workdir: loadedSession.workdir,
-          reason,
-        });
-        return;
-      }
+        yield* deps.deletePersistedSession(channelId).pipe(Effect.ignore);
 
-      if (persisted) {
-        yield* deps.logger.info("invalidated persisted channel session", {
-          channelId,
-          sessionId: persisted.opencodeSessionId,
-          workdir: sessionWorkdirFromRoot(persisted.rootDir),
-          reason,
-        });
-      }
-    });
+        if (loadedSession) {
+          yield* deps.logger.info("invalidated loaded channel session", {
+            channelId,
+            sessionId: loadedSession.opencode.sessionId,
+            workdir: loadedSession.workdir,
+            reason,
+          });
+          return true;
+        }
+
+        if (persisted) {
+          yield* deps.logger.info("invalidated persisted channel session", {
+            channelId,
+            sessionId: persisted.opencodeSessionId,
+            workdir: sessionWorkdirFromRoot(persisted.rootDir),
+            reason,
+          });
+        }
+
+        return true;
+      }),
+    );
 
   const shutdownSessions = () =>
     Ref.get(deps.stateRef).pipe(

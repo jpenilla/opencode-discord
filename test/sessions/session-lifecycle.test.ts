@@ -229,7 +229,7 @@ describe("createSessionLifecycle", () => {
     expect(await Effect.runPromise(Ref.get(created))).toBe(1);
   });
 
-  test("clears the gate after a failed cold start so a later retry can succeed", async () => {
+  test("clears the gate after a failed cold start so a waiting retry can succeed", async () => {
     const createStarted = await Effect.runPromise(Deferred.make<void>());
     const releaseCreate = await Effect.runPromise(Deferred.make<void>());
     const createCount = await Effect.runPromise(Ref.make(0));
@@ -264,11 +264,13 @@ describe("createSessionLifecycle", () => {
       }),
     );
 
-    expect(exits.map((exit) => exit._tag)).toEqual(["Failure", "Failure"]);
+    expect(exits.map((exit) => exit._tag)).toEqual(["Failure", "Success"]);
     expect(await Effect.runPromise(Ref.get(removedRoots))).toEqual(["/tmp/session-root-1"]);
-
-    const retried = await Effect.runPromise(lifecycle.createOrGetSession(message));
-    expect(retried.opencode.sessionId).toBe("session-2");
+    const succeeded = exits.find((exit) => exit._tag === "Success");
+    expect(succeeded?._tag).toBe("Success");
+    expect(
+      succeeded && succeeded._tag === "Success" ? succeeded.value.opencode.sessionId : null,
+    ).toBe("session-2");
     expect(await Effect.runPromise(Ref.get(started))).toEqual(["session-2"]);
   });
 
@@ -367,14 +369,82 @@ describe("createSessionLifecycle", () => {
     const message = makeMessage("channel-1");
     const session = await Effect.runPromise(lifecycle.createOrGetSession(message));
 
-    await Effect.runPromise(
-      lifecycle.invalidateSession("channel-1", "user requested /new-session"),
-    );
+    expect(
+      await Effect.runPromise(
+        lifecycle.invalidateSession("channel-1", "user requested /new-session"),
+      ),
+    ).toBe(true);
 
     expect(await Effect.runPromise(Ref.get(closed))).toEqual([session.opencode.sessionId]);
     expect(await Effect.runPromise(lifecycle.getSession("channel-1"))).toBeUndefined();
     expect(await Effect.runPromise(Ref.get(persisted))).toEqual(new Map());
     expect(await Effect.runPromise(Ref.get(removedRoots))).toEqual([]);
+  });
+
+  test("invalidates a session that was still being created", async () => {
+    const createStarted = await Effect.runPromise(Deferred.make<void>());
+    const releaseCreate = await Effect.runPromise(Deferred.make<void>());
+    const { lifecycle, closed, persisted } = await makeHarness({
+      createOpencodeSession: ({ workdir }) =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(createStarted, undefined).pipe(Effect.ignore);
+          yield* Deferred.await(releaseCreate);
+          return makeHandle("session-race", workdir, (sessionId) => {
+            Effect.runSync(Ref.update(closed, (current) => [...current, sessionId]));
+          });
+        }),
+    });
+    const message = makeMessage("channel-race");
+
+    const [created, invalidated] = await Effect.runPromise(
+      Effect.gen(function* () {
+        const createFiber = yield* Effect.forkChild(lifecycle.createOrGetSession(message));
+        yield* Deferred.await(createStarted);
+        const invalidateFiber = yield* Effect.forkChild(
+          lifecycle.invalidateSession("channel-race", "user requested /new-session"),
+        );
+        yield* Deferred.succeed(releaseCreate, undefined).pipe(Effect.ignore);
+        return yield* Effect.all([Fiber.join(createFiber), Fiber.join(invalidateFiber)]);
+      }),
+    );
+
+    expect(created.opencode.sessionId).toBe("session-race");
+    expect(invalidated).toBe(true);
+    expect(await Effect.runPromise(lifecycle.getSession("channel-race"))).toBeUndefined();
+    expect(await Effect.runPromise(Ref.get(persisted))).toEqual(new Map());
+    expect(await Effect.runPromise(Ref.get(closed))).toEqual(["session-race"]);
+  });
+
+  test("does not invalidate a loaded session while it is busy", async () => {
+    const { lifecycle, closed, persisted } = await makeHarness({
+      isSessionBusy: () => Effect.succeed(true),
+    });
+    const message = makeMessage("channel-1");
+    const session = await Effect.runPromise(lifecycle.createOrGetSession(message));
+
+    expect(
+      await Effect.runPromise(
+        lifecycle.invalidateSession("channel-1", "user requested /new-session"),
+      ),
+    ).toBe(false);
+
+    expect(await Effect.runPromise(Ref.get(closed))).toEqual([]);
+    expect(await Effect.runPromise(lifecycle.getSession("channel-1"))).toBe(session);
+    expect(await Effect.runPromise(Ref.get(persisted))).toEqual(
+      new Map([
+        [
+          "channel-1",
+          {
+            channelId: "channel-1",
+            opencodeSessionId: session.opencode.sessionId,
+            rootDir: session.rootDir,
+            systemPromptAppend: session.systemPromptAppend,
+            createdAt: session.createdAt,
+            lastActivityAt: session.lastActivityAt,
+          },
+        ],
+      ]),
+    );
   });
 
   test("does not close idle sessions while an external busy callback reports active work", async () => {
