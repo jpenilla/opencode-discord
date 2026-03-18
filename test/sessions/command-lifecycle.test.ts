@@ -27,28 +27,9 @@ const presentChannelActivity = (activity: {
   }) as const;
 
 describe("decideCompactEntry", () => {
-  test("rejects non-standard guild text channels", () => {
-    expect(
-      decideCompactEntry({
-        inGuildTextChannel: false,
-        channelActivity: presentChannelActivity({
-          hasActiveRun: false,
-          hasPendingQuestions: false,
-          hasIdleCompaction: false,
-          hasQueuedWork: false,
-          isBusy: false,
-        }),
-      }),
-    ).toEqual({
-      type: "reject",
-      message: "This command only works in standard guild text channels.",
-    });
-  });
-
   test("rejects when no session exists", () => {
     expect(
       decideCompactEntry({
-        inGuildTextChannel: true,
         channelActivity: missingChannelActivity,
       }),
     ).toEqual({
@@ -60,7 +41,6 @@ describe("decideCompactEntry", () => {
   test("rejects when a run is already active", () => {
     expect(
       decideCompactEntry({
-        inGuildTextChannel: true,
         channelActivity: presentChannelActivity({
           hasActiveRun: true,
           hasPendingQuestions: false,
@@ -79,7 +59,6 @@ describe("decideCompactEntry", () => {
   test("allows idle sessions through to health checking", () => {
     expect(
       decideCompactEntry({
-        inGuildTextChannel: true,
         channelActivity: presentChannelActivity({
           hasActiveRun: false,
           hasPendingQuestions: false,
@@ -107,28 +86,9 @@ describe("decideCompactAfterHealthCheck", () => {
 });
 
 describe("decideInterruptEntry", () => {
-  test("rejects non-standard guild text channels", () => {
-    expect(
-      decideInterruptEntry({
-        inGuildTextChannel: false,
-        channelActivity: presentChannelActivity({
-          hasActiveRun: true,
-          hasPendingQuestions: false,
-          hasIdleCompaction: false,
-          hasQueuedWork: false,
-          isBusy: true,
-        }),
-      }),
-    ).toEqual({
-      type: "reject",
-      message: "This command only works in standard guild text channels.",
-    });
-  });
-
   test("rejects when no session exists", () => {
     expect(
       decideInterruptEntry({
-        inGuildTextChannel: true,
         channelActivity: missingChannelActivity,
       }),
     ).toEqual({
@@ -140,7 +100,6 @@ describe("decideInterruptEntry", () => {
   test("rejects when no active run or compaction exists", () => {
     expect(
       decideInterruptEntry({
-        inGuildTextChannel: true,
         channelActivity: presentChannelActivity({
           hasActiveRun: false,
           hasPendingQuestions: false,
@@ -158,7 +117,6 @@ describe("decideInterruptEntry", () => {
   test("allows active runs through to interruption", () => {
     expect(
       decideInterruptEntry({
-        inGuildTextChannel: true,
         channelActivity: presentChannelActivity({
           hasActiveRun: true,
           hasPendingQuestions: false,
@@ -173,7 +131,6 @@ describe("decideInterruptEntry", () => {
   test("rejects active run interrupts while a question prompt is pending", () => {
     expect(
       decideInterruptEntry({
-        inGuildTextChannel: true,
         channelActivity: presentChannelActivity({
           hasActiveRun: true,
           hasPendingQuestions: true,
@@ -191,7 +148,6 @@ describe("decideInterruptEntry", () => {
   test("rejects interrupts while a question prompt is pending without an active run", () => {
     expect(
       decideInterruptEntry({
-        inGuildTextChannel: true,
         channelActivity: presentChannelActivity({
           hasActiveRun: false,
           hasPendingQuestions: true,
@@ -209,7 +165,6 @@ describe("decideInterruptEntry", () => {
   test("allows active compactions through to interruption", () => {
     expect(
       decideInterruptEntry({
-        inGuildTextChannel: true,
         channelActivity: presentChannelActivity({
           hasActiveRun: false,
           hasPendingQuestions: false,
@@ -223,22 +178,9 @@ describe("decideInterruptEntry", () => {
 });
 
 describe("decideNewSessionEntry", () => {
-  test("rejects non-standard guild text channels", () => {
-    expect(
-      decideNewSessionEntry({
-        inGuildTextChannel: false,
-        channelActivity: missingChannelActivity,
-      }),
-    ).toEqual({
-      type: "reject",
-      message: "This command only works in standard guild text channels.",
-    });
-  });
-
   test("rejects while a question prompt is pending", () => {
     expect(
       decideNewSessionEntry({
-        inGuildTextChannel: true,
         channelActivity: presentChannelActivity({
           hasActiveRun: false,
           hasPendingQuestions: true,
@@ -256,7 +198,6 @@ describe("decideNewSessionEntry", () => {
   test("rejects while a run is active", () => {
     expect(
       decideNewSessionEntry({
-        inGuildTextChannel: true,
         channelActivity: presentChannelActivity({
           hasActiveRun: true,
           hasPendingQuestions: false,
@@ -275,7 +216,6 @@ describe("decideNewSessionEntry", () => {
   test("rejects while compaction is active", () => {
     expect(
       decideNewSessionEntry({
-        inGuildTextChannel: true,
         channelActivity: presentChannelActivity({
           hasActiveRun: false,
           hasPendingQuestions: false,
@@ -294,7 +234,6 @@ describe("decideNewSessionEntry", () => {
   test("rejects while queued work is pending", () => {
     expect(
       decideNewSessionEntry({
-        inGuildTextChannel: true,
         channelActivity: presentChannelActivity({
           hasActiveRun: false,
           hasPendingQuestions: false,
@@ -313,7 +252,6 @@ describe("decideNewSessionEntry", () => {
   test("rejects generic busy states after more specific cases are ruled out", () => {
     expect(
       decideNewSessionEntry({
-        inGuildTextChannel: true,
         channelActivity: presentChannelActivity({
           hasActiveRun: false,
           hasPendingQuestions: false,
@@ -331,7 +269,6 @@ describe("decideNewSessionEntry", () => {
   test("allows fresh-session invalidation when the channel is clear", () => {
     expect(
       decideNewSessionEntry({
-        inGuildTextChannel: true,
         channelActivity: missingChannelActivity,
       }),
     ).toEqual({ type: "defer-and-invalidate" });

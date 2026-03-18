@@ -6,6 +6,7 @@ import { OpencodeService } from "@/opencode/service.ts";
 import { IdleCompactionWorkflow } from "@/sessions/idle-compaction-workflow.ts";
 import {
   decideInterruptEntry,
+  GUILD_TEXT_COMMAND_ONLY_MESSAGE,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
 } from "@/sessions/command-lifecycle.ts";
 import { SessionControl } from "@/sessions/session-control.ts";
@@ -21,11 +22,13 @@ export const interruptCommand = defineGuildCommand({
     const idleCompaction = yield* IdleCompactionWorkflow;
     const opencode = yield* OpencodeService;
 
-    const channelActivity = context.inGuildTextChannel
-      ? yield* sessionControl.readRestoredChannelActivity(context.channelId)
-      : ({ type: "missing" } as const);
+    if (!context.inGuildTextChannel) {
+      yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
+      return;
+    }
+
+    const channelActivity = yield* sessionControl.readRestoredChannelActivity(context.channelId);
     const entry = decideInterruptEntry({
-      inGuildTextChannel: context.inGuildTextChannel,
       channelActivity,
     });
     if (entry.type === "reject") {
