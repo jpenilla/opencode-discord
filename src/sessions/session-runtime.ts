@@ -2,23 +2,51 @@ import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import type { Interaction, Message, SendableChannels } from "discord.js";
-import { Deferred, Effect, Queue, Ref, ServiceMap } from "effect";
+import { Deferred, Effect, FiberSet, Layer, Option, Queue, Ref, ServiceMap } from "effect";
 
+import { AppConfig } from "@/config.ts";
+import { formatErrorResponse } from "@/discord/formatting.ts";
+import { InfoCards } from "@/discord/info-cards.ts";
+import { sendFinalResponse, startTypingLoop } from "@/discord/messages.ts";
 import { buildSessionSystemAppend } from "@/discord/system-context.ts";
+import { OpencodeEventQueue } from "@/opencode/events.ts";
 import type { OpencodeServiceShape, SessionHandle } from "@/opencode/service.ts";
+import { OpencodeService } from "@/opencode/service.ts";
+import {
+  type IdleCompactionWorkflowInterruptResult,
+  type IdleCompactionWorkflowShape,
+  type IdleCompactionWorkflowStartResult,
+  makeIdleCompactionWorkflow,
+} from "@/sessions/idle-compaction-workflow.ts";
+import { createEventHandler } from "@/sessions/event-handler.ts";
+import { coordinateActiveRunPrompts } from "@/sessions/prompt-coordinator.ts";
+import { runProgressWorker } from "@/sessions/progress.ts";
+import {
+  type QuestionWorkflowEvent,
+  type QuestionWorkflowSignal,
+} from "@/sessions/question-coordinator.ts";
+import { makeQuestionRuntime, type QuestionRuntime } from "@/sessions/question-runtime.ts";
+import { enqueueRunRequest, type RunRequestDestination } from "@/sessions/request-routing.ts";
+import { executeRunBatch } from "@/sessions/run-executor.ts";
+import { takeQueuedRunBatch } from "@/sessions/run-batch.ts";
 import {
   buildSessionCreateSpec,
   type ActiveRun,
   type ChannelSession,
   type RunRequest,
 } from "@/sessions/session.ts";
+import { createSessionShutdown } from "@/sessions/session-shutdown.ts";
 import {
+  defaultChannelSettings,
   resolveChannelSettings,
   type ChannelSettings,
   type PersistedChannelSettings,
 } from "@/state/channel-settings.ts";
 import { sessionRootDir, sessionWorkdirFromRoot } from "@/state/paths.ts";
-import type { PersistedChannelSession } from "@/state/store.ts";
+import { resolveStatePaths } from "@/state/paths.ts";
+import { SessionStore, type PersistedChannelSession } from "@/state/store.ts";
+import { formatError } from "@/util/errors.ts";
+import { Logger } from "@/util/logging.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
 export type SessionGate = Deferred.Deferred<void, never>;
@@ -51,27 +79,42 @@ export type ChannelActivity =
       activity: SessionActivity;
     };
 
+export type QueuedMessageRunRequest = {
+  sessionId: string;
+  destination: RunRequestDestination;
+};
+
+export type RunInterruptRequestResult =
+  | { type: "requested" }
+  | { type: "question-pending" }
+  | { type: "failed"; error: unknown };
+
 export type SessionRuntimeShape = {
-  getLoaded: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
-  getOrRestore: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
   readSessionActivity: (session: ChannelSession) => Effect.Effect<SessionActivity, unknown>;
   readLoadedChannelActivity: (channelId: string) => Effect.Effect<ChannelActivity, unknown>;
   readRestoredChannelActivity: (channelId: string) => Effect.Effect<ChannelActivity, unknown>;
-  getUsableSession: (message: Message, reason: string) => Effect.Effect<ChannelSession, unknown>;
   getActiveRunBySessionId: (sessionId: string) => Effect.Effect<ActiveRun | null, unknown>;
+  queueMessageRunRequest: (
+    message: Message,
+    request: RunRequest,
+    reason: string,
+  ) => Effect.Effect<QueuedMessageRunRequest, unknown>;
   routeQuestionInteraction: (interaction: Interaction) => Effect.Effect<void, unknown>;
   invalidate: (channelId: string, reason: string) => Effect.Effect<boolean, unknown>;
-  attachProgressChannel: (
+  updateLoadedChannelSettings: (
+    channelId: string,
+    settings: ChannelSettings,
+  ) => Effect.Effect<void>;
+  requestRunInterrupt: (
+    session: ChannelSession,
+  ) => Effect.Effect<RunInterruptRequestResult, unknown>;
+  startCompaction: (
     session: ChannelSession,
     channel: SendableChannels,
-  ) => Effect.Effect<void>;
-  setChannelSettings: (session: ChannelSession, settings: ChannelSettings) => Effect.Effect<void>;
-  setRunInterruptRequested: (
-    activeRun: ActiveRun,
-    requested: boolean,
-    source?: "user" | "shutdown" | null,
-  ) => Effect.Effect<void>;
-  isShuttingDown: () => Effect.Effect<boolean>;
+  ) => Effect.Effect<IdleCompactionWorkflowStartResult, unknown>;
+  requestCompactionInterrupt: (
+    session: ChannelSession,
+  ) => Effect.Effect<IdleCompactionWorkflowInterruptResult, unknown>;
   shutdown: () => Effect.Effect<void, unknown>;
 };
 
@@ -731,16 +774,24 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
 };
 
 export const makeSessionRuntime = (deps: {
-  getLoaded: SessionRuntimeShape["getLoaded"];
-  getOrRestore: SessionRuntimeShape["getOrRestore"];
-  getUsableSession: SessionRuntimeShape["getUsableSession"];
+  getLoaded: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
+  getOrRestore: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
   getActiveRunBySessionId: SessionRuntimeShape["getActiveRunBySessionId"];
+  queueMessageRunRequest: SessionRuntimeShape["queueMessageRunRequest"];
   routeQuestionInteraction: SessionRuntimeShape["routeQuestionInteraction"];
   invalidate: SessionRuntimeShape["invalidate"];
+  updateLoadedChannelSettings: SessionRuntimeShape["updateLoadedChannelSettings"];
+  interruptSession: (session: ChannelSession) => Effect.Effect<void, unknown>;
+  setRunInterruptRequested: (
+    activeRun: ActiveRun,
+    requested: boolean,
+    source?: "user" | "shutdown" | null,
+  ) => Effect.Effect<void>;
   isSessionBusy: (session: ChannelSession) => Effect.Effect<boolean, unknown>;
   hasPendingQuestions: (sessionId: string) => Effect.Effect<boolean, unknown>;
   hasIdleCompaction: (sessionId: string) => Effect.Effect<boolean, unknown>;
-  isShuttingDown: SessionRuntimeShape["isShuttingDown"];
+  startCompaction: SessionRuntimeShape["startCompaction"];
+  requestCompactionInterrupt: SessionRuntimeShape["requestCompactionInterrupt"];
   shutdown: SessionRuntimeShape["shutdown"];
 }): SessionRuntimeShape => {
   const readSessionActivity: SessionRuntimeShape["readSessionActivity"] = (session) =>
@@ -779,31 +830,464 @@ export const makeSessionRuntime = (deps: {
         );
 
   return {
-    getLoaded: deps.getLoaded,
-    getOrRestore: deps.getOrRestore,
     readSessionActivity,
     readLoadedChannelActivity: (channelId) =>
       deps.getLoaded(channelId).pipe(Effect.flatMap(toChannelActivity)),
     readRestoredChannelActivity: (channelId) =>
       deps.getOrRestore(channelId).pipe(Effect.flatMap(toChannelActivity)),
-    getUsableSession: deps.getUsableSession,
     getActiveRunBySessionId: deps.getActiveRunBySessionId,
+    queueMessageRunRequest: deps.queueMessageRunRequest,
     routeQuestionInteraction: deps.routeQuestionInteraction,
     invalidate: deps.invalidate,
-    attachProgressChannel: (session, channel) =>
-      Effect.sync(() => {
-        session.progressChannel = channel;
+    updateLoadedChannelSettings: deps.updateLoadedChannelSettings,
+    requestRunInterrupt: (session) =>
+      Effect.gen(function* () {
+        const activeRun = session.activeRun;
+        if (!activeRun) {
+          return {
+            type: "failed",
+            error: new Error("no active run for session"),
+          } satisfies RunInterruptRequestResult;
+        }
+
+        yield* deps.setRunInterruptRequested(activeRun, true);
+        const interruptResult = yield* deps.interruptSession(session).pipe(Effect.result);
+        if (interruptResult._tag === "Failure") {
+          yield* deps.setRunInterruptRequested(activeRun, false);
+          return {
+            type: "failed",
+            error: interruptResult.failure,
+          } satisfies RunInterruptRequestResult;
+        }
+
+        const updatedActivity = yield* readSessionActivity(session);
+        if (updatedActivity.hasPendingQuestions) {
+          yield* deps.setRunInterruptRequested(activeRun, false);
+          return {
+            type: "question-pending",
+          } satisfies RunInterruptRequestResult;
+        }
+
+        return {
+          type: "requested",
+        } satisfies RunInterruptRequestResult;
       }),
-    setChannelSettings: (session, settings) =>
-      Effect.sync(() => {
-        session.channelSettings = settings;
-      }),
-    setRunInterruptRequested: (activeRun, requested, source = requested ? "user" : null) =>
-      Effect.sync(() => {
-        activeRun.interruptRequested = requested;
-        activeRun.interruptSource = requested ? source : null;
-      }),
-    isShuttingDown: deps.isShuttingDown,
+    startCompaction: deps.startCompaction,
+    requestCompactionInterrupt: deps.requestCompactionInterrupt,
     shutdown: deps.shutdown,
   };
 };
+
+type SessionRuntimeLayerState = SessionLifecycleState;
+
+const createSessionRuntimeState = (): SessionRuntimeLayerState => ({
+  sessionsByChannelId: new Map(),
+  sessionsBySessionId: new Map(),
+  activeRunsBySessionId: new Map(),
+  gatesByChannelId: new Map(),
+});
+
+export const SessionRuntimeLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const logger = yield* Logger;
+    const config = yield* AppConfig;
+    const infoCards = yield* InfoCards;
+    const opencode = yield* OpencodeService;
+    const eventQueue = yield* OpencodeEventQueue;
+    const sessionStore = yield* SessionStore;
+    const stateRef = yield* Ref.make(createSessionRuntimeState());
+    const shutdownStartedRef = yield* Ref.make(false);
+    const questionTypingPausedRef = yield* Ref.make(new Set<string>());
+    const fiberSet = yield* FiberSet.make();
+    const statePaths = resolveStatePaths(config.stateDir);
+    const channelSettingsDefaults = defaultChannelSettings(config);
+    let idleCompactionWorkflow: IdleCompactionWorkflowShape | null = null;
+    let questionRuntime: QuestionRuntime | null = null;
+
+    const isSessionBusy = (session: ChannelSession) =>
+      session.activeRun
+        ? Effect.succeed(true)
+        : Effect.gen(function* () {
+            const hasPendingQuestions = questionRuntime
+              ? yield* questionRuntime.hasPendingQuestions(session.opencode.sessionId)
+              : false;
+            if (hasPendingQuestions) {
+              return true;
+            }
+            return idleCompactionWorkflow
+              ? yield* idleCompactionWorkflow.hasActive(session.opencode.sessionId)
+              : false;
+          });
+
+    const sendErrorReply = (message: Message, title: string, error: unknown) =>
+      Effect.promise(() =>
+        message.reply({
+          content: formatErrorResponse(title, formatError(error)),
+          allowedMentions: { repliedUser: false, parse: [] },
+        }),
+      );
+
+    const sendRunFailure = (message: Message, error: unknown) =>
+      sendErrorReply(message, "## ❌ Opencode failed", error);
+
+    const sendQuestionUiFailure = (message: Message, error: unknown) =>
+      sendErrorReply(message, "## ❌ Failed to show questions", error);
+
+    const sessionLifecycle = createSessionLifecycle({
+      stateRef,
+      createOpencodeSession: opencode.createSession,
+      attachOpencodeSession: opencode.attachSession,
+      getPersistedSession: sessionStore.getSession,
+      upsertPersistedSession: sessionStore.upsertSession,
+      getPersistedChannelSettings: sessionStore.getChannelSettings,
+      touchPersistedSession: sessionStore.touchSession,
+      deletePersistedSession: sessionStore.deleteSession,
+      isSessionHealthy: opencode.isHealthy,
+      startWorker: (session) =>
+        FiberSet.run(fiberSet, { startImmediately: true })(worker(session)).pipe(Effect.asVoid),
+      logger,
+      sessionInstructions: config.sessionInstructions,
+      triggerPhrase: config.triggerPhrase,
+      channelSettingsDefaults,
+      idleTimeoutMs: config.sessionIdleTimeoutMs,
+      sessionsRootDir: statePaths.sessionsRootDir,
+      isSessionBusy,
+    });
+    const {
+      getSession,
+      getActiveRunBySessionId,
+      getSessionContext,
+      setActiveRun,
+      createOrGetSession,
+      getOrRestoreSession,
+      ensureSessionHealth,
+      invalidateSession,
+      closeExpiredSessions,
+      shutdownSessions,
+    } = sessionLifecycle;
+
+    const questions = yield* makeQuestionRuntime({
+      getSessionContext,
+      replyToQuestion: opencode.replyToQuestion,
+      rejectQuestion: opencode.rejectQuestion,
+      sendQuestionUiFailure,
+      logger,
+      formatError,
+    });
+    questionRuntime = questions;
+
+    const hasPendingQuestions = (sessionId: string) => questions.hasPendingQuestions(sessionId);
+
+    const reconcileQuestionTypingForSession = (sessionId: string) =>
+      getSessionContext(sessionId).pipe(
+        Effect.flatMap((context) => {
+          const activeRun = context?.activeRun ?? null;
+          if (!activeRun) {
+            return Ref.update(questionTypingPausedRef, (current) => {
+              if (!current.has(sessionId)) {
+                return current;
+              }
+              const next = new Set(current);
+              next.delete(sessionId);
+              return next;
+            });
+          }
+
+          return hasPendingQuestions(sessionId).pipe(
+            Effect.flatMap((pending) =>
+              Ref.modify(questionTypingPausedRef, (current) => {
+                const wasPaused = current.has(sessionId);
+                if (pending === wasPaused) {
+                  return [{ pending, wasPaused }, current] as const;
+                }
+
+                const next = new Set(current);
+                if (pending) {
+                  next.add(sessionId);
+                } else {
+                  next.delete(sessionId);
+                }
+                return [{ pending, wasPaused }, next] as const;
+              }).pipe(
+                Effect.flatMap(({ pending, wasPaused }) =>
+                  pending
+                    ? wasPaused
+                      ? Effect.void
+                      : Effect.promise(() => activeRun.typing.pause()).pipe(
+                          Effect.timeoutOption("1 second"),
+                          Effect.flatMap((result) =>
+                            Option.isSome(result)
+                              ? Effect.void
+                              : logger.warn(
+                                  "typing pause timed out while question prompt was active",
+                                  {
+                                    channelId: activeRun.originMessage.channelId,
+                                    sessionId,
+                                  },
+                                ),
+                          ),
+                        )
+                    : wasPaused
+                      ? activeRun.questionOutcome._tag !== "none" || activeRun.interruptRequested
+                        ? Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
+                        : Effect.sync(() => {
+                            activeRun.typing.resume();
+                          })
+                      : activeRun.questionOutcome._tag !== "none" || activeRun.interruptRequested
+                        ? Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
+                        : Effect.void,
+                ),
+              ),
+            ),
+          );
+        }),
+      );
+
+    const applyQuestionSignals = (
+      sessionId: string,
+      signals: ReadonlyArray<QuestionWorkflowSignal>,
+    ) =>
+      Effect.forEach(
+        signals,
+        (item) =>
+          getSessionContext(sessionId).pipe(
+            Effect.flatMap((context) => {
+              const activeRun = context?.activeRun ?? null;
+              switch (item.type) {
+                case "clear-run-interrupt":
+                  return !activeRun
+                    ? Effect.void
+                    : Effect.sync(() => {
+                        activeRun.interruptRequested = false;
+                        activeRun.interruptSource = null;
+                      });
+                case "set-run-question-outcome":
+                  return !activeRun
+                    ? Effect.void
+                    : Effect.sync(() => {
+                        activeRun.questionOutcome = item.outcome;
+                      });
+              }
+            }),
+          ),
+        { concurrency: "unbounded", discard: true },
+      );
+
+    const applyQuestionWorkflowSignals = (
+      sessionId: string,
+      signals: ReadonlyArray<QuestionWorkflowSignal>,
+    ) =>
+      applyQuestionSignals(sessionId, signals).pipe(
+        Effect.andThen(reconcileQuestionTypingForSession(sessionId)),
+      );
+
+    const handleQuestionEvent = (
+      event: {
+        sessionId: string;
+      } & QuestionWorkflowEvent,
+    ) =>
+      Effect.gen(function* () {
+        const routed = yield* questions.handleEvent(event);
+        if (!routed) {
+          return;
+        }
+        yield* applyQuestionWorkflowSignals(routed.sessionId, routed.signals);
+      });
+
+    const routeQuestionInteraction = (interaction: Interaction) =>
+      Effect.gen(function* () {
+        const routed = yield* questions.routeInteraction(interaction);
+        if (!routed) {
+          return;
+        }
+        yield* applyQuestionWorkflowSignals(routed.sessionId, routed.signals);
+      });
+
+    const serviceLayer = Layer.mergeAll(
+      Layer.succeed(Logger, logger),
+      Layer.succeed(InfoCards, infoCards),
+      Layer.succeed(OpencodeService, opencode),
+    );
+    const idleCompaction = yield* makeIdleCompactionWorkflow().pipe(Effect.provide(serviceLayer));
+    idleCompactionWorkflow = idleCompaction;
+
+    const eventHandler = createEventHandler({
+      getSessionContext,
+      handleQuestionEvent,
+      idleCompactionWorkflow: idleCompaction,
+      readPromptResult: opencode.readPromptResult,
+      logger,
+      formatError,
+    });
+
+    yield* Queue.take(eventQueue).pipe(
+      Effect.flatMap((event) => eventHandler.handleEvent(event.payload)),
+      Effect.forever,
+      Effect.catch((error) =>
+        logger.error("opencode event dispatcher failed", {
+          error: formatError(error),
+        }),
+      ),
+      Effect.forkScoped,
+    );
+
+    yield* Effect.sleep(60_000).pipe(
+      Effect.andThen(closeExpiredSessions()),
+      Effect.forever,
+      Effect.catch((error) =>
+        logger.error("idle session sweeper failed", {
+          error: formatError(error),
+        }),
+      ),
+      Effect.forkScoped,
+    );
+
+    const runExecutor = executeRunBatch({
+      runPrompts: ({ channelId, session, activeRun, initialRequests, handlePromptCompleted }) =>
+        coordinateActiveRunPrompts({
+          channelId,
+          session,
+          activeRun,
+          initialRequests,
+          awaitIdleCompaction: idleCompaction.awaitCompletion,
+          submitPrompt: opencode.submitPrompt,
+          handlePromptCompleted,
+          logger,
+        }),
+      runProgressWorker,
+      startTyping: (message) => startTypingLoop(message.channel),
+      setActiveRun,
+      terminateQuestionBatches: (sessionId) =>
+        questions
+          .terminateSession(sessionId)
+          .pipe(Effect.flatMap((signals) => applyQuestionWorkflowSignals(sessionId, signals))),
+      ensureSessionHealthAfterFailure: (session, responseMessage) =>
+        ensureSessionHealth(
+          session,
+          responseMessage,
+          "run failed with unhealthy opencode session",
+          false,
+        ),
+      sendRunInterruptedInfo: (message, source) =>
+        infoCards
+          .send(
+            message.channel as SendableChannels,
+            source === "shutdown" ? "🛑 Run interrupted" : "‼️ Run interrupted",
+            source === "shutdown"
+              ? "OpenCode stopped the active run in this channel because the bot is shutting down."
+              : "OpenCode stopped the active run in this channel.",
+          )
+          .pipe(
+            Effect.catch((error) =>
+              logger.warn("failed to post interrupt info card", {
+                channelId: message.channelId,
+                error: formatError(error),
+              }),
+            ),
+            Effect.ignore,
+          ),
+      sendFinalResponse: (message, text) =>
+        Effect.promise(() => sendFinalResponse({ message, text })),
+      sendRunFailure,
+      sendQuestionUiFailure,
+      logger,
+      formatError,
+    });
+
+    const drainQueuedRunRequestsForShutdown = (session: ChannelSession) =>
+      Queue.clear(session.queue).pipe(Effect.asVoid);
+
+    const worker = (session: ChannelSession): Effect.Effect<never> =>
+      Effect.forever(
+        takeQueuedRunBatch(session.queue).pipe(
+          Effect.flatMap((requests) =>
+            Ref.get(shutdownStartedRef).pipe(
+              Effect.flatMap((shutdownStarted) =>
+                shutdownStarted ? Effect.void : runExecutor(session, requests),
+              ),
+            ),
+          ),
+          Effect.catch((error) =>
+            logger.error("channel worker iteration failed", {
+              channelId: session.channelId,
+              error: formatError(error),
+            }),
+          ),
+        ),
+      );
+
+    const getUsableSession = (message: Message, reason: string) =>
+      createOrGetSession(message).pipe(
+        Effect.flatMap((session) => ensureSessionHealth(session, message, reason)),
+      );
+
+    const startShutdown = (): Effect.Effect<boolean> =>
+      Ref.modify(shutdownStartedRef, (started): readonly [boolean, boolean] =>
+        started ? [false, true] : [true, true],
+      );
+
+    const shutdown = createSessionShutdown({
+      startShutdown,
+      getState: () => Ref.get(stateRef),
+      questionRuntime: questions,
+      idleCompactionWorkflow: idleCompaction,
+      opencode,
+      logger,
+      infoCards,
+      drainQueuedRunRequestsForShutdown,
+      interruptSessionWorkers: () => FiberSet.clear(fiberSet),
+      shutdownSessions,
+      formatError,
+    });
+
+    const sessionRuntime = makeSessionRuntime({
+      getLoaded: (channelId) =>
+        getSession(channelId).pipe(Effect.map((session) => session ?? null)),
+      getOrRestore: getOrRestoreSession,
+      getActiveRunBySessionId,
+      queueMessageRunRequest: (message, request, reason) =>
+        Effect.gen(function* () {
+          const session = yield* getUsableSession(message, reason);
+          session.progressChannel = message.channel.isSendable()
+            ? (message.channel as SendableChannels)
+            : null;
+          session.progressMentionContext = message;
+          const destination = yield* enqueueRunRequest(session, request);
+          return {
+            sessionId: session.opencode.sessionId,
+            destination,
+          } satisfies QueuedMessageRunRequest;
+        }),
+      routeQuestionInteraction: (interaction) =>
+        routeQuestionInteraction(interaction).pipe(Effect.asVoid),
+      invalidate: invalidateSession,
+      updateLoadedChannelSettings: (channelId, settings) =>
+        getSession(channelId).pipe(
+          Effect.flatMap((session) =>
+            !session
+              ? Effect.void
+              : Effect.sync(() => {
+                  session.channelSettings = settings;
+                }),
+          ),
+        ),
+      interruptSession: (session) => opencode.interruptSession(session.opencode),
+      setRunInterruptRequested: (activeRun, requested, source = requested ? "user" : null) =>
+        Effect.sync(() => {
+          activeRun.interruptRequested = requested;
+          activeRun.interruptSource = requested ? source : null;
+        }),
+      isSessionBusy,
+      hasPendingQuestions,
+      hasIdleCompaction: (sessionId) => idleCompaction.hasActive(sessionId),
+      startCompaction: (session, channel) => {
+        session.progressChannel = channel;
+        return idleCompaction.start({ session, channel });
+      },
+      requestCompactionInterrupt: (session) => idleCompaction.requestInterrupt({ session }),
+      shutdown,
+    });
+
+    return Layer.succeed(SessionRuntime, sessionRuntime);
+  }),
+);

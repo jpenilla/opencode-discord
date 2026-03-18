@@ -1,5 +1,5 @@
 import type { Message, SendableChannels } from "discord.js";
-import { Effect, ServiceMap } from "effect";
+import { Effect, Layer, ServiceMap } from "effect";
 
 import { editInfoCard, sendInfoCard, upsertInfoCard } from "@/discord/info-card.ts";
 
@@ -23,3 +23,5 @@ export const makeInfoCards = (): InfoCardsShape => ({
     Effect.promise(() => editInfoCard(card, title, body)).pipe(Effect.asVoid),
   upsert: (input) => Effect.promise(() => upsertInfoCard(input) as Promise<Message>),
 });
+
+export const InfoCardsLayer = Layer.succeed(InfoCards, makeInfoCards());

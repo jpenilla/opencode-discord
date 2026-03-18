@@ -70,10 +70,7 @@ const defineChannelSettingToggleCommand = <
       next.channelId = context.channelId;
       yield* sessionStore.upsertChannelSettings(next);
 
-      const session = yield* sessionRuntime.getLoaded(context.channelId);
-      if (session) {
-        yield* sessionRuntime.setChannelSettings(session, resolved);
-      }
+      yield* sessionRuntime.updateLoadedChannelSettings(context.channelId, resolved);
 
       yield* context.complete(
         `${input.label} are now ${resolved[input.setting] ? "enabled" : "disabled"} in this channel.`,

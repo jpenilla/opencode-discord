@@ -16,6 +16,7 @@ import { Deferred, Effect, Fiber, Layer, Queue, Redacted, Ref } from "effect";
 import { AppConfig, type AppConfigShape } from "@/config.ts";
 import { ChannelRuntime, ChannelRuntimeLayer } from "@/channels/channel-runtime.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
+import { InfoCardsLayer } from "@/discord/info-cards.ts";
 import {
   buildOpencodePrompt,
   buildQueuedFollowUpPrompt,
@@ -36,6 +37,7 @@ import {
   type PersistedChannelSession,
   type SessionStoreShape,
 } from "@/state/store.ts";
+import { SessionRuntime, SessionRuntimeLayer } from "@/sessions/session-runtime.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
 import { unsafeEffect, unsafeStub } from "../support/stub.ts";
 
@@ -624,12 +626,18 @@ const makeHarness = async (options: {
 
   const deps = Layer.mergeAll(
     Layer.succeed(AppConfig, makeConfig()),
+    InfoCardsLayer,
     Layer.succeed(Logger, makeLogger()),
     Layer.succeed(OpencodeService, service),
     Layer.succeed(SessionStore, sessionStore),
     Layer.succeed(OpencodeEventQueue, eventQueue),
   );
-  const harnessLayer = Layer.merge(deps, ChannelRuntimeLayer.pipe(Layer.provide(deps)));
+  const sessionRuntimeLayer = SessionRuntimeLayer.pipe(Layer.provide(deps));
+  const harnessLayer = Layer.mergeAll(
+    deps,
+    sessionRuntimeLayer,
+    ChannelRuntimeLayer.pipe(Layer.provide(Layer.mergeAll(deps, sessionRuntimeLayer))),
+  );
 
   return {
     replies,
@@ -671,8 +679,8 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("done");
         }).pipe(Effect.provide(harness.harnessLayer)),
       ),
@@ -719,10 +727,10 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(firstMessage, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          yield* channels.submit(firstMessage, { prompt: "hello" });
           yield* Deferred.await(firstPromptStarted);
-          yield* sessions.submit(secondMessage, { prompt: "follow up" });
+          yield* channels.submit(secondMessage, { prompt: "follow up" });
           yield* Deferred.succeed(allowFirstPromptToFinish, undefined).pipe(Effect.ignore);
           expect(yield* Queue.take(harness.replyEvents)).toBe("intermediate");
           expect(yield* Queue.take(harness.replyEvents)).toBe(
@@ -805,8 +813,9 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(firstMessage, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          const sessions = yield* SessionRuntime;
+          yield* channels.submit(firstMessage, { prompt: "hello" });
           yield* Deferred.await(assistantFinished);
 
           expect(yield* Ref.get(harness.replies)).toEqual([]);
@@ -818,7 +827,7 @@ describe("ChannelRuntimeLayer integration", () => {
               ),
             );
 
-          yield* sessions.submit(secondMessage, { prompt: "follow up" });
+          yield* channels.submit(secondMessage, { prompt: "follow up" });
           expect(yield* Ref.get(harness.replies)).toEqual([]);
 
           yield* Deferred.succeed(allowIdleStatus, undefined).pipe(Effect.ignore);
@@ -897,10 +906,10 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(firstMessage, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          yield* channels.submit(firstMessage, { prompt: "hello" });
           yield* Deferred.await(firstPromptStarted);
-          yield* sessions.submit(secondMessage, { prompt: "follow up" });
+          yield* channels.submit(secondMessage, { prompt: "follow up" });
           yield* Deferred.succeed(allowFirstPromptToFinish, undefined).pipe(Effect.ignore);
           expect(yield* Queue.take(harness.replyEvents)).toBe("stale-final");
           expect(yield* Queue.take(harness.replyEvents)).toBe("follow-up-final");
@@ -946,8 +955,8 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("🗜️ Compacted Summary\nsummary text");
           expect(yield* Queue.take(harness.replyEvents)).toBe("final reply");
         }).pipe(Effect.provide(harness.harnessLayer)),
@@ -973,8 +982,9 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          const sessions = yield* SessionRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("final reply");
           yield* waitForNoActiveRun(sessions, "session-1");
           yield* Effect.promise(() =>
@@ -1046,8 +1056,8 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("done");
         }).pipe(Effect.provide(harness.harnessLayer)),
       ),
@@ -1084,11 +1094,12 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          const sessions = yield* SessionRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           yield* Queue.take(harness.replyEvents);
           yield* waitForNoActiveRun(sessions, "session-1");
-          yield* sessions.handleInteraction(command.interaction);
+          yield* channels.handleInteraction(command.interaction);
           yield* Deferred.await(compactStarted);
           yield* Deferred.succeed(allowCompactToFinish, undefined).pipe(Effect.ignore);
           yield* Effect.promise(() => Bun.sleep(0));
@@ -1137,10 +1148,11 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          const sessions = yield* SessionRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
-          yield* sessions.handleInteraction(command.interaction);
+          yield* channels.handleInteraction(command.interaction);
           yield* Deferred.await(promptFinished);
           yield* waitForNoActiveRun(sessions, "session-1");
         }).pipe(Effect.provide(harness.harnessLayer)),
@@ -1192,10 +1204,10 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
-          yield* sessions.handleInteraction(command.interaction);
+          yield* channels.handleInteraction(command.interaction);
           yield* waitForReplyPayload(harness.replyPayloads, (payload) =>
             cardText(payload).includes("❓ Questions need answers"),
           );
@@ -1247,14 +1259,14 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));
           yield* waitForReplyPayload(harness.replyPayloads, (payload) =>
             cardText(payload).includes("❓ Questions need answers"),
           );
-          yield* sessions.handleInteraction(command.interaction);
+          yield* channels.handleInteraction(command.interaction);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionRepliedEvent()));
           yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore);
           yield* Queue.take(harness.replyEvents);
@@ -1303,13 +1315,14 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          const sessions = yield* SessionRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           yield* Queue.take(harness.replyEvents);
           yield* waitForNoActiveRun(sessions, "session-1");
-          yield* sessions.handleInteraction(compactCommand.interaction);
+          yield* channels.handleInteraction(compactCommand.interaction);
           yield* Deferred.await(compactStarted);
-          yield* sessions.handleInteraction(interruptCommand.interaction);
+          yield* channels.handleInteraction(interruptCommand.interaction);
           yield* Effect.promise(() => Bun.sleep(0));
         }).pipe(Effect.provide(harness.harnessLayer)),
       ),
@@ -1353,13 +1366,14 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          const sessions = yield* SessionRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           yield* Queue.take(harness.replyEvents);
           yield* waitForNoActiveRun(sessions, "session-1");
-          yield* sessions.handleInteraction(compactCommand.interaction);
+          yield* channels.handleInteraction(compactCommand.interaction);
           yield* Deferred.await(compactStarted);
-          yield* sessions.handleInteraction(interruptCommand.interaction);
+          yield* channels.handleInteraction(interruptCommand.interaction);
         }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
@@ -1393,13 +1407,14 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(firstMessage, { prompt: "first" });
+          const channels = yield* ChannelRuntime;
+          const sessions = yield* SessionRuntime;
+          yield* channels.submit(firstMessage, { prompt: "first" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("first");
           yield* waitForNoActiveRun(sessions, "session-1");
 
-          yield* sessions.handleInteraction(command.interaction);
-          yield* sessions.submit(secondMessage, { prompt: "second" });
+          yield* channels.handleInteraction(command.interaction);
+          yield* channels.submit(secondMessage, { prompt: "second" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("second");
         }).pipe(Effect.provide(harness.harnessLayer)),
       ),
@@ -1447,13 +1462,14 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          const sessions = yield* SessionRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           yield* Queue.take(harness.replyEvents);
           yield* waitForNoActiveRun(sessions, "session-1");
-          yield* sessions.handleInteraction(compactCommand.interaction);
+          yield* channels.handleInteraction(compactCommand.interaction);
           yield* Deferred.await(compactStarted);
-          yield* sessions.handleInteraction(interruptCommand.interaction);
+          yield* channels.handleInteraction(interruptCommand.interaction);
           yield* Effect.promise(() => Bun.sleep(0));
         }).pipe(Effect.provide(harness.harnessLayer)),
       ),
@@ -1506,16 +1522,17 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(initialMessage, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          const sessions = yield* SessionRuntime;
+          yield* channels.submit(initialMessage, { prompt: "hello" });
           yield* Queue.take(harness.replyEvents);
           yield* waitForNoActiveRun(sessions, "session-1");
 
-          yield* sessions.handleInteraction(compactCommand.interaction);
+          yield* channels.handleInteraction(compactCommand.interaction);
           yield* Deferred.await(compactStarted);
-          yield* sessions.handleInteraction(interruptCommand.interaction);
+          yield* channels.handleInteraction(interruptCommand.interaction);
 
-          yield* sessions.submit(laterMessage, { prompt: "later" });
+          yield* channels.submit(laterMessage, { prompt: "later" });
           yield* Deferred.await(secondPromptStarted);
           yield* Effect.promise(() => harness.publishEvent(makeSessionCompactedEvent()));
           yield* Deferred.succeed(allowSecondPromptToFinish, undefined).pipe(Effect.ignore);
@@ -1578,11 +1595,12 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(firstMessage, { prompt: "first" });
+          const channels = yield* ChannelRuntime;
+          const sessions = yield* SessionRuntime;
+          yield* channels.submit(firstMessage, { prompt: "first" });
           expect(yield* Queue.take(harness.replyEvents)).toContain("Opencode failed");
           yield* waitForNoActiveRun(sessions, "session-1");
-          yield* sessions.submit(secondMessage, { prompt: "second" });
+          yield* channels.submit(secondMessage, { prompt: "second" });
           expect(yield* Queue.take(harness.replyEvents)).toBe("recovered");
         }).pipe(Effect.provide(harness.harnessLayer)),
       ),
@@ -1623,8 +1641,8 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));
           yield* Effect.promise(() => Bun.sleep(10));
@@ -1667,12 +1685,12 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));
           yield* Effect.promise(() => Bun.sleep(10));
-          yield* sessions.handleInteraction(questionInteraction.interaction);
+          yield* channels.handleInteraction(questionInteraction.interaction);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionRepliedEvent()));
           yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore);
           yield* Queue.take(harness.replyEvents);
@@ -1720,15 +1738,15 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));
           yield* waitForReplyPayload(harness.replyPayloads, (payload) =>
             cardText(payload).includes("❓ Questions need answers"),
           );
 
-          const shutdownFiber = yield* sessions.shutdown().pipe(Effect.forkChild);
+          const shutdownFiber = yield* channels.shutdown().pipe(Effect.forkChild);
           yield* Deferred.await(interruptStarted);
           yield* Effect.promise(() => Bun.sleep(0));
 
@@ -1772,10 +1790,10 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
-          yield* sessions.shutdown();
+          yield* channels.shutdown();
         }).pipe(Effect.provide(harness.harnessLayer)),
       ),
     );
@@ -1783,6 +1801,34 @@ describe("ChannelRuntimeLayer integration", () => {
     expect((await getRef(harness.sentPayloads)).map(cardText)).toContain(
       "**🛑 Run interrupted**\nOpenCode stopped the active run in this channel because the bot is shutting down.",
     );
+  });
+
+  test("ignores new submits and interactions after the channel shutdown gate flips", async () => {
+    const harness = await makeHarness({
+      promptImpl: () => Effect.void,
+    });
+    const message = harness.makeMessage({
+      id: "message-1",
+      content: "hey opencode hello",
+    });
+    const command = harness.makeCommandInteraction("compact");
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const channels = yield* ChannelRuntime;
+          yield* channels.shutdown();
+          yield* channels.submit(message, { prompt: "hello" });
+          yield* channels.handleInteraction(command.interaction);
+          yield* Effect.promise(() => Bun.sleep(0));
+        }).pipe(Effect.provide(harness.harnessLayer)),
+      ),
+    );
+
+    expect(await getRef(harness.promptCalls)).toEqual([]);
+    expect(await getRef(command.interactionDefers)).toBe(0);
+    expect(await getRef(command.interactionReplies)).toEqual([]);
+    expect(await getRef(command.interactionEdits)).toEqual([]);
   });
 
   test("surfaces a question UI failure reply when posting the question card fails", async () => {
@@ -1809,8 +1855,9 @@ describe("ChannelRuntimeLayer integration", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const sessions = yield* ChannelRuntime;
-          yield* sessions.submit(message, { prompt: "hello" });
+          const channels = yield* ChannelRuntime;
+          const sessions = yield* SessionRuntime;
+          yield* channels.submit(message, { prompt: "hello" });
           yield* Deferred.await(promptStarted);
           yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));
           yield* sessions.getActiveRunBySessionId("session-1").pipe(
