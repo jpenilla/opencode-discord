@@ -5,7 +5,6 @@ import { AppConfig } from "@/config.ts";
 import { InfoCards } from "@/discord/info-cards.ts";
 import { OpencodeService } from "@/opencode/service.ts";
 import { IdleCompactionWorkflow } from "@/sessions/idle-compaction-workflow.ts";
-import { QuestionStatus } from "@/sessions/question-status.ts";
 import { SessionControl } from "@/sessions/session-control.ts";
 import { SessionStore } from "@/state/store.ts";
 import { Logger } from "@/util/logging.ts";
@@ -15,7 +14,6 @@ export type GuildCommandDependencies =
   | IdleCompactionWorkflow
   | InfoCards
   | OpencodeService
-  | QuestionStatus
   | SessionControl
   | SessionStore
   | Logger;

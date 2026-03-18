@@ -28,7 +28,6 @@ export type SessionLifecycleState = {
   sessionsBySessionId: Map<string, ChannelSession>;
   activeRunsBySessionId: Map<string, ActiveRun>;
   gatesByChannelId: Map<string, SessionGate>;
-  idleCompactionsBySessionId: Map<string, IdleCompaction>;
 };
 
 export type SessionContext = {
@@ -44,12 +43,6 @@ type SessionGateDecision = {
 type SessionPaths = {
   rootDir: string;
   workdir: string;
-};
-
-type IdleCompaction = {
-  card: Message | null;
-  interruptRequested: boolean;
-  completed: Deferred.Deferred<void>;
 };
 
 type SessionLifecycleDeps<State extends SessionLifecycleState> = {
@@ -84,6 +77,7 @@ type SessionLifecycleDeps<State extends SessionLifecycleState> = {
   channelSettingsDefaults: ChannelSettings;
   idleTimeoutMs?: number;
   sessionsRootDir: string;
+  isSessionBusy?: (session: ChannelSession) => Effect.Effect<boolean, unknown>;
   createSessionPaths?: (channelId: string) => Effect.Effect<SessionPaths, unknown>;
   deleteSessionRoot?: (rootDir: string) => Effect.Effect<void, unknown>;
 };
@@ -142,33 +136,6 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
       }),
     );
 
-  const getIdleCompaction = (sessionId: string) =>
-    Ref.get(deps.stateRef).pipe(
-      Effect.map((state) => state.idleCompactionsBySessionId.get(sessionId) ?? null),
-    );
-
-  const hasIdleCompaction = (sessionId: string) =>
-    getIdleCompaction(sessionId).pipe(Effect.map(Boolean));
-
-  const getIdleCompactionCard = (sessionId: string) =>
-    Ref.get(deps.stateRef).pipe(
-      Effect.map((state) => state.idleCompactionsBySessionId.get(sessionId)?.card ?? null),
-    );
-
-  const awaitIdleCompaction = (sessionId: string) =>
-    getIdleCompaction(sessionId).pipe(
-      Effect.flatMap((idleCompaction) =>
-        idleCompaction ? Deferred.await(idleCompaction.completed) : Effect.void,
-      ),
-    );
-
-  const getIdleCompactionInterruptRequested = (sessionId: string) =>
-    Ref.get(deps.stateRef).pipe(
-      Effect.map(
-        (state) => state.idleCompactionsBySessionId.get(sessionId)?.interruptRequested ?? false,
-      ),
-    );
-
   const toPersistedSession = (session: ChannelSession): PersistedChannelSession => ({
     channelId: session.channelId,
     opencodeSessionId: session.opencode.sessionId,
@@ -199,14 +166,11 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
       sessionsBySessionId.delete(session.opencode.sessionId);
       const activeRunsBySessionId = new Map(current.activeRunsBySessionId);
       activeRunsBySessionId.delete(session.opencode.sessionId);
-      const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId);
-      idleCompactionsBySessionId.delete(session.opencode.sessionId);
       return {
         ...current,
         sessionsByChannelId,
         sessionsBySessionId,
         activeRunsBySessionId,
-        idleCompactionsBySessionId,
       };
     });
 
@@ -248,106 +212,11 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
       const activeRunsBySessionId = new Map(current.activeRunsBySessionId);
       activeRunsBySessionId.delete(previousSessionId);
 
-      const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId);
-      const idleCompaction = idleCompactionsBySessionId.get(previousSessionId);
-      idleCompactionsBySessionId.delete(previousSessionId);
-      if (idleCompaction) {
-        idleCompactionsBySessionId.set(replacement.sessionId, idleCompaction);
-      }
-
       return {
         ...current,
         sessionsByChannelId,
         sessionsBySessionId,
         activeRunsBySessionId,
-        idleCompactionsBySessionId,
-      };
-    });
-
-  const beginIdleCompaction = (sessionId: string) =>
-    Effect.gen(function* () {
-      const existing = yield* getIdleCompaction(sessionId);
-      if (existing) {
-        return;
-      }
-
-      const completed = yield* Deferred.make<void>();
-      yield* Ref.update(deps.stateRef, (current) => {
-        const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId);
-        idleCompactionsBySessionId.set(sessionId, {
-          card: null,
-          interruptRequested: false,
-          completed,
-        });
-        return {
-          ...current,
-          idleCompactionsBySessionId,
-        };
-      });
-    });
-
-  const setIdleCompactionCard = (sessionId: string, message: Message | null) =>
-    Ref.update(deps.stateRef, (current) => {
-      const existing = current.idleCompactionsBySessionId.get(sessionId);
-      if (!existing || existing.card === message) {
-        return current;
-      }
-
-      const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId);
-      idleCompactionsBySessionId.set(sessionId, {
-        ...existing,
-        card: message,
-      });
-      return {
-        ...current,
-        idleCompactionsBySessionId,
-      };
-    });
-
-  const completeIdleCompaction = (sessionId: string) =>
-    Effect.gen(function* () {
-      const idleCompaction = yield* Ref.modify(
-        deps.stateRef,
-        (current): readonly [IdleCompaction | null, State] => {
-          const existing = current.idleCompactionsBySessionId.get(sessionId) ?? null;
-          if (!existing) {
-            return [null, current];
-          }
-
-          const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId);
-          idleCompactionsBySessionId.delete(sessionId);
-          return [
-            existing,
-            {
-              ...current,
-              idleCompactionsBySessionId,
-            },
-          ];
-        },
-      );
-
-      if (idleCompaction) {
-        yield* Deferred.succeed(idleCompaction.completed, undefined).pipe(Effect.ignore);
-      }
-
-      return idleCompaction;
-    });
-
-  const setIdleCompactionInterruptRequested = (sessionId: string, interruptRequested: boolean) =>
-    Ref.update(deps.stateRef, (current) => {
-      const existing = current.idleCompactionsBySessionId.get(sessionId);
-      if (!existing || existing.interruptRequested === interruptRequested) {
-        return current;
-      }
-
-      const idleCompactionsBySessionId = new Map(current.idleCompactionsBySessionId);
-      idleCompactionsBySessionId.set(sessionId, {
-        ...existing,
-        interruptRequested,
-      });
-      return {
-        ...current,
-        idleCompactionsBySessionId,
       };
     });
 
@@ -711,22 +580,29 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
         Effect.forEach(
           state.sessionsByChannelId.values(),
           (session) =>
-            session.activeRun ||
-            state.idleCompactionsBySessionId.has(session.opencode.sessionId) ||
-            !deps.idleTimeoutMs ||
-            now - session.lastActivityAt < deps.idleTimeoutMs
-              ? Effect.void
-              : Effect.gen(function* () {
-                  yield* deleteSession(session);
-                  yield* Queue.shutdown(session.queue).pipe(Effect.ignore);
-                  yield* session.opencode.close().pipe(Effect.ignore);
-                  yield* deps.logger.info("closed idle channel session", {
-                    channelId: session.channelId,
-                    sessionId: session.opencode.sessionId,
-                    idleForMs: now - session.lastActivityAt,
-                    workdir: session.workdir,
-                  });
-                }),
+            Effect.gen(function* () {
+              const externallyBusy = deps.isSessionBusy
+                ? yield* deps.isSessionBusy(session)
+                : false;
+              if (
+                session.activeRun ||
+                externallyBusy ||
+                !deps.idleTimeoutMs ||
+                now - session.lastActivityAt < deps.idleTimeoutMs
+              ) {
+                return;
+              }
+
+              yield* deleteSession(session);
+              yield* Queue.shutdown(session.queue).pipe(Effect.ignore);
+              yield* session.opencode.close().pipe(Effect.ignore);
+              yield* deps.logger.info("closed idle channel session", {
+                channelId: session.channelId,
+                sessionId: session.opencode.sessionId,
+                idleForMs: now - session.lastActivityAt,
+                workdir: session.workdir,
+              });
+            }),
           { concurrency: "unbounded", discard: true },
         ),
       ),
@@ -784,15 +660,7 @@ export const createSessionLifecycle = <State extends SessionLifecycleState>(
     getSession,
     getActiveRunBySessionId,
     getSessionContext,
-    hasIdleCompaction,
-    getIdleCompactionCard,
-    awaitIdleCompaction,
-    getIdleCompactionInterruptRequested,
     setActiveRun,
-    beginIdleCompaction,
-    setIdleCompactionCard,
-    setIdleCompactionInterruptRequested,
-    completeIdleCompaction,
     createOrGetSession,
     getOrRestoreSession,
     ensureSessionHealth,

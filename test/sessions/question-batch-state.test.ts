@@ -9,10 +9,11 @@ import {
   setQuestionOptionSelection,
 } from "@/discord/question-card.ts";
 import {
+  activateQuestionBatch,
+  createQuestionWorkflowBatch,
   setQuestionBatchStatus,
   terminateQuestionBatch,
-  type QuestionBatchState,
-} from "@/sessions/question-batch-state.ts";
+} from "@/sessions/question-workflow-state.ts";
 
 const request: QuestionRequest = {
   id: "req-1",
@@ -43,14 +44,15 @@ const request: QuestionRequest = {
   },
 };
 
-const makeBatch = (): QuestionBatchState => ({
-  request,
-  version: 0,
-  page: 0,
-  optionPages: [0, 0],
-  drafts: questionDrafts(request),
-  status: "active",
-});
+const makeBatch = () =>
+  activateQuestionBatch(
+    createQuestionWorkflowBatch({
+      request,
+      channelId: "channel-1",
+      replyTargetMessage: { id: "reply-target" } as never,
+      drafts: questionDrafts(request),
+    }),
+  );
 
 describe("question draft helpers", () => {
   test("single-select custom answers replace selected options", () => {
@@ -89,33 +91,33 @@ describe("question draft helpers", () => {
 describe("question batch state transitions", () => {
   test("can enter submitting and return to active without resolved answers", () => {
     const submitting = setQuestionBatchStatus(makeBatch(), "submitting");
-    expect(submitting.status).toBe("submitting");
-    expect(submitting.resolvedAnswers).toBeUndefined();
+    expect(submitting.domain.lifecycle).toBe("submitting");
+    expect(submitting.domain.resolvedAnswers).toBeUndefined();
 
     const restored = setQuestionBatchStatus(submitting, "active");
-    expect(restored.status).toBe("active");
-    expect(restored.resolvedAnswers).toBeUndefined();
+    expect(restored.domain.lifecycle).toBe("active");
+    expect(restored.domain.resolvedAnswers).toBeUndefined();
   });
 
   test("stores resolved answers when finalized as answered", () => {
     const answers = [["TypeScript"], ["CLI", "Other"]];
     const finalized = setQuestionBatchStatus(makeBatch(), "answered", answers);
 
-    expect(finalized.status).toBe("answered");
-    expect(finalized.resolvedAnswers).toEqual(answers);
+    expect(finalized.domain.lifecycle).toBe("answered");
+    expect(finalized.domain.resolvedAnswers).toEqual(answers);
   });
 
   test("fills rejected batches with empty resolved answers", () => {
     const rejected = setQuestionBatchStatus(makeBatch(), "rejected");
 
-    expect(rejected.status).toBe("rejected");
-    expect(rejected.resolvedAnswers).toEqual([[], []]);
+    expect(rejected.domain.lifecycle).toBe("rejected");
+    expect(rejected.domain.resolvedAnswers).toEqual([[], []]);
   });
 
   test("marks active batches as expired", () => {
-    const expired = terminateQuestionBatch(makeBatch(), "expired");
+    const expired = terminateQuestionBatch(makeBatch());
 
-    expect(expired.status).toBe("expired");
+    expect(expired.domain.lifecycle).toBe("expired");
   });
 
   test("clearQuestionDraft returns an empty draft", () => {

@@ -1,9 +1,10 @@
-import { Effect, FiberSet, Layer, Option, Queue, Ref, ServiceMap } from "effect";
+import { Deferred, Effect, FiberSet, Layer, Option, Queue, Ref, ServiceMap } from "effect";
 import { type Interaction, type Message, type SendableChannels } from "discord.js";
 
 import { AppConfig } from "@/config.ts";
 import { InfoCards, makeInfoCards } from "@/discord/info-cards.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
+import { parseQuestionActionId, questionInteractionReply } from "@/discord/question-card.ts";
 import {
   buildOpencodePrompt,
   promptMessageContext,
@@ -16,14 +17,19 @@ import { OpencodeService } from "@/opencode/service.ts";
 import { createCommandHandler } from "@/sessions/command-handler.ts";
 import {
   IdleCompactionWorkflow,
+  type IdleCompactionWorkflowShape,
   makeIdleCompactionWorkflow,
 } from "@/sessions/idle-compaction-workflow.ts";
 import { createEventHandler } from "@/sessions/event-handler.ts";
 import { collectAttachmentMessages } from "@/sessions/message-context.ts";
 import { coordinateActiveRunPrompts } from "@/sessions/prompt-coordinator.ts";
-import { QuestionStatus, makeQuestionStatus } from "@/sessions/question-status.ts";
 import { runProgressWorker } from "@/sessions/progress.ts";
-import { createQuestionCoordinator } from "@/sessions/question-coordinator.ts";
+import {
+  createQuestionWorkflow,
+  type QuestionWorkflow,
+  type QuestionWorkflowEvent,
+  type QuestionWorkflowSignal,
+} from "@/sessions/question-coordinator.ts";
 import { enqueueRunRequest } from "@/sessions/request-routing.ts";
 import { executeRunBatch } from "@/sessions/run-executor.ts";
 import { takeQueuedRunBatch } from "@/sessions/run-batch.ts";
@@ -52,6 +58,16 @@ export class ChannelSessions extends ServiceMap.Service<ChannelSessions, Channel
 type FallibleEffect<A> = Effect.Effect<A, unknown>;
 
 type ChannelSessionsState = SessionLifecycleState;
+type WorkflowGate<A> = Deferred.Deferred<A, unknown>;
+type WorkflowRegistryState<A> = {
+  workflows: Map<string, A>;
+  gates: Map<string, WorkflowGate<A>>;
+};
+type QuestionWorkflowGate = WorkflowGate<QuestionWorkflow>;
+type QuestionWorkflowGateDecision =
+  | { type: "existing"; workflow: QuestionWorkflow }
+  | { type: "await"; gate: QuestionWorkflowGate }
+  | { type: "create"; gate: QuestionWorkflowGate };
 
 const SHUTDOWN_RPC_TIMEOUT = "1 second";
 const SHUTDOWN_GRACE_PERIOD = "10 seconds";
@@ -61,7 +77,11 @@ const createChannelSessionsState = (): ChannelSessionsState => ({
   sessionsBySessionId: new Map(),
   activeRunsBySessionId: new Map(),
   gatesByChannelId: new Map(),
-  idleCompactionsBySessionId: new Map(),
+});
+
+const createWorkflowRegistryState = <A>(): WorkflowRegistryState<A> => ({
+  workflows: new Map(),
+  gates: new Map(),
 });
 
 export const ChannelSessionsLayer = Layer.effect(
@@ -74,10 +94,14 @@ export const ChannelSessionsLayer = Layer.effect(
     const sessionStore = yield* SessionStore;
     const stateRef = yield* Ref.make(createChannelSessionsState());
     const shutdownStartedRef = yield* Ref.make(false);
+    const questionWorkflowsRef = yield* Ref.make(createWorkflowRegistryState<QuestionWorkflow>());
+    const questionInteractionRoutesRef = yield* Ref.make(new Map<string, string>());
+    const questionTypingPausedRef = yield* Ref.make(new Set<string>());
     const fiberSet = yield* FiberSet.make();
     const statePaths = resolveStatePaths(config.stateDir);
     const channelSettingsDefaults = defaultChannelSettings(config);
     const infoCards = makeInfoCards();
+    let idleCompactionWorkflow: IdleCompactionWorkflowShape | null = null;
 
     const sendErrorReply = (message: Message, title: string, error: unknown) =>
       Effect.promise(() =>
@@ -111,18 +135,16 @@ export const ChannelSessionsLayer = Layer.effect(
       channelSettingsDefaults,
       idleTimeoutMs: config.sessionIdleTimeoutMs,
       sessionsRootDir: statePaths.sessionsRootDir,
+      isSessionBusy: (session) =>
+        idleCompactionWorkflow
+          ? idleCompactionWorkflow.hasActive(session.opencode.sessionId)
+          : Effect.succeed(false),
     });
     const {
       getSession,
       getActiveRunBySessionId,
       getSessionContext,
-      hasIdleCompaction,
-      awaitIdleCompaction,
       setActiveRun,
-      beginIdleCompaction,
-      setIdleCompactionCard,
-      setIdleCompactionInterruptRequested,
-      completeIdleCompaction,
       createOrGetSession,
       getOrRestoreSession,
       ensureSessionHealth,
@@ -131,42 +153,338 @@ export const ChannelSessionsLayer = Layer.effect(
       shutdownSessions,
     } = sessionLifecycle;
 
-    const questionCoordinator = yield* createQuestionCoordinator({
-      getSessionContext,
-      replyToQuestion: opencode.replyToQuestion,
-      rejectQuestion: opencode.rejectQuestion,
-      sendQuestionUiFailure,
-      logger,
-      formatError,
-    });
+    const trackQuestionRequest = (sessionId: string, requestId: string) =>
+      Ref.update(questionInteractionRoutesRef, (current) => {
+        const next = new Map(current);
+        next.set(requestId, sessionId);
+        return next;
+      });
 
-    const questionStatus = makeQuestionStatus(questionCoordinator.hasPendingQuestionsForSession);
+    const releaseQuestionRequest = (requestId: string) =>
+      Ref.update(questionInteractionRoutesRef, (current) => {
+        if (!current.has(requestId)) {
+          return current;
+        }
+        const next = new Map(current);
+        next.delete(requestId);
+        return next;
+      });
+
+    const getQuestionWorkflow = (sessionId: string) =>
+      Ref.get(questionWorkflowsRef).pipe(
+        Effect.map((state) => state.workflows.get(sessionId) ?? null),
+      );
+
+    const storeCreatedQuestionWorkflow = (
+      sessionId: string,
+      gate: QuestionWorkflowGate,
+      workflow: QuestionWorkflow,
+    ) =>
+      Ref.update(questionWorkflowsRef, (current) => {
+        if (current.gates.get(sessionId) !== gate) {
+          return current;
+        }
+
+        const workflows = new Map(current.workflows);
+        workflows.set(sessionId, workflow);
+        const gates = new Map(current.gates);
+        gates.delete(sessionId);
+        return {
+          workflows,
+          gates,
+        };
+      });
+
+    const clearQuestionWorkflowCreation = (sessionId: string, gate: QuestionWorkflowGate) =>
+      Ref.update(questionWorkflowsRef, (current) => {
+        if (current.gates.get(sessionId) !== gate) {
+          return current;
+        }
+
+        const gates = new Map(current.gates);
+        gates.delete(sessionId);
+        return {
+          ...current,
+          gates,
+        };
+      });
+
+    const getOrCreateQuestionWorkflow = (sessionId: string) =>
+      Effect.gen(function* () {
+        const gate = yield* Deferred.make<QuestionWorkflow, unknown>();
+        const decision = yield* Ref.modify(
+          questionWorkflowsRef,
+          (
+            current,
+          ): readonly [QuestionWorkflowGateDecision, WorkflowRegistryState<QuestionWorkflow>] => {
+            const existing = current.workflows.get(sessionId);
+            if (existing) {
+              return [{ type: "existing", workflow: existing }, current];
+            }
+
+            const currentGate = current.gates.get(sessionId);
+            if (currentGate) {
+              return [{ type: "await", gate: currentGate }, current];
+            }
+
+            const gates = new Map(current.gates);
+            gates.set(sessionId, gate);
+            return [
+              { type: "create", gate },
+              {
+                ...current,
+                gates,
+              },
+            ];
+          },
+        );
+
+        switch (decision.type) {
+          case "existing":
+            return decision.workflow;
+          case "await":
+            return yield* Deferred.await(decision.gate);
+          case "create":
+            break;
+        }
+
+        let workflow: QuestionWorkflow | null = null;
+        const exit = yield* createQuestionWorkflow({
+          getSessionContext: () => getSessionContext(sessionId),
+          replyToQuestion: opencode.replyToQuestion,
+          rejectQuestion: opencode.rejectQuestion,
+          sendQuestionUiFailure,
+          trackRequestId: (requestId: string) => trackQuestionRequest(sessionId, requestId),
+          releaseRequestId: releaseQuestionRequest,
+          onDrained: () => (workflow ? deleteQuestionWorkflow(sessionId, workflow) : Effect.void),
+          logger,
+          formatError,
+        }).pipe(
+          Effect.tap((created) =>
+            Effect.sync(() => {
+              workflow = created;
+            }).pipe(
+              Effect.andThen(storeCreatedQuestionWorkflow(sessionId, decision.gate, created)),
+            ),
+          ),
+          Effect.exit,
+        );
+
+        yield* Deferred.done(decision.gate, exit).pipe(Effect.ignore);
+        if (exit._tag === "Failure") {
+          yield* clearQuestionWorkflowCreation(sessionId, decision.gate);
+          return yield* Effect.failCause(exit.cause);
+        }
+        return exit.value;
+      });
+
+    const deleteQuestionWorkflow = (sessionId: string, workflow?: QuestionWorkflow) =>
+      Ref.update(questionWorkflowsRef, (current) => {
+        const existing = current.workflows.get(sessionId);
+        if (!existing || (workflow && existing !== workflow)) {
+          return current;
+        }
+
+        const workflows = new Map(current.workflows);
+        workflows.delete(sessionId);
+        return {
+          ...current,
+          workflows,
+        };
+      });
+
+    const hasPendingQuestions = (sessionId: string) =>
+      getQuestionWorkflow(sessionId).pipe(
+        Effect.flatMap((workflow) =>
+          workflow ? workflow.hasPendingQuestions() : Effect.succeed(false),
+        ),
+      );
+
+    const reconcileQuestionTypingForSession = (sessionId: string) =>
+      getSessionContext(sessionId).pipe(
+        Effect.flatMap((context) => {
+          const activeRun = context?.activeRun ?? null;
+          if (!activeRun) {
+            return Ref.update(questionTypingPausedRef, (current) => {
+              if (!current.has(sessionId)) {
+                return current;
+              }
+              const next = new Set(current);
+              next.delete(sessionId);
+              return next;
+            });
+          }
+
+          return hasPendingQuestions(sessionId).pipe(
+            Effect.flatMap((pending) =>
+              Ref.modify(questionTypingPausedRef, (current) => {
+                const wasPaused = current.has(sessionId);
+                if (pending === wasPaused) {
+                  return [{ pending, wasPaused }, current] as const;
+                }
+
+                const next = new Set(current);
+                if (pending) {
+                  next.add(sessionId);
+                } else {
+                  next.delete(sessionId);
+                }
+                return [{ pending, wasPaused }, next] as const;
+              }).pipe(
+                Effect.flatMap(({ pending, wasPaused }) =>
+                  pending
+                    ? wasPaused
+                      ? Effect.void
+                      : Effect.promise(() => activeRun.typing.pause()).pipe(
+                          Effect.timeoutOption("1 second"),
+                          Effect.flatMap((result) =>
+                            Option.isSome(result)
+                              ? Effect.void
+                              : logger.warn(
+                                  "typing pause timed out while question prompt was active",
+                                  {
+                                    channelId: activeRun.originMessage.channelId,
+                                    sessionId,
+                                  },
+                                ),
+                          ),
+                        )
+                    : wasPaused
+                      ? activeRun.questionOutcome._tag !== "none" || activeRun.interruptRequested
+                        ? Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
+                        : Effect.sync(() => {
+                            activeRun.typing.resume();
+                          })
+                      : activeRun.questionOutcome._tag !== "none" || activeRun.interruptRequested
+                        ? Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
+                        : Effect.void,
+                ),
+              ),
+            ),
+          );
+        }),
+      );
+
+    const applyQuestionSignals = (
+      sessionId: string,
+      signals: ReadonlyArray<QuestionWorkflowSignal>,
+    ) =>
+      Effect.forEach(
+        signals,
+        (item) =>
+          getSessionContext(sessionId).pipe(
+            Effect.flatMap((context) => {
+              const activeRun = context?.activeRun ?? null;
+              switch (item.type) {
+                case "clear-run-interrupt":
+                  return !activeRun
+                    ? Effect.void
+                    : Effect.sync(() => {
+                        activeRun.interruptRequested = false;
+                        activeRun.interruptSource = null;
+                      });
+                case "set-run-question-outcome":
+                  return !activeRun
+                    ? Effect.void
+                    : Effect.sync(() => {
+                        activeRun.questionOutcome = item.outcome;
+                      });
+              }
+            }),
+          ),
+        { concurrency: "unbounded", discard: true },
+      );
+
+    const applyQuestionWorkflowSignals = (
+      sessionId: string,
+      signals: ReadonlyArray<QuestionWorkflowSignal>,
+    ) =>
+      applyQuestionSignals(sessionId, signals).pipe(
+        Effect.andThen(reconcileQuestionTypingForSession(sessionId)),
+      );
+
+    const handleQuestionEvent = (
+      event: {
+        sessionId: string;
+      } & QuestionWorkflowEvent,
+    ) =>
+      Effect.gen(function* () {
+        const workflow =
+          event.type === "asked"
+            ? yield* getOrCreateQuestionWorkflow(event.sessionId)
+            : yield* getQuestionWorkflow(event.sessionId);
+        if (!workflow) {
+          return;
+        }
+
+        const signals = yield* workflow.handleEvent(
+          event.type === "asked"
+            ? { type: "asked", request: event.request }
+            : event.type === "replied"
+              ? {
+                  type: "replied",
+                  requestId: event.requestId,
+                  answers: event.answers,
+                }
+              : { type: "rejected", requestId: event.requestId },
+        );
+        yield* applyQuestionWorkflowSignals(event.sessionId, signals);
+      });
+
+    const routeQuestionInteraction = (interaction: Interaction) =>
+      Effect.gen(function* () {
+        if (
+          !interaction.isButton() &&
+          !interaction.isStringSelectMenu() &&
+          !interaction.isModalSubmit()
+        ) {
+          return;
+        }
+
+        const action = parseQuestionActionId(interaction.customId);
+        if (!action) {
+          return;
+        }
+
+        const sessionId = yield* Ref.get(questionInteractionRoutesRef).pipe(
+          Effect.map((routes) => routes.get(action.requestID) ?? null),
+        );
+        if (!sessionId) {
+          if (!interaction.replied && !interaction.deferred) {
+            yield* Effect.promise(() =>
+              interaction.reply(questionInteractionReply("This question prompt has expired.")),
+            ).pipe(Effect.ignore);
+          }
+          return;
+        }
+
+        const workflow = yield* getQuestionWorkflow(sessionId);
+        if (!workflow) {
+          return;
+        }
+
+        const signals = yield* workflow.handleInteraction(interaction);
+        yield* applyQuestionWorkflowSignals(sessionId, signals);
+      });
+
     const sessionControl = makeSessionControl({
       getLoaded: (channelId) =>
         getSession(channelId).pipe(Effect.map((session) => session ?? null)),
       getOrRestore: getOrRestoreSession,
       invalidate: invalidateSession,
+      hasPendingQuestions,
     });
     const serviceLayer = Layer.mergeAll(
       Layer.succeed(Logger, logger),
       Layer.succeed(InfoCards, infoCards),
       Layer.succeed(OpencodeService, opencode),
     );
-    const idleCompactionWorkflow = yield* makeIdleCompactionWorkflow({
-      hasIdleCompaction,
-      beginIdleCompaction,
-      getIdleCompactionCard: sessionLifecycle.getIdleCompactionCard,
-      setIdleCompactionCard,
-      completeIdleCompaction,
-      setIdleCompactionInterruptRequested,
-      getIdleCompactionInterruptRequested: sessionLifecycle.getIdleCompactionInterruptRequested,
-    }).pipe(Effect.provide(serviceLayer));
+    idleCompactionWorkflow = yield* makeIdleCompactionWorkflow().pipe(Effect.provide(serviceLayer));
     const commandLayer = Layer.mergeAll(
       Layer.succeed(AppConfig, config),
       Layer.succeed(IdleCompactionWorkflow, idleCompactionWorkflow),
       Layer.succeed(InfoCards, infoCards),
       Layer.succeed(OpencodeService, opencode),
-      Layer.succeed(QuestionStatus, questionStatus),
       Layer.succeed(SessionControl, sessionControl),
       Layer.succeed(SessionStore, sessionStore),
       Layer.succeed(Logger, logger),
@@ -174,7 +492,7 @@ export const ChannelSessionsLayer = Layer.effect(
 
     const eventHandler = createEventHandler({
       getSessionContext,
-      handleQuestionEvent: questionCoordinator.handleEvent,
+      handleQuestionEvent,
       idleCompactionWorkflow,
       readPromptResult: opencode.readPromptResult,
       logger,
@@ -210,7 +528,7 @@ export const ChannelSessionsLayer = Layer.effect(
           session,
           activeRun,
           initialRequests,
-          awaitIdleCompaction,
+          awaitIdleCompaction: idleCompactionWorkflow.awaitCompletion,
           submitPrompt: opencode.submitPrompt,
           handlePromptCompleted,
           logger,
@@ -218,7 +536,18 @@ export const ChannelSessionsLayer = Layer.effect(
       runProgressWorker,
       startTyping: (message) => startTypingLoop(message.channel),
       setActiveRun,
-      terminateQuestionBatches: questionCoordinator.terminateForSession,
+      terminateQuestionBatches: (sessionId) =>
+        getQuestionWorkflow(sessionId).pipe(
+          Effect.flatMap((workflow) =>
+            !workflow
+              ? Effect.void
+              : workflow
+                  .terminate()
+                  .pipe(
+                    Effect.flatMap((signals) => applyQuestionWorkflowSignals(sessionId, signals)),
+                  ),
+          ),
+        ),
       ensureSessionHealthAfterFailure: (session, responseMessage) =>
         ensureSessionHealth(
           session,
@@ -303,17 +632,20 @@ export const ChannelSessionsLayer = Layer.effect(
 
     const rejectPendingQuestionsForShutdown = (session: ChannelSession) =>
       Effect.gen(function* () {
-        const requestIds = yield* questionCoordinator.getPendingRequestIdsForSession(
-          session.opencode.sessionId,
-        );
-        yield* questionCoordinator.markShutdownRejectedRequests(requestIds);
+        const workflow = yield* getQuestionWorkflow(session.opencode.sessionId);
+        if (!workflow) {
+          return;
+        }
 
-        if (requestIds.length === 0) {
+        const shutdownState = yield* workflow.shutdown();
+        yield* applyQuestionWorkflowSignals(session.opencode.sessionId, shutdownState.signals);
+
+        if (shutdownState.requestIds.length === 0) {
           return;
         }
 
         const results = yield* Effect.forEach(
-          requestIds,
+          shutdownState.requestIds,
           (requestId) =>
             opencode
               .rejectQuestion(session.opencode, requestId)
@@ -390,7 +722,7 @@ export const ChannelSessionsLayer = Layer.effect(
           return;
         }
 
-        if (yield* hasIdleCompaction(session.opencode.sessionId)) {
+        if (yield* idleCompactionWorkflow.hasActive(session.opencode.sessionId)) {
           yield* interruptIdleCompactionForShutdown(session);
         }
       });
@@ -398,17 +730,24 @@ export const ChannelSessionsLayer = Layer.effect(
     const awaitShutdownDrain = () =>
       Effect.gen(function* () {
         const state = yield* Ref.get(stateRef);
-        const sessionIds = [...state.sessionsBySessionId.keys()];
         const hasActiveRuns = state.activeRunsBySessionId.size > 0;
-        const hasIdleCompactions = state.idleCompactionsBySessionId.size > 0;
-        const hasPendingQuestions =
+        const sessionIds = [...state.sessionsBySessionId.keys()];
+        const hasIdleCompactions =
           sessionIds.length === 0
             ? false
             : (yield* Effect.forEach(
                 sessionIds,
-                (sessionId) => questionCoordinator.hasPendingQuestionsForSession(sessionId),
+                (sessionId) => idleCompactionWorkflow.hasActive(sessionId),
                 { concurrency: "unbounded", discard: false },
               )).some(Boolean);
+        const workflows = [...(yield* Ref.get(questionWorkflowsRef)).workflows.entries()];
+        const hasPendingQuestions =
+          workflows.length === 0
+            ? false
+            : (yield* Effect.forEach(workflows, ([, workflow]) => workflow.hasPendingQuestions(), {
+                concurrency: "unbounded",
+                discard: false,
+              })).some(Boolean);
 
         if (hasActiveRuns || hasIdleCompactions || hasPendingQuestions) {
           return yield* Effect.fail(new Error("shutdown work is still draining"));
@@ -417,17 +756,32 @@ export const ChannelSessionsLayer = Layer.effect(
 
     const finalizeLingeringShutdownUi = () =>
       Effect.gen(function* () {
-        yield* questionCoordinator.shutdown().pipe(
-          Effect.catch((error) =>
-            logger.warn("failed to expire pending questions during shutdown", {
-              error: formatError(error),
-            }),
-          ),
+        const questionWorkflows = [...(yield* Ref.get(questionWorkflowsRef)).workflows.entries()];
+        yield* Effect.forEach(
+          questionWorkflows,
+          ([sessionId, workflow]) =>
+            workflow.shutdown().pipe(
+              Effect.flatMap((state) => applyQuestionWorkflowSignals(sessionId, state.signals)),
+              Effect.catch((error) =>
+                logger.warn("failed to expire pending questions during shutdown", {
+                  sessionId,
+                  error: formatError(error),
+                }),
+              ),
+            ),
+          { concurrency: "unbounded", discard: true },
         );
 
         const state = yield* Ref.get(stateRef);
         const activeRuns = [...state.activeRunsBySessionId.entries()];
-        const idleCompactions = [...state.idleCompactionsBySessionId.entries()];
+        const idleCompactionSessionIds = (yield* Effect.forEach(
+          state.sessionsBySessionId.keys(),
+          (sessionId) =>
+            idleCompactionWorkflow
+              .hasActive(sessionId)
+              .pipe(Effect.map((active) => (active ? sessionId : null))),
+          { concurrency: "unbounded", discard: false },
+        )).filter((sessionId): sessionId is string => sessionId !== null);
 
         yield* Effect.forEach(
           activeRuns,
@@ -463,8 +817,8 @@ export const ChannelSessionsLayer = Layer.effect(
         );
 
         yield* Effect.forEach(
-          idleCompactions,
-          ([sessionId]) =>
+          idleCompactionSessionIds,
+          (sessionId) =>
             idleCompactionWorkflow.handleInterrupted(sessionId).pipe(
               Effect.catch((error) =>
                 logger.warn("failed to finalize idle compaction on shutdown", {
@@ -483,9 +837,15 @@ export const ChannelSessionsLayer = Layer.effect(
           !shouldRun
             ? Effect.void
             : Effect.gen(function* () {
-                yield* questionCoordinator.beginShutdown().pipe(
+                const questionWorkflows = [
+                  ...(yield* Ref.get(questionWorkflowsRef)).workflows.values(),
+                ];
+                yield* Effect.forEach(questionWorkflows, (workflow) => workflow.beginShutdown(), {
+                  concurrency: "unbounded",
+                  discard: true,
+                }).pipe(
                   Effect.catch((error) =>
-                    logger.warn("failed to begin question coordinator shutdown", {
+                    logger.warn("failed to begin question workflow shutdown", {
                       error: formatError(error),
                     }),
                   ),
@@ -596,7 +956,7 @@ export const ChannelSessionsLayer = Layer.effect(
               : interaction.isButton() ||
                   interaction.isStringSelectMenu() ||
                   interaction.isModalSubmit()
-                ? questionCoordinator.handleInteraction(interaction)
+                ? routeQuestionInteraction(interaction)
                 : Effect.void,
           ),
         ),

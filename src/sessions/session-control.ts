@@ -8,6 +8,7 @@ export type SessionControlShape = {
   getLoaded: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
   getOrRestore: (channelId: string) => Effect.Effect<ChannelSession | null, unknown>;
   invalidate: (channelId: string, reason: string) => Effect.Effect<void, unknown>;
+  hasPendingQuestions: (sessionId: string) => Effect.Effect<boolean, unknown>;
   attachProgressChannel: (
     session: ChannelSession,
     channel: SendableChannels,
@@ -29,10 +30,12 @@ export const makeSessionControl = (deps: {
   getLoaded: SessionControlShape["getLoaded"];
   getOrRestore: SessionControlShape["getOrRestore"];
   invalidate: SessionControlShape["invalidate"];
+  hasPendingQuestions: SessionControlShape["hasPendingQuestions"];
 }): SessionControlShape => ({
   getLoaded: deps.getLoaded,
   getOrRestore: deps.getOrRestore,
   invalidate: deps.invalidate,
+  hasPendingQuestions: deps.hasPendingQuestions,
   attachProgressChannel: (session, channel) =>
     Effect.sync(() => {
       session.progressChannel = channel;

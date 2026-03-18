@@ -39,14 +39,12 @@ const makeHandle = (
   });
 
 const makeActiveRun = () => unsafeStub<ActiveRun>({});
-const makeCardMessage = (id: string) => unsafeStub<Message>({ id });
 
 const makeState = (): SessionLifecycleState => ({
   sessionsByChannelId: new Map(),
   sessionsBySessionId: new Map(),
   activeRunsBySessionId: new Map(),
   gatesByChannelId: new Map(),
-  idleCompactionsBySessionId: new Map(),
 });
 
 const logger = {
@@ -62,6 +60,7 @@ const makeHarness = async (options?: {
     systemPromptAppend?: string;
   }) => Effect.Effect<SessionHandle, unknown>;
   isSessionHealthy?: (session: SessionHandle) => Effect.Effect<boolean>;
+  isSessionBusy?: (sessionId: string) => Effect.Effect<boolean>;
 }) => {
   const stateRef = await Effect.runPromise(Ref.make(makeState()));
   const created = await Effect.runPromise(
@@ -171,6 +170,10 @@ const makeHarness = async (options?: {
       showThinking: true,
       showCompactionSummaries: true,
     },
+    isSessionBusy: (session) =>
+      options?.isSessionBusy
+        ? options.isSessionBusy(session.opencode.sessionId)
+        : Effect.succeed(false),
     idleTimeoutMs: 30 * 60 * 1_000,
     sessionsRootDir: "/tmp/sessions",
     createSessionPaths,
@@ -287,7 +290,7 @@ describe("createSessionLifecycle", () => {
     expect(await Effect.runPromise(Ref.get(healthChecks))).toEqual([]);
   });
 
-  test("single-flights recovery, rekeys session indexes, and moves idle compaction cards", async () => {
+  test("single-flights recovery and rekeys session indexes", async () => {
     const recreateStarted = await Effect.runPromise(Deferred.make<void>());
     const releaseRecreate = await Effect.runPromise(Deferred.make<void>());
     const createCount = await Effect.runPromise(Ref.make(0));
@@ -314,10 +317,6 @@ describe("createSessionLifecycle", () => {
     const message = makeMessage("channel-recover");
     const session = await Effect.runPromise(lifecycle.createOrGetSession(message));
     const previousSessionId = session.opencode.sessionId;
-    const card = makeCardMessage("card-1");
-
-    await Effect.runPromise(lifecycle.beginIdleCompaction(previousSessionId));
-    await Effect.runPromise(lifecycle.setIdleCompactionCard(previousSessionId, card));
     await Effect.runPromise(lifecycle.setActiveRun(session, makeActiveRun()));
 
     const [first, second] = await Effect.runPromise(
@@ -346,10 +345,6 @@ describe("createSessionLifecycle", () => {
       session,
       activeRun: null,
     });
-    expect(await Effect.runPromise(lifecycle.getIdleCompactionCard(previousSessionId))).toBeNull();
-    expect(
-      await Effect.runPromise(lifecycle.getIdleCompactionCard(session.opencode.sessionId)),
-    ).toBe(card);
     expect(
       await Effect.runPromise(lifecycle.getActiveRunBySessionId(previousSessionId)),
     ).toBeNull();
@@ -382,15 +377,13 @@ describe("createSessionLifecycle", () => {
     expect(await Effect.runPromise(Ref.get(removedRoots))).toEqual([]);
   });
 
-  test("does not close idle sessions while an idle compaction card is active", async () => {
-    const { lifecycle, closed } = await makeHarness();
+  test("does not close idle sessions while an external busy callback reports active work", async () => {
+    const { lifecycle, closed } = await makeHarness({
+      isSessionBusy: () => Effect.succeed(true),
+    });
 
     const session = await Effect.runPromise(lifecycle.createOrGetSession(makeMessage("channel-1")));
     session.lastActivityAt = 0;
-    await Effect.runPromise(lifecycle.beginIdleCompaction(session.opencode.sessionId));
-    await Effect.runPromise(
-      lifecycle.setIdleCompactionCard(session.opencode.sessionId, makeCardMessage("card-1")),
-    );
 
     await Effect.runPromise(lifecycle.closeExpiredSessions(30 * 60 * 1_000 + 1));
 

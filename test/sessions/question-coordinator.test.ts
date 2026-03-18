@@ -3,7 +3,10 @@ import type { Interaction, Message, MessageCreateOptions, MessageEditOptions } f
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
 import { Deferred, Effect, Ref } from "effect";
 
-import { createQuestionCoordinator } from "@/sessions/question-coordinator.ts";
+import {
+  createQuestionWorkflow,
+  type QuestionWorkflowSignal,
+} from "@/sessions/question-coordinator.ts";
 import { createPromptState } from "@/sessions/prompt-state.ts";
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
 import { unsafeStub } from "../support/stub.ts";
@@ -41,6 +44,7 @@ const makeHarness = async (options?: {
   const typingPauseCount = await Effect.runPromise(Ref.make(0));
   const typingResumeCount = await Effect.runPromise(Ref.make(0));
   const typingStopCount = await Effect.runPromise(Ref.make(0));
+  const questionTypingPaused = await Effect.runPromise(Ref.make(false));
   const promptState = await Effect.runPromise(createPromptState());
   const questionPostStarted = await Effect.runPromise(Deferred.make<void>());
   const allowQuestionPost = await Effect.runPromise(Deferred.make<void>());
@@ -141,10 +145,9 @@ const makeHarness = async (options?: {
   };
   session.activeRun = activeRun;
 
-  const runtime = await Effect.runPromise(
-    createQuestionCoordinator({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
+  const rawRuntime = await Effect.runPromise(
+    createQuestionWorkflow({
+      getSessionContext: () => Effect.succeed({ session, activeRun }),
       replyToQuestion: (_opencode, requestId, _answers) =>
         Ref.update(replyCalls, (current) => [...current, requestId]),
       rejectQuestion: (_opencode, requestId) =>
@@ -161,6 +164,9 @@ const makeHarness = async (options?: {
             Ref.update(sentQuestionUiFailures, (current) => [...current, String(error)]),
           ),
         ),
+      trackRequestId: () => Effect.void,
+      releaseRequestId: () => Effect.void,
+      onDrained: () => Effect.void,
       logger: {
         info: () => Effect.void,
         warn: () => Effect.void,
@@ -169,6 +175,88 @@ const makeHarness = async (options?: {
       formatError: (error: unknown) => (error instanceof Error ? error.message : String(error)),
     }),
   );
+
+  const applySignals = (signals: ReadonlyArray<QuestionWorkflowSignal>) =>
+    Effect.forEach(
+      signals,
+      (item) => {
+        switch (item.type) {
+          case "clear-run-interrupt":
+            return Effect.sync(() => {
+              activeRun.interruptRequested = false;
+              activeRun.interruptSource = null;
+            });
+          case "set-run-question-outcome":
+            return Effect.sync(() => {
+              activeRun.questionOutcome = item.outcome;
+            });
+        }
+      },
+      { discard: true },
+    );
+
+  const reconcileTyping = () =>
+    rawRuntime.hasPendingQuestions().pipe(
+      Effect.flatMap((hasPendingQuestions) =>
+        Ref.modify(questionTypingPaused, (paused) =>
+          paused === hasPendingQuestions
+            ? [{ hasPendingQuestions, paused } as const, paused]
+            : [{ hasPendingQuestions, paused } as const, hasPendingQuestions],
+        ).pipe(
+          Effect.flatMap(({ hasPendingQuestions, paused }) =>
+            hasPendingQuestions
+              ? paused
+                ? Effect.void
+                : Effect.promise(() => activeRun.typing.pause()).pipe(Effect.ignore)
+              : paused
+                ? activeRun.questionOutcome._tag !== "none" || activeRun.interruptRequested
+                  ? Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
+                  : Effect.sync(() => {
+                      activeRun.typing.resume();
+                    })
+                : activeRun.questionOutcome._tag !== "none" || activeRun.interruptRequested
+                  ? Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
+                  : Effect.void,
+          ),
+        ),
+      ),
+    );
+
+  const applyWorkflowSignals = (signals: ReadonlyArray<QuestionWorkflowSignal>) =>
+    applySignals(signals).pipe(Effect.andThen(reconcileTyping()));
+
+  const runtime = {
+    handleEvent: (event: {
+      type: "asked" | "replied" | "rejected";
+      sessionId: string;
+      request?: QuestionRequest;
+      requestId?: string;
+      answers?: ReadonlyArray<QuestionAnswer>;
+    }) =>
+      rawRuntime
+        .handleEvent(
+          event.type === "asked"
+            ? { type: "asked", request: event.request! }
+            : event.type === "replied"
+              ? {
+                  type: "replied",
+                  requestId: event.requestId!,
+                  answers: event.answers!,
+                }
+              : { type: "rejected", requestId: event.requestId! },
+        )
+        .pipe(Effect.tap(applyWorkflowSignals)),
+    handleInteraction: (interaction: Interaction) =>
+      rawRuntime.handleInteraction(interaction).pipe(Effect.tap(applyWorkflowSignals)),
+    beginShutdown: () => rawRuntime.beginShutdown(),
+    terminateForSession: (_sessionId: string) =>
+      rawRuntime.terminate().pipe(Effect.tap(applyWorkflowSignals)),
+    shutdown: () =>
+      rawRuntime.shutdown().pipe(
+        Effect.tap((result) => applyWorkflowSignals(result.signals)),
+        Effect.asVoid,
+      ),
+  };
 
   const makeButtonInteraction = (input: {
     customId: string;
@@ -264,7 +352,7 @@ const makeHarness = async (options?: {
   };
 };
 
-describe("createQuestionCoordinator", () => {
+describe("createQuestionWorkflow", () => {
   test("posts a question batch once and resumes typing after a reply event", async () => {
     const harness = await makeHarness();
 
@@ -458,7 +546,7 @@ describe("createQuestionCoordinator", () => {
     expect(await getRef(harness.postedPayloads)).toHaveLength(0);
   });
 
-  test("renders shutdown-rejected questions as expired when the rejection event arrives", async () => {
+  test("renders shutdown-expired questions immediately when shutdown begins", async () => {
     const harness = await makeHarness();
 
     await Effect.runPromise(
@@ -468,15 +556,7 @@ describe("createQuestionCoordinator", () => {
         request: harness.request,
       }),
     );
-    await Effect.runPromise(harness.runtime.beginShutdown());
-    await Effect.runPromise(harness.runtime.markShutdownRejectedRequests([harness.request.id]));
-    await Effect.runPromise(
-      harness.runtime.handleEvent({
-        type: "rejected",
-        sessionId: harness.session.opencode.sessionId,
-        requestId: harness.request.id,
-      }),
-    );
+    await Effect.runPromise(harness.runtime.shutdown());
 
     const edits = await getRef(harness.editedPayloads);
     expect(edits).toHaveLength(1);

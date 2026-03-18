@@ -1,16 +1,15 @@
 import type { Message, SendableChannels } from "discord.js";
-import { Effect, Ref, ServiceMap } from "effect";
+import { Deferred, Effect, Ref, ServiceMap } from "effect";
 
 import { compactionCardContent } from "@/discord/compaction-card.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
-import { formatCompactionSummary } from "@/discord/progress.ts";
+import { InfoCards, type InfoCardsShape } from "@/discord/info-cards.ts";
 import { sendChannelProgressUpdate } from "@/discord/messages.ts";
-import { InfoCards } from "@/discord/info-cards.ts";
-import { OpencodeService } from "@/opencode/service.ts";
+import { formatCompactionSummary } from "@/discord/progress.ts";
+import { OpencodeService, type OpencodeServiceShape } from "@/opencode/service.ts";
 import type { ChannelSession } from "@/sessions/session.ts";
-import type { LoggerShape } from "@/util/logging.ts";
 import { formatError } from "@/util/errors.ts";
-import { Logger } from "@/util/logging.ts";
+import { Logger, type LoggerShape } from "@/util/logging.ts";
 
 export type IdleCompactionWorkflowStartResult =
   | { type: "started" }
@@ -22,6 +21,7 @@ export type IdleCompactionWorkflowInterruptResult =
 
 export type IdleCompactionWorkflowShape = {
   hasActive: (sessionId: string) => Effect.Effect<boolean, unknown>;
+  awaitCompletion: (sessionId: string) => Effect.Effect<void, unknown>;
   start: (input: {
     session: ChannelSession;
     channel: SendableChannels;
@@ -43,20 +43,41 @@ export class IdleCompactionWorkflow extends ServiceMap.Service<
   IdleCompactionWorkflowShape
 >()("IdleCompactionWorkflow") {}
 
-type IdleCompactionStateDeps = {
-  hasIdleCompaction: (sessionId: string) => Effect.Effect<boolean, unknown>;
-  beginIdleCompaction: (sessionId: string) => Effect.Effect<void, unknown>;
-  getIdleCompactionCard: (sessionId: string) => Effect.Effect<Message | null, unknown>;
-  setIdleCompactionCard: (sessionId: string, card: Message | null) => Effect.Effect<void, unknown>;
-  completeIdleCompaction: (
-    sessionId: string,
-  ) => Effect.Effect<{ card: Message | null; interruptRequested: boolean } | null, unknown>;
-  setIdleCompactionInterruptRequested: (
-    sessionId: string,
-    requested: boolean,
-  ) => Effect.Effect<void, unknown>;
-  getIdleCompactionInterruptRequested: (sessionId: string) => Effect.Effect<boolean, unknown>;
+type SessionIdleCompactionState = {
+  card: Message | null;
+  interruptRequested: boolean;
+  completed: Deferred.Deferred<void>;
 };
+
+type SessionIdleCompactionWorkflow = {
+  hasActive: () => Effect.Effect<boolean, unknown>;
+  awaitCompletion: () => Effect.Effect<void, unknown>;
+  start: (input: {
+    session: ChannelSession;
+    channel: SendableChannels;
+  }) => Effect.Effect<IdleCompactionWorkflowStartResult, unknown>;
+  requestInterrupt: (input: {
+    session: ChannelSession;
+  }) => Effect.Effect<IdleCompactionWorkflowInterruptResult, unknown>;
+  handleCompacted: () => Effect.Effect<void, unknown>;
+  handleInterrupted: () => Effect.Effect<void, unknown>;
+  shutdown: () => Effect.Effect<void, unknown>;
+};
+
+type IdleCompactionWorkflowGate = Deferred.Deferred<SessionIdleCompactionWorkflow, unknown>;
+type IdleCompactionWorkflowRegistryState = {
+  workflows: Map<string, SessionIdleCompactionWorkflow>;
+  gates: Map<string, IdleCompactionWorkflowGate>;
+};
+type IdleCompactionWorkflowGateDecision =
+  | { type: "existing"; workflow: SessionIdleCompactionWorkflow }
+  | { type: "await"; gate: IdleCompactionWorkflowGate }
+  | { type: "create"; gate: IdleCompactionWorkflowGate };
+
+const createIdleCompactionWorkflowRegistryState = (): IdleCompactionWorkflowRegistryState => ({
+  workflows: new Map(),
+  gates: new Map(),
+});
 
 const sendCompactionSummary = (session: ChannelSession, text: string, logger: LoggerShape) => {
   if (!session.channelSettings.showCompactionSummaries) {
@@ -95,101 +116,107 @@ const sendCompactionSummary = (session: ChannelSession, text: string, logger: Lo
   );
 };
 
-export const makeIdleCompactionWorkflow = (
-  deps: IdleCompactionStateDeps,
-): Effect.Effect<IdleCompactionWorkflowShape, never, InfoCards | Logger | OpencodeService> =>
+const createSessionIdleCompactionWorkflow = (deps: {
+  infoCards: InfoCardsShape;
+  logger: LoggerShape;
+  opencode: OpencodeServiceShape;
+  onDrained: () => Effect.Effect<void, unknown>;
+}): Effect.Effect<SessionIdleCompactionWorkflow> =>
   Effect.gen(function* () {
-    const infoCards = yield* InfoCards;
-    const logger = yield* Logger;
-    const opencode = yield* OpencodeService;
-    const lateFinalizersRef = yield* Ref.make(new Map<string, { title: string; body: string }>());
+    const stateRef = yield* Ref.make<SessionIdleCompactionState | null>(null);
+    const lateFinalizerRef = yield* Ref.make<{ title: string; body: string } | null>(null);
     const shutdownStartedRef = yield* Ref.make(false);
 
-    const finalizeCard = (sessionId: string, title: string, body: string) =>
-      deps.completeIdleCompaction(sessionId).pipe(
-        Effect.flatMap((compaction) => {
-          if (!compaction) {
-            return Effect.void;
+    const notifyIfDrained = () =>
+      Ref.get(stateRef).pipe(
+        Effect.flatMap((state) =>
+          state
+            ? Effect.void
+            : Ref.get(lateFinalizerRef).pipe(
+                Effect.flatMap((lateFinalizer) => (lateFinalizer ? Effect.void : deps.onDrained())),
+              ),
+        ),
+      );
+
+    const takeState = () =>
+      Ref.modify(
+        stateRef,
+        (
+          current,
+        ): readonly [SessionIdleCompactionState | null, SessionIdleCompactionState | null] => [
+          current,
+          null,
+        ],
+      );
+
+    const completeState = () =>
+      takeState().pipe(
+        Effect.tap((state) =>
+          state ? Deferred.succeed(state.completed, undefined).pipe(Effect.ignore) : Effect.void,
+        ),
+      );
+
+    const finalizeCard = (title: string, body: string) =>
+      completeState().pipe(
+        Effect.flatMap((state) => {
+          if (!state) {
+            return notifyIfDrained();
           }
 
-          if (!compaction.card) {
+          if (!state.card) {
             return Ref.get(shutdownStartedRef).pipe(
               Effect.flatMap((shutdownStarted) =>
-                shutdownStarted
-                  ? Effect.void
-                  : Ref.update(lateFinalizersRef, (current) => {
-                      const next = new Map(current);
-                      next.set(sessionId, { title, body });
-                      return next;
-                    }),
+                shutdownStarted ? notifyIfDrained() : Ref.set(lateFinalizerRef, { title, body }),
               ),
             );
           }
 
-          return infoCards.edit(compaction.card, title, body).pipe(
+          return deps.infoCards.edit(state.card, title, body).pipe(
             Effect.catch((error) =>
-              logger.warn("failed to finalize idle compaction card", {
-                sessionId,
+              deps.logger.warn("failed to finalize idle compaction card", {
                 error: formatError(error),
               }),
             ),
+            Effect.andThen(notifyIfDrained()),
           );
         }),
       );
 
-    const completeWithoutCard = (sessionId: string) =>
-      deps.completeIdleCompaction(sessionId).pipe(
-        Effect.andThen(
-          Ref.update(lateFinalizersRef, (current) => {
-            if (!current.has(sessionId)) {
-              return current;
-            }
-            const next = new Map(current);
-            next.delete(sessionId);
-            return next;
-          }),
-        ),
+    const completeWithoutCard = () =>
+      completeState().pipe(
+        Effect.andThen(Ref.set(lateFinalizerRef, null)),
+        Effect.andThen(notifyIfDrained()),
         Effect.asVoid,
       );
 
-    const attachCard = (sessionId: string, card: Message | null) =>
+    const attachCard = (card: Message | null) =>
       Ref.get(shutdownStartedRef).pipe(
         Effect.flatMap((shutdownStarted) =>
           shutdownStarted
             ? Effect.void
-            : deps.setIdleCompactionCard(sessionId, card).pipe(
+            : Ref.update(stateRef, (current) =>
+                !current || current.card === card ? current : { ...current, card },
+              ).pipe(
                 Effect.andThen(
                   !card
                     ? Effect.void
-                    : Ref.modify(
-                        lateFinalizersRef,
-                        (
-                          current,
-                        ): readonly [
-                          { title: string; body: string } | null,
-                          Map<string, { title: string; body: string }>,
-                        ] => {
-                          const pending = current.get(sessionId) ?? null;
-                          if (!pending) {
-                            return [null, current];
-                          }
-
-                          const next = new Map(current);
-                          next.delete(sessionId);
-                          return [pending, next];
-                        },
-                      ).pipe(
+                    : Ref.get(lateFinalizerRef).pipe(
                         Effect.flatMap((pending) =>
-                          pending
-                            ? infoCards.edit(card, pending.title, pending.body).pipe(
+                          !pending
+                            ? Effect.void
+                            : deps.infoCards.edit(card, pending.title, pending.body).pipe(
                                 Effect.catch((error) =>
-                                  logger.warn("failed to finalize late idle compaction card", {
-                                    sessionId,
+                                  deps.logger.warn("failed to finalize late idle compaction card", {
                                     error: formatError(error),
                                   }),
                                 ),
-                              )
-                            : Effect.void,
+                                Effect.ensuring(
+                                  Ref.set(lateFinalizerRef, null).pipe(
+                                    Effect.andThen(notifyIfDrained()),
+                                    Effect.ignore,
+                                  ),
+                                ),
+                              ),
                         ),
                       ),
                 ),
@@ -197,29 +224,41 @@ export const makeIdleCompactionWorkflow = (
         ),
       );
 
-    const updateCard = (sessionId: string, title: string, body: string) =>
-      deps.getIdleCompactionCard(sessionId).pipe(
-        Effect.flatMap((card) => {
-          if (!card) {
-            return Effect.void;
-          }
-
-          return infoCards.edit(card, title, body).pipe(
-            Effect.catch((error) =>
-              logger.warn("failed to update idle compaction card", {
-                sessionId,
-                error: formatError(error),
-              }),
-            ),
-          );
-        }),
+    const updateCard = (title: string, body: string) =>
+      Ref.get(stateRef).pipe(
+        Effect.flatMap((state) =>
+          !state?.card
+            ? Effect.void
+            : deps.infoCards.edit(state.card, title, body).pipe(
+                Effect.catch((error) =>
+                  deps.logger.warn("failed to update idle compaction card", {
+                    error: formatError(error),
+                  }),
+                ),
+              ),
+        ),
       );
 
+    const getInterruptRequested = () =>
+      Ref.get(stateRef).pipe(Effect.map((state) => state?.interruptRequested ?? false));
+
     return {
-      hasActive: deps.hasIdleCompaction,
+      hasActive: () => Ref.get(stateRef).pipe(Effect.map(Boolean)),
+      awaitCompletion: () =>
+        Ref.get(stateRef).pipe(
+          Effect.flatMap((state) => (state ? Deferred.await(state.completed) : Effect.void)),
+        ),
       start: ({ session, channel }) =>
         Effect.gen(function* () {
-          const healthy = yield* opencode.isHealthy(session.opencode);
+          const existing = yield* Ref.get(stateRef);
+          if (existing) {
+            return {
+              type: "rejected",
+              message: "OpenCode is already compacting this channel session.",
+            } satisfies IdleCompactionWorkflowStartResult;
+          }
+
+          const healthy = yield* deps.opencode.isHealthy(session.opencode);
           if (!healthy) {
             return {
               type: "rejected",
@@ -228,11 +267,19 @@ export const makeIdleCompactionWorkflow = (
             } satisfies IdleCompactionWorkflowStartResult;
           }
 
-          yield* deps.beginIdleCompaction(session.opencode.sessionId);
-          const existingCard = yield* deps.getIdleCompactionCard(session.opencode.sessionId);
+          const completed = yield* Deferred.make<void>();
+          yield* Ref.set(stateRef, {
+            card: null,
+            interruptRequested: false,
+            completed,
+          });
+
+          const existingCard = yield* Ref.get(stateRef).pipe(
+            Effect.map((state) => state?.card ?? null),
+          );
           const compactingCard = compactionCardContent("compacting");
           const compactedCard = compactionCardContent("compacted");
-          const compactionCard = yield* infoCards
+          const compactionCard = yield* deps.infoCards
             .upsert({
               channel,
               existingCard,
@@ -240,9 +287,9 @@ export const makeIdleCompactionWorkflow = (
               body: compactingCard.body,
             })
             .pipe(
-              Effect.tap((card) => attachCard(session.opencode.sessionId, card)),
+              Effect.tap((card) => attachCard(card)),
               Effect.catch((error) =>
-                logger
+                deps.logger
                   .warn("failed to post idle compaction card", {
                     channelId: session.channelId,
                     sessionId: session.opencode.sessionId,
@@ -252,21 +299,19 @@ export const makeIdleCompactionWorkflow = (
               ),
             );
           const finalizeStartedCompaction = (title: string, body: string) =>
-            compactionCard
-              ? finalizeCard(session.opencode.sessionId, title, body)
-              : completeWithoutCard(session.opencode.sessionId);
+            compactionCard ? finalizeCard(title, body) : completeWithoutCard();
 
-          yield* opencode.compactSession(session.opencode).pipe(
+          yield* deps.opencode.compactSession(session.opencode).pipe(
             Effect.tap(() => finalizeStartedCompaction(compactedCard.title, compactedCard.body)),
             Effect.tapError((error) =>
-              logger.error("failed to compact session", {
+              deps.logger.error("failed to compact session", {
                 channelId: session.channelId,
                 sessionId: session.opencode.sessionId,
                 error: formatError(error),
               }),
             ),
             Effect.catch((error) =>
-              deps.getIdleCompactionInterruptRequested(session.opencode.sessionId).pipe(
+              getInterruptRequested().pipe(
                 Effect.flatMap((interruptRequested) =>
                   interruptRequested
                     ? (() => {
@@ -290,25 +335,21 @@ export const makeIdleCompactionWorkflow = (
         }),
       requestInterrupt: ({ session }) =>
         Effect.gen(function* () {
-          yield* deps.setIdleCompactionInterruptRequested(session.opencode.sessionId, true);
-          const interruptingCard = compactionCardContent("interrupting");
-          yield* updateCard(
-            session.opencode.sessionId,
-            interruptingCard.title,
-            interruptingCard.body,
+          yield* Ref.update(stateRef, (current) =>
+            !current ? current : { ...current, interruptRequested: true },
           );
+          const interruptingCard = compactionCardContent("interrupting");
+          yield* updateCard(interruptingCard.title, interruptingCard.body);
 
-          const interruptResult = yield* opencode
+          const interruptResult = yield* deps.opencode
             .interruptSession(session.opencode)
             .pipe(Effect.result);
           if (interruptResult._tag === "Failure") {
-            yield* deps.setIdleCompactionInterruptRequested(session.opencode.sessionId, false);
-            const compactingCard = compactionCardContent("compacting");
-            yield* updateCard(
-              session.opencode.sessionId,
-              compactingCard.title,
-              compactingCard.body,
+            yield* Ref.update(stateRef, (current) =>
+              !current ? current : { ...current, interruptRequested: false },
             );
+            const compactingCard = compactionCardContent("compacting");
+            yield* updateCard(compactingCard.title, compactingCard.body);
             return {
               type: "failed",
               message: formatErrorResponse(
@@ -320,48 +361,220 @@ export const makeIdleCompactionWorkflow = (
 
           return { type: "interrupted" } satisfies IdleCompactionWorkflowInterruptResult;
         }),
-      handleCompacted: (sessionId) => {
+      handleCompacted: () => {
         const compactedCard = compactionCardContent("compacted");
-        return finalizeCard(sessionId, compactedCard.title, compactedCard.body);
+        return finalizeCard(compactedCard.title, compactedCard.body);
       },
-      handleInterrupted: (sessionId) => {
+      handleInterrupted: () => {
         const interruptedCard = compactionCardContent("interrupted");
-        return finalizeCard(sessionId, interruptedCard.title, interruptedCard.body);
-      },
-      emitSummary: ({ session, messageId }) => {
-        if (session.emittedCompactionSummaryMessageIds.has(messageId)) {
-          return Effect.void;
-        }
-
-        if (!session.channelSettings.showCompactionSummaries) {
-          return Effect.sync(() => {
-            session.emittedCompactionSummaryMessageIds.add(messageId);
-          });
-        }
-
-        return opencode.readPromptResult(session.opencode, messageId).pipe(
-          Effect.flatMap((result) => {
-            const text = result.transcript.trim();
-            if (!text) {
-              return Effect.void;
-            }
-
-            session.emittedCompactionSummaryMessageIds.add(messageId);
-            return sendCompactionSummary(session, text, logger);
-          }),
-          Effect.catch((error) =>
-            logger.warn("failed to load compaction summary transcript", {
-              channelId: session.channelId,
-              sessionId: session.opencode.sessionId,
-              messageId,
-              error: formatError(error),
-            }),
-          ),
-        );
+        return finalizeCard(interruptedCard.title, interruptedCard.body);
       },
       shutdown: () =>
         Ref.set(shutdownStartedRef, true).pipe(
-          Effect.andThen(Ref.set(lateFinalizersRef, new Map())),
+          Effect.andThen(Ref.set(lateFinalizerRef, null)),
+          Effect.andThen(notifyIfDrained()),
+        ),
+    } satisfies SessionIdleCompactionWorkflow;
+  });
+
+export const makeIdleCompactionWorkflow = (): Effect.Effect<
+  IdleCompactionWorkflowShape,
+  never,
+  InfoCards | Logger | OpencodeService
+> =>
+  Effect.gen(function* () {
+    const infoCards = yield* InfoCards;
+    const logger = yield* Logger;
+    const opencode = yield* OpencodeService;
+    const workflowsRef = yield* Ref.make(createIdleCompactionWorkflowRegistryState());
+
+    const getWorkflow = (sessionId: string) =>
+      Ref.get(workflowsRef).pipe(Effect.map((state) => state.workflows.get(sessionId) ?? null));
+
+    const storeCreatedWorkflow = (
+      sessionId: string,
+      gate: IdleCompactionWorkflowGate,
+      workflow: SessionIdleCompactionWorkflow,
+    ) =>
+      Ref.update(workflowsRef, (current) => {
+        if (current.gates.get(sessionId) !== gate) {
+          return current;
+        }
+
+        const workflows = new Map(current.workflows);
+        workflows.set(sessionId, workflow);
+        const gates = new Map(current.gates);
+        gates.delete(sessionId);
+        return {
+          workflows,
+          gates,
+        };
+      });
+
+    const clearWorkflowCreation = (sessionId: string, gate: IdleCompactionWorkflowGate) =>
+      Ref.update(workflowsRef, (current) => {
+        if (current.gates.get(sessionId) !== gate) {
+          return current;
+        }
+
+        const gates = new Map(current.gates);
+        gates.delete(sessionId);
+        return {
+          ...current,
+          gates,
+        };
+      });
+
+    const deleteWorkflow = (sessionId: string, workflow?: SessionIdleCompactionWorkflow) =>
+      Ref.update(workflowsRef, (current) => {
+        const existing = current.workflows.get(sessionId);
+        if (!existing || (workflow && existing !== workflow)) {
+          return current;
+        }
+
+        const workflows = new Map(current.workflows);
+        workflows.delete(sessionId);
+        return {
+          ...current,
+          workflows,
+        };
+      });
+
+    const getOrCreateWorkflow = (sessionId: string) =>
+      Effect.gen(function* () {
+        const gate = yield* Deferred.make<SessionIdleCompactionWorkflow, unknown>();
+        const decision = yield* Ref.modify(
+          workflowsRef,
+          (
+            current,
+          ): readonly [IdleCompactionWorkflowGateDecision, IdleCompactionWorkflowRegistryState] => {
+            const existing = current.workflows.get(sessionId);
+            if (existing) {
+              return [{ type: "existing", workflow: existing }, current];
+            }
+
+            const currentGate = current.gates.get(sessionId);
+            if (currentGate) {
+              return [{ type: "await", gate: currentGate }, current];
+            }
+
+            const gates = new Map(current.gates);
+            gates.set(sessionId, gate);
+            return [
+              { type: "create", gate },
+              {
+                ...current,
+                gates,
+              },
+            ];
+          },
+        );
+
+        switch (decision.type) {
+          case "existing":
+            return decision.workflow;
+          case "await":
+            return yield* Deferred.await(decision.gate);
+          case "create":
+            break;
+        }
+
+        let workflow: SessionIdleCompactionWorkflow | null = null;
+        const exit = yield* createSessionIdleCompactionWorkflow({
+          infoCards,
+          logger,
+          opencode,
+          onDrained: () => (workflow ? deleteWorkflow(sessionId, workflow) : Effect.void),
+        }).pipe(
+          Effect.tap((created) =>
+            Effect.sync(() => {
+              workflow = created;
+            }).pipe(Effect.andThen(storeCreatedWorkflow(sessionId, decision.gate, created))),
+          ),
+          Effect.exit,
+        );
+
+        yield* Deferred.done(decision.gate, exit).pipe(Effect.ignore);
+        if (exit._tag === "Failure") {
+          yield* clearWorkflowCreation(sessionId, decision.gate);
+          return yield* Effect.failCause(exit.cause);
+        }
+        return exit.value;
+      });
+
+    const emitCompactionSummary = (input: { session: ChannelSession; messageId: string }) => {
+      if (input.session.emittedCompactionSummaryMessageIds.has(input.messageId)) {
+        return Effect.void;
+      }
+
+      if (!input.session.channelSettings.showCompactionSummaries) {
+        return Effect.sync(() => {
+          input.session.emittedCompactionSummaryMessageIds.add(input.messageId);
+        });
+      }
+
+      return opencode.readPromptResult(input.session.opencode, input.messageId).pipe(
+        Effect.flatMap((result) => {
+          const text = result.transcript.trim();
+          if (!text) {
+            return Effect.void;
+          }
+
+          input.session.emittedCompactionSummaryMessageIds.add(input.messageId);
+          return sendCompactionSummary(input.session, text, logger);
+        }),
+        Effect.catch((error) =>
+          logger.warn("failed to load compaction summary transcript", {
+            channelId: input.session.channelId,
+            sessionId: input.session.opencode.sessionId,
+            messageId: input.messageId,
+            error: formatError(error),
+          }),
+        ),
+      );
+    };
+
+    return {
+      hasActive: (sessionId) =>
+        getWorkflow(sessionId).pipe(
+          Effect.flatMap((workflow) => (workflow ? workflow.hasActive() : Effect.succeed(false))),
+        ),
+      awaitCompletion: (sessionId) =>
+        getWorkflow(sessionId).pipe(
+          Effect.flatMap((workflow) => (workflow ? workflow.awaitCompletion() : Effect.void)),
+        ),
+      start: ({ session, channel }) =>
+        getOrCreateWorkflow(session.opencode.sessionId).pipe(
+          Effect.flatMap((workflow) => workflow.start({ session, channel })),
+        ),
+      requestInterrupt: ({ session }) =>
+        getWorkflow(session.opencode.sessionId).pipe(
+          Effect.flatMap((workflow) =>
+            workflow
+              ? workflow.requestInterrupt({ session })
+              : Effect.succeed({
+                  type: "failed",
+                  message: "No active OpenCode run or compaction is running in this channel.",
+                } satisfies IdleCompactionWorkflowInterruptResult),
+          ),
+        ),
+      handleCompacted: (sessionId) =>
+        getWorkflow(sessionId).pipe(
+          Effect.flatMap((workflow) => (workflow ? workflow.handleCompacted() : Effect.void)),
+        ),
+      handleInterrupted: (sessionId) =>
+        getWorkflow(sessionId).pipe(
+          Effect.flatMap((workflow) => (workflow ? workflow.handleInterrupted() : Effect.void)),
+        ),
+      emitSummary: emitCompactionSummary,
+      shutdown: () =>
+        Ref.get(workflowsRef).pipe(
+          Effect.flatMap((state) =>
+            Effect.forEach(state.workflows.values(), (workflow) => workflow.shutdown(), {
+              concurrency: "unbounded",
+              discard: true,
+            }),
+          ),
         ),
     } satisfies IdleCompactionWorkflowShape;
   });
