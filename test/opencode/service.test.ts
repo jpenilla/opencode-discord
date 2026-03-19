@@ -106,14 +106,16 @@ const makeService = (input: {
   eventQueue?: Queue.Queue<GlobalEvent>;
   runtime?: Parameters<typeof makeRuntime>[0];
 }) =>
-  Effect.gen(function* () {
-    return yield* makeOpencodeService({
-      config: makeConfig(),
-      eventQueue: input.eventQueue ?? (yield* Queue.unbounded<GlobalEvent>()),
-      logger: input.logger ?? logger,
-      runtime: makeRuntime(input.runtime),
-    });
-  });
+  Effect.flatMap(
+    input.eventQueue ? Effect.succeed(input.eventQueue) : Queue.unbounded<GlobalEvent>(),
+    (eventQueue) =>
+      makeOpencodeService({
+        config: makeConfig(),
+        eventQueue,
+        logger: input.logger ?? logger,
+        runtime: makeRuntime(input.runtime),
+      }),
+  );
 
 describe("opencode log summaries", () => {
   test("logs a compact summary for tool events without raw tool payloads", () => {

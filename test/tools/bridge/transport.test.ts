@@ -9,6 +9,7 @@ import {
   readJsonBody,
   writeWritableChunk,
 } from "@/tools/bridge/transport.ts";
+import { timeoutTestError } from "../../support/errors.ts";
 import { unsafeStub } from "../../support/stub.ts";
 
 const makeRequest = (chunks: Array<string | Uint8Array>) =>
@@ -102,7 +103,7 @@ describe("writeWritableChunk", () => {
         Effect.timeoutOrElse({
           duration: "1 second",
           onTimeout: () =>
-            Effect.fail(new Error("writeWritableChunk hung after the writable closed")),
+            Effect.fail(timeoutTestError("writeWritableChunk hung after the writable closed")),
         }),
       ),
     );

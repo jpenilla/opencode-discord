@@ -8,6 +8,7 @@ import { makeIdleCompactionWorkflow } from "@/sessions/compaction/idle-compactio
 import { OpencodeService, type OpencodeServiceShape } from "@/opencode/service.ts";
 import type { ChannelSession } from "@/sessions/session.ts";
 import { Logger } from "@/util/logging.ts";
+import { failTest, timeoutTestError } from "../../support/errors.ts";
 import { getRef, makeSessionHandle, makeSilentLogger } from "../../support/fixtures.ts";
 import { unsafeStub } from "../../support/stub.ts";
 
@@ -37,20 +38,20 @@ describe("makeIdleCompactionWorkflow", () => {
         Effect.provide(
           Layer.mergeAll(
             Layer.succeed(InfoCards, {
-              send: () => Effect.fail(new Error("unexpected")),
+              send: () => failTest("unexpected"),
               edit: () => Effect.void,
-              upsert: () => Effect.fail(new Error("channel send failed")),
+              upsert: () => failTest("channel send failed"),
             } satisfies InfoCardsShape),
             Layer.succeed(Logger, makeSilentLogger()),
             Layer.succeed(OpencodeService, {
-              createSession: () => Effect.fail(new Error("unexpected")),
-              attachSession: () => Effect.fail(new Error("unexpected")),
-              submitPrompt: () => Effect.fail(new Error("unexpected")),
-              readPromptResult: () => Effect.fail(new Error("unexpected")),
-              interruptSession: () => Effect.fail(new Error("unexpected")),
-              compactSession: () => Effect.fail(new Error("compaction failed")),
-              replyToQuestion: () => Effect.fail(new Error("unexpected")),
-              rejectQuestion: () => Effect.fail(new Error("unexpected")),
+              createSession: () => failTest("unexpected"),
+              attachSession: () => failTest("unexpected"),
+              submitPrompt: () => failTest("unexpected"),
+              readPromptResult: () => failTest("unexpected"),
+              interruptSession: () => failTest("unexpected"),
+              compactSession: () => failTest("compaction failed"),
+              replyToQuestion: () => failTest("unexpected"),
+              rejectQuestion: () => failTest("unexpected"),
               isHealthy: () => Effect.succeed(true),
             } satisfies OpencodeServiceShape),
           ),
@@ -64,13 +65,12 @@ describe("makeIdleCompactionWorkflow", () => {
     await Effect.runPromise(workflow.start({ session, channel }));
     await Effect.runPromise(
       workflow.hasActive(session.opencode.sessionId).pipe(
-        Effect.flatMap((active) =>
-          active ? Effect.fail(new Error("compaction still active")) : Effect.void,
-        ),
+        Effect.flatMap((active) => (active ? failTest("compaction still active") : Effect.void)),
         Effect.eventually,
         Effect.timeoutOrElse({
           duration: "1 second",
-          onTimeout: () => Effect.fail(new Error("timed out waiting for compaction to clear")),
+          onTimeout: () =>
+            Effect.fail(timeoutTestError("timed out waiting for compaction to clear")),
         }),
       ),
     );
@@ -83,20 +83,20 @@ describe("makeIdleCompactionWorkflow", () => {
         Effect.provide(
           Layer.mergeAll(
             Layer.succeed(InfoCards, {
-              send: () => Effect.fail(new Error("unexpected")),
+              send: () => failTest("unexpected"),
               edit: () => Effect.void,
               upsert: () => Effect.succeed(card),
             } satisfies InfoCardsShape),
             Layer.succeed(Logger, makeSilentLogger()),
             Layer.succeed(OpencodeService, {
-              createSession: () => Effect.fail(new Error("unexpected")),
-              attachSession: () => Effect.fail(new Error("unexpected")),
-              submitPrompt: () => Effect.fail(new Error("unexpected")),
-              readPromptResult: () => Effect.fail(new Error("unexpected")),
-              interruptSession: () => Effect.fail(new Error("interrupt failed")),
+              createSession: () => failTest("unexpected"),
+              attachSession: () => failTest("unexpected"),
+              submitPrompt: () => failTest("unexpected"),
+              readPromptResult: () => failTest("unexpected"),
+              interruptSession: () => failTest("interrupt failed"),
               compactSession: () => Effect.never,
-              replyToQuestion: () => Effect.fail(new Error("unexpected")),
-              rejectQuestion: () => Effect.fail(new Error("unexpected")),
+              replyToQuestion: () => failTest("unexpected"),
+              rejectQuestion: () => failTest("unexpected"),
               isHealthy: () => Effect.succeed(true),
             } satisfies OpencodeServiceShape),
           ),
@@ -123,7 +123,7 @@ describe("makeIdleCompactionWorkflow", () => {
         Effect.provide(
           Layer.mergeAll(
             Layer.succeed(InfoCards, {
-              send: () => Effect.fail(new Error("unexpected")),
+              send: () => failTest("unexpected"),
               edit: (_card, title) =>
                 Ref.update(edits, (current) => [...current, title]).pipe(Effect.asVoid),
               upsert: () =>
@@ -133,14 +133,14 @@ describe("makeIdleCompactionWorkflow", () => {
             } satisfies InfoCardsShape),
             Layer.succeed(Logger, makeSilentLogger()),
             Layer.succeed(OpencodeService, {
-              createSession: () => Effect.fail(new Error("unexpected")),
-              attachSession: () => Effect.fail(new Error("unexpected")),
-              submitPrompt: () => Effect.fail(new Error("unexpected")),
-              readPromptResult: () => Effect.fail(new Error("unexpected")),
-              interruptSession: () => Effect.fail(new Error("unexpected")),
+              createSession: () => failTest("unexpected"),
+              attachSession: () => failTest("unexpected"),
+              submitPrompt: () => failTest("unexpected"),
+              readPromptResult: () => failTest("unexpected"),
+              interruptSession: () => failTest("unexpected"),
               compactSession: () => Effect.never,
-              replyToQuestion: () => Effect.fail(new Error("unexpected")),
-              rejectQuestion: () => Effect.fail(new Error("unexpected")),
+              replyToQuestion: () => failTest("unexpected"),
+              rejectQuestion: () => failTest("unexpected"),
               isHealthy: () => Effect.succeed(true),
             } satisfies OpencodeServiceShape),
           ),
@@ -155,13 +155,13 @@ describe("makeIdleCompactionWorkflow", () => {
     await Effect.runPromise(
       workflow.hasActive(session.opencode.sessionId).pipe(
         Effect.flatMap((active) =>
-          active ? Effect.void : Effect.fail(new Error("compaction not marked active yet")),
+          active ? Effect.void : failTest("compaction not marked active yet"),
         ),
         Effect.eventually,
         Effect.timeoutOrElse({
           duration: "1 second",
           onTimeout: () =>
-            Effect.fail(new Error("timed out waiting for compaction to become active")),
+            Effect.fail(timeoutTestError("timed out waiting for compaction to become active")),
         }),
       ),
     );
@@ -179,21 +179,21 @@ describe("makeIdleCompactionWorkflow", () => {
         Effect.provide(
           Layer.mergeAll(
             Layer.succeed(InfoCards, {
-              send: () => Effect.fail(new Error("unexpected")),
+              send: () => failTest("unexpected"),
               edit: () => Effect.void,
-              upsert: () => Effect.fail(new Error("channel send failed")),
+              upsert: () => failTest("channel send failed"),
             } satisfies InfoCardsShape),
             Layer.succeed(Logger, makeSilentLogger()),
             Layer.succeed(OpencodeService, {
-              createSession: () => Effect.fail(new Error("unexpected")),
-              attachSession: () => Effect.fail(new Error("unexpected")),
-              submitPrompt: () => Effect.fail(new Error("unexpected")),
-              readPromptResult: () => Effect.fail(new Error("unexpected")),
+              createSession: () => failTest("unexpected"),
+              attachSession: () => failTest("unexpected"),
+              submitPrompt: () => failTest("unexpected"),
+              readPromptResult: () => failTest("unexpected"),
               interruptSession: () =>
                 Ref.update(interruptCalls, (count) => count + 1).pipe(Effect.asVoid),
-              compactSession: () => Effect.fail(new Error("compaction failed")),
-              replyToQuestion: () => Effect.fail(new Error("unexpected")),
-              rejectQuestion: () => Effect.fail(new Error("unexpected")),
+              compactSession: () => failTest("compaction failed"),
+              replyToQuestion: () => failTest("unexpected"),
+              rejectQuestion: () => failTest("unexpected"),
               isHealthy: () => Effect.succeed(true),
             } satisfies OpencodeServiceShape),
           ),
@@ -207,13 +207,12 @@ describe("makeIdleCompactionWorkflow", () => {
     await Effect.runPromise(workflow.start({ session, channel }));
     await Effect.runPromise(
       workflow.hasActive(session.opencode.sessionId).pipe(
-        Effect.flatMap((active) =>
-          active ? Effect.fail(new Error("compaction still active")) : Effect.void,
-        ),
+        Effect.flatMap((active) => (active ? failTest("compaction still active") : Effect.void)),
         Effect.eventually,
         Effect.timeoutOrElse({
           duration: "1 second",
-          onTimeout: () => Effect.fail(new Error("timed out waiting for compaction to clear")),
+          onTimeout: () =>
+            Effect.fail(timeoutTestError("timed out waiting for compaction to clear")),
         }),
       ),
     );

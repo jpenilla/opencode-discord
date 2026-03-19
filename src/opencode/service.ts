@@ -4,7 +4,7 @@ import {
   type OpencodeClient,
   type QuestionAnswer,
 } from "@opencode-ai/sdk/v2";
-import { Cause, Effect, Exit, Layer, Queue, ServiceMap } from "effect";
+import { Cause, Data, Effect, Exit, Layer, Queue, ServiceMap } from "effect";
 import { fileURLToPath } from "node:url";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
@@ -92,6 +92,11 @@ const defaultRuntime: OpencodeRuntime = {
   stageConfigDir: stageSandboxConfigDirectory,
 };
 
+class OpencodeServiceError extends Data.TaggedError("OpencodeServiceError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
 const formatValue = (value: unknown) => {
   if (value === undefined || value === null) {
     return "";
@@ -111,6 +116,9 @@ const formatValue = (value: unknown) => {
 
 const isAbortError = (error: unknown) =>
   error instanceof DOMException || (error instanceof Error && error.name === "AbortError");
+
+const opencodeServiceError = (message: string, cause?: unknown) =>
+  new OpencodeServiceError({ message, cause });
 
 const consumeEvents = (input: {
   client: OpencodeClient;
@@ -252,7 +260,7 @@ const resolveSessionModel = (session: SessionHandle) =>
       }
 
       return Effect.fail(
-        new Error(
+        opencodeServiceError(
           "Failed to compact opencode session: no model metadata is available for this session",
         ),
       );
@@ -292,7 +300,8 @@ export const makeOpencodeService = (input: {
     const resolvedBackend = describeSandboxBackend(config.sandboxBackend);
     const executableProbe = yield* Effect.try({
       try: () => runtime.probeExecutables(config),
-      catch: (error) => error,
+      catch: (cause) =>
+        opencodeServiceError(`Failed to probe sandbox executables: ${formatValue(cause)}`, cause),
     }).pipe(
       Effect.tapError((error) =>
         logger.error("sandbox executable probe failed", {
@@ -494,7 +503,11 @@ export const makeOpencodeService = (input: {
       isHealthy: (session) =>
         Effect.tryPromise({
           try: () => session.client.global.health(),
-          catch: (error) => error,
+          catch: (cause) =>
+            opencodeServiceError(
+              `Failed to load opencode health status: ${formatValue(cause)}`,
+              cause,
+            ),
         }).pipe(
           Effect.map((result) => !result.error && result.data?.healthy === true),
           Effect.orElseSucceed(() => false),

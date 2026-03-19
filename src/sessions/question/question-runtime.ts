@@ -1,5 +1,5 @@
 import type { Event, QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
-import { Effect, Ref } from "effect";
+import { Data, Effect, Ref } from "effect";
 import { type Interaction, type Message } from "discord.js";
 
 import {
@@ -39,6 +39,7 @@ import {
   type ActiveRun,
   type ChannelSession,
 } from "@/sessions/session.ts";
+import { formatError } from "@/util/errors.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
 export type QuestionWorkflowEvent =
@@ -110,6 +111,14 @@ type RemoteQuestionAction = {
 };
 
 const SHUTDOWN_QUESTION_RPC_TIMEOUT = "1 second";
+
+class QuestionRuntimeError extends Data.TaggedError("QuestionRuntimeError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
+const questionRuntimeError = (message: string, cause?: unknown) =>
+  new QuestionRuntimeError({ message, cause });
 
 const noSignals: ReadonlyArray<QuestionWorkflowSignal> = [];
 const signal = <A extends QuestionWorkflowSignal>(value: A): ReadonlyArray<A> => [value];
@@ -385,9 +394,10 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
       const attachment = batch.runtime.attachment;
       return attachment._tag !== "attached"
         ? Effect.void
-        : Effect.promise(() =>
-            attachment.message.edit(createQuestionMessageEdit(questionBatchView(batch))),
-          ).pipe(Effect.asVoid);
+        : Effect.tryPromise({
+            try: () => attachment.message.edit(createQuestionMessageEdit(questionBatchView(batch))),
+            catch: (cause) => questionRuntimeError(formatError(cause), cause),
+          }).pipe(Effect.asVoid);
     };
 
     const replyToQuestionInteraction = (interaction: Interaction, message: string) =>
@@ -652,11 +662,12 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
               ...createQuestionMessageCreate(questionBatchView(activateQuestionBatch(batch))),
               allowedMentions: { repliedUser: true, parse: ["users", "roles", "everyone"] },
             }),
-          catch: (error) => error,
+          catch: (cause) => questionRuntimeError(formatError(cause), cause),
         }).pipe(
           Effect.timeoutOrElse({
             duration: "5 seconds",
-            onTimeout: () => Effect.fail(new Error("Timed out sending question batch to Discord")),
+            onTimeout: () =>
+              Effect.fail(questionRuntimeError("Timed out sending question batch to Discord")),
           }),
           Effect.result,
         );
@@ -1011,7 +1022,9 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                     Effect.flatMap((result) =>
                       result._tag === "Some"
                         ? Effect.void
-                        : Effect.fail(new Error(`Timed out rejecting question ${requestId}`)),
+                        : Effect.fail(
+                            questionRuntimeError(`Timed out rejecting question ${requestId}`),
+                          ),
                     ),
                     Effect.result,
                   ),
@@ -1028,21 +1041,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                       sessionId,
                       error: deps.formatError(failure.failure),
                     })
-                    .pipe(
-                      Effect.andThen(
-                        context.session.opencode.close().pipe(
-                          Effect.catch((error) =>
-                            deps.logger.warn(
-                              "failed to force-close opencode session during question shutdown",
-                              {
-                                sessionId,
-                                error: deps.formatError(error),
-                              },
-                            ),
-                          ),
-                        ),
-                      ),
-                    );
+                    .pipe(Effect.andThen(context.session.opencode.close()));
                 }),
               ),
         ),

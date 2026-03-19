@@ -1,4 +1,4 @@
-import { Effect, Option } from "effect";
+import { Data, Effect, Option } from "effect";
 import { type SendableChannels } from "discord.js";
 
 import type { InfoCardsShape } from "@/discord/info-cards.ts";
@@ -12,6 +12,11 @@ import type { LoggerShape } from "@/util/logging.ts";
 const SHUTDOWN_RPC_TIMEOUT = "1 second";
 const SHUTDOWN_GRACE_PERIOD = "10 seconds";
 const SHUTDOWN_DRAIN_POLL_INTERVAL = "100 millis";
+
+class SessionShutdownError extends Data.TaggedError("SessionShutdownError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
 
 type SessionShutdownDeps = {
   startShutdown: () => Effect.Effect<boolean>;
@@ -51,11 +56,13 @@ const catchShutdownWarn =
 
 const withShutdownRpcTimeout =
   (message: string) =>
-  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | Error, R> =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | SessionShutdownError, R> =>
     effect.pipe(
       Effect.timeoutOption(SHUTDOWN_RPC_TIMEOUT),
       Effect.flatMap((result) =>
-        Option.isSome(result) ? Effect.succeed(result.value) : Effect.fail(new Error(message)),
+        Option.isSome(result)
+          ? Effect.succeed(result.value)
+          : Effect.fail(new SessionShutdownError({ message })),
       ),
     );
 
@@ -147,7 +154,9 @@ const interruptIdleCompactionForShutdown = (deps: SessionShutdownDeps, session: 
   deps.idleCompactionWorkflow.requestInterrupt({ session }).pipe(
     withShutdownRpcTimeout("Timed out interrupting idle compaction during shutdown"),
     Effect.flatMap((result) =>
-      result.type === "failed" ? Effect.fail(new Error(result.message)) : Effect.void,
+      result.type === "failed"
+        ? Effect.fail(new SessionShutdownError({ message: result.message }))
+        : Effect.void,
     ),
     Effect.catch((error) =>
       deps.logger

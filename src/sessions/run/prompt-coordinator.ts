@@ -1,4 +1,4 @@
-import { Deferred, Effect, Queue, Ref } from "effect";
+import { Data, Deferred, Effect, Queue, Ref } from "effect";
 
 import type { PromptResult, SessionHandle, OpencodeServiceShape } from "@/opencode/service.ts";
 import { beginPendingPrompt, failPendingPrompt } from "@/sessions/run/prompt-state.ts";
@@ -9,6 +9,10 @@ import {
 } from "@/sessions/run/run-batch.ts";
 import { resetActivePromptTracking, type ActiveRun } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
+
+class PromptInterruptedError extends Data.TaggedError("PromptInterruptedError")<{
+  readonly message: string;
+}> {}
 
 type PromptCoordinatorActiveRun = Pick<
   ActiveRun,
@@ -55,7 +59,7 @@ export const coordinateActiveRunPrompts = (
     const runPrompt = (promptContext: AdmittedPromptContext) =>
       Effect.gen(function* () {
         if (input.activeRun.interruptRequested) {
-          return yield* Effect.fail(new Error("interrupted"));
+          return yield* new PromptInterruptedError({ message: "interrupted" });
         }
 
         resetActivePromptTracking(input.activeRun);

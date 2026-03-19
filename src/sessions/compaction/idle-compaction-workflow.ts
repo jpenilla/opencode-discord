@@ -84,7 +84,7 @@ const sendCompactionSummary = (session: ChannelSession, text: string, logger: Lo
     return Effect.void;
   }
 
-  return Effect.promise(() =>
+  return Effect.tryPromise(() =>
     sendChannelProgressUpdate({
       channel,
       mentionContext: session.progressMentionContext,

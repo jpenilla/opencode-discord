@@ -13,6 +13,11 @@ import type { SessionRunAccessShape } from "@/sessions/session-runtime.ts";
 import { uploadMetadataHeader } from "@/tools/bridge/handlers/uploads.ts";
 import { handleToolBridgeRequest, runToolBridgeHttpRequest } from "@/tools/bridge/server.ts";
 import type { LoggerShape } from "@/util/logging.ts";
+import {
+  discordApiValidationMessage,
+  makeDiscordApiError,
+} from "../../support/discord-api-error.ts";
+import { timeoutTestError } from "../../support/errors.ts";
 import { unsafeStub } from "../../support/stub.ts";
 
 const bridgeToken = "bridge-token";
@@ -24,8 +29,7 @@ const uploadMetadata = {
 const discordUploadFailure = {
   status: 502,
   body: {
-    error:
-      "Discord rejected file upload (status 400, code 50035): Invalid Form Body\nfiles[0]: This file cannot be sent",
+    error: `Discord rejected file upload (status 400, code 50035): ${discordApiValidationMessage}`,
     kind: "discord-api",
   },
 } as const;
@@ -139,14 +143,6 @@ const makeActiveRun = (send: (payload: MessageCreateOptions) => Promise<unknown>
     },
   });
 
-const makeDiscordApiError = () => ({
-  name: "DiscordAPIError[50035]",
-  message: "Invalid Form Body\nfiles[0]: This file cannot be sent",
-  status: 400,
-  code: 50035,
-  rawError: { message: "Invalid Form Body" },
-});
-
 const runBridgeRequest = (
   input: {
     request?: IncomingMessage;
@@ -180,7 +176,7 @@ const expectPromptResponse = <A, E>(effect: Effect.Effect<A, E>, onTimeout: stri
       return yield* Fiber.join(fiber).pipe(
         Effect.timeoutOrElse({
           duration: "1 second",
-          onTimeout: () => Effect.fail(new Error(onTimeout)),
+          onTimeout: () => Effect.fail(timeoutTestError(onTimeout)),
         }),
       );
     }),
@@ -243,8 +239,7 @@ describe("handleToolBridgeRequest", () => {
       send: async (_payload: MessageCreateOptions) => Promise.reject(makeDiscordApiError()),
       expectedResponse: discordUploadFailure,
       expectedKind: "discord-api",
-      expectedError:
-        "Discord rejected file upload (status 400, code 50035): Invalid Form Body\nfiles[0]: This file cannot be sent",
+      expectedError: `Discord rejected file upload (status 400, code 50035): ${discordApiValidationMessage}`,
       expectedCause: "DiscordAPIError[50035]",
     },
     {

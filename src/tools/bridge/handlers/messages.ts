@@ -50,20 +50,21 @@ export const handleReact = (context: ToolBridgeHandlerContext<ReactPayload>) => 
     const { emoji: emojiInput, messageId } = context.payload;
     const targetMessage = yield* resolveReactionTargetMessage(context.activeRun, messageId);
     if (!targetMessage) {
-      return yield* Effect.fail(
-        new ToolBridgeResponseError(
-          404,
-          `messageId is not available in this channel: ${messageId}`,
-        ),
-      );
+      return yield* new ToolBridgeResponseError({
+        status: 404,
+        message: `messageId is not available in this channel: ${messageId}`,
+      });
     }
 
     const emoji = normalizeReactionEmoji(targetMessage, emojiInput);
     if (!emoji) {
-      return yield* Effect.fail(new ToolBridgeResponseError(400, "invalid or unavailable emoji"));
+      return yield* new ToolBridgeResponseError({
+        status: 400,
+        message: "invalid or unavailable emoji",
+      });
     }
 
-    yield* tryBridgePromise(() => targetMessage.react(emoji));
+    yield* tryBridgePromise("adding a Discord reaction failed", () => targetMessage.react(emoji));
     return `Added reaction ${emoji} to Discord message ${targetMessage.id}`;
   });
 };
@@ -75,19 +76,18 @@ export const handleListAttachments = (
     const { messageId } = context.payload;
     const targetMessage = getRunMessageById(context.activeRun, messageId);
     if (!targetMessage) {
-      return yield* Effect.fail(
-        new ToolBridgeResponseError(
-          404,
-          `messageId is not available in the current run: ${messageId}`,
-        ),
-      );
+      return yield* new ToolBridgeResponseError({
+        status: 404,
+        message: `messageId is not available in the current run: ${messageId}`,
+      });
     }
 
     const attachments = [...targetMessage.attachments.values()];
     if (attachments.length === 0) {
-      return yield* Effect.fail(
-        new ToolBridgeResponseError(409, `no attachments on Discord message ${messageId}`),
-      );
+      return yield* new ToolBridgeResponseError({
+        status: 409,
+        message: `no attachments on Discord message ${messageId}`,
+      });
     }
 
     return JSON.stringify(

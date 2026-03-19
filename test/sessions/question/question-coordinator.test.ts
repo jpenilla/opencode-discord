@@ -12,12 +12,14 @@ import {
 import { makeQuestionRuntime } from "@/sessions/question/question-runtime.ts";
 import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
+import { formatError } from "@/util/errors.ts";
 import {
   getRef,
   makeMessage,
   makeSessionHandle,
   makeSilentLogger,
 } from "../../support/fixtures.ts";
+import { failTest } from "../../support/errors.ts";
 import { unsafeStub } from "../../support/stub.ts";
 
 const makeRequest = (id = "req-1") =>
@@ -156,9 +158,7 @@ const makeHarness = async (options?: {
       rejectQuestion: (_opencode, requestId) =>
         Ref.update(rejectCalls, (current) => [...current, requestId]).pipe(
           Effect.flatMap(() =>
-            options?.rejectResult === "failure"
-              ? Effect.fail(new Error("reject failed"))
-              : Effect.void,
+            options?.rejectResult === "failure" ? failTest("reject failed") : Effect.void,
           ),
         ),
       sendQuestionUiFailure: (message, error) =>
@@ -168,7 +168,7 @@ const makeHarness = async (options?: {
           ),
         ),
       logger: makeSilentLogger(),
-      formatError: (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      formatError,
     }),
   );
 

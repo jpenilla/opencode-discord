@@ -100,7 +100,7 @@ const createSchemaRoute = <TSchema extends v.GenericSchema>(
   });
 };
 
-const noPayload = () => Effect.succeed(undefined);
+const noPayload = () => Effect.void;
 
 const parseUploadRequest = (
   request: IncomingMessage,

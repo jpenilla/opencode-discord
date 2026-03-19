@@ -57,7 +57,7 @@ const formatStickerList = (message: Message) => {
 };
 
 const listContextStickers = (message: Message) =>
-  tryBridgePromise(() => listUsableStickers(message));
+  tryBridgePromise("listing available Discord stickers failed", () => listUsableStickers(message));
 
 export const handleListCustomEmojis = (context: ToolBridgeHandlerContext<void>) => {
   return Effect.succeed(formatEmojiList(context.activeRun.originMessage));
@@ -73,9 +73,10 @@ export const handleSendSticker = (context: ToolBridgeHandlerContext<SendStickerP
     const stickers = yield* listContextStickers(context.activeRun.originMessage);
     const sticker = stickers.find((candidate) => candidate.sticker.id === stickerID);
     if (!sticker) {
-      return yield* Effect.fail(
-        new ToolBridgeResponseError(403, "sticker is not available in this context"),
-      );
+      return yield* new ToolBridgeResponseError({
+        status: 403,
+        message: "sticker is not available in this context",
+      });
     }
 
     const channel = yield* requireSendableChannel(context.activeRun);

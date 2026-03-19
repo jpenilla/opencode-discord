@@ -3,7 +3,12 @@ import type { Writable } from "node:stream";
 
 import { Effect } from "effect";
 
-import { ToolBridgeResponseError } from "@/tools/bridge/errors.ts";
+import {
+  ToolBridgeResponseError,
+  toolBridgeInternalBoundaryError,
+  toolBridgeInternalError,
+  type ToolBridgeInternalError,
+} from "@/tools/bridge/errors.ts";
 
 export const sendJson = (response: ServerResponse, body: unknown, status = 200) => {
   response.writeHead(status, { "content-type": "application/json" });
@@ -19,33 +24,31 @@ export const readJsonBody = (request: IncomingMessage) => {
       }
       return bodyChunks;
     },
-    catch: () => new ToolBridgeResponseError(400, "invalid json"),
+    catch: () => new ToolBridgeResponseError({ status: 400, message: "invalid json" }),
   }).pipe(
     Effect.flatMap((chunks) => {
       if (chunks.length === 0) {
-        return Effect.succeed(undefined);
+        return Effect.void;
       }
 
       const raw = Buffer.concat(chunks).toString("utf8");
       return Effect.try({
         try: () => JSON.parse(raw),
-        catch: () => new ToolBridgeResponseError(400, "invalid json"),
+        catch: () => new ToolBridgeResponseError({ status: 400, message: "invalid json" }),
       });
     }),
   );
 };
 
-const toError = (error: unknown) => (error instanceof Error ? error : new Error(String(error)));
-const closedWritableError = () => new Error("writable closed before the pending write completed");
-
-const normalizeChunk = (chunk: string | Uint8Array) =>
-  typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-
 export const writeWritableChunk = (writable: Writable, chunk: Uint8Array) =>
-  Effect.callback<void, Error>((resume) => {
+  Effect.callback<void, ToolBridgeInternalError>((resume) => {
     const onError = (error: Error) => {
       cleanup();
-      resume(Effect.fail(error));
+      resume(
+        Effect.fail(
+          toolBridgeInternalBoundaryError("writing to the bridge response failed", error),
+        ),
+      );
     };
 
     const onDrain = () => {
@@ -55,7 +58,9 @@ export const writeWritableChunk = (writable: Writable, chunk: Uint8Array) =>
 
     const onClose = () => {
       cleanup();
-      resume(Effect.fail(closedWritableError()));
+      resume(
+        Effect.fail(toolBridgeInternalError("writable closed before the pending write completed")),
+      );
     };
 
     const cleanup = () => {
@@ -75,7 +80,11 @@ export const writeWritableChunk = (writable: Writable, chunk: Uint8Array) =>
       }
     } catch (error) {
       cleanup();
-      resume(Effect.fail(toError(error)));
+      resume(
+        Effect.fail(
+          toolBridgeInternalBoundaryError("writing to the bridge response failed", error),
+        ),
+      );
       return Effect.sync(cleanup);
     }
 
@@ -84,10 +93,12 @@ export const writeWritableChunk = (writable: Writable, chunk: Uint8Array) =>
   });
 
 export const endWritable = (writable: Writable) =>
-  Effect.callback<void, Error>((resume) => {
+  Effect.callback<void, ToolBridgeInternalError>((resume) => {
     const onError = (error: Error) => {
       cleanup();
-      resume(Effect.fail(error));
+      resume(
+        Effect.fail(toolBridgeInternalBoundaryError("closing the bridge response failed", error)),
+      );
     };
 
     const cleanup = () => {
@@ -103,7 +114,9 @@ export const endWritable = (writable: Writable) =>
       });
     } catch (error) {
       cleanup();
-      resume(Effect.fail(toError(error)));
+      resume(
+        Effect.fail(toolBridgeInternalBoundaryError("closing the bridge response failed", error)),
+      );
     }
 
     return Effect.sync(cleanup);
@@ -139,19 +152,26 @@ export const pipeAsyncIterableToWritable = (
               return;
             }
 
-            await Effect.runPromise(writeWritableChunk(writable, normalizeChunk(next.value)));
+            await Effect.runPromise(
+              writeWritableChunk(
+                writable,
+                typeof next.value === "string" ? Buffer.from(next.value) : next.value,
+              ),
+            );
           }
         } catch (error) {
           await closeIterator().catch(() => undefined);
           throw error;
         }
       },
-      catch: toError,
+      catch: (cause) =>
+        toolBridgeInternalBoundaryError("streaming the bridge response failed", cause),
     }).pipe(
       Effect.onInterrupt(() =>
         Effect.tryPromise({
           try: closeIterator,
-          catch: toError,
+          catch: (cause) =>
+            toolBridgeInternalBoundaryError("closing the bridge source iterator failed", cause),
         }).pipe(Effect.ignore),
       ),
     );

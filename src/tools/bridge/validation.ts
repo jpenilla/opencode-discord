@@ -32,7 +32,12 @@ export const parseBridgePayload = <TSchema extends v.GenericSchema>(
   const result = v.safeParse(schema, body);
   return result.success
     ? Effect.succeed(result.output)
-    : Effect.fail(new ToolBridgeResponseError(400, formatValidationIssues(result.issues)));
+    : Effect.fail(
+        new ToolBridgeResponseError({
+          status: 400,
+          message: formatValidationIssues(result.issues),
+        }),
+      );
 };
 
 export const parseSessionPayload = (body: unknown) => {
@@ -45,7 +50,7 @@ const parseJsonText = (
 ): Effect.Effect<unknown, ToolBridgeResponseError> =>
   Effect.try({
     try: () => JSON.parse(raw),
-    catch: () => new ToolBridgeResponseError(400, error),
+    catch: () => new ToolBridgeResponseError({ status: 400, message: error }),
   });
 
 const requireHeaderString = (
@@ -56,7 +61,7 @@ const requireHeaderString = (
     return Effect.succeed(value);
   }
 
-  return Effect.fail(new ToolBridgeResponseError(400, error));
+  return Effect.fail(new ToolBridgeResponseError({ status: 400, message: error }));
 };
 
 export const parseEncodedBridgePayload = <TSchema extends v.GenericSchema>(

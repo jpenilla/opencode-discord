@@ -1,3 +1,8 @@
+import { DiscordAPIError } from "discord.js";
+import { Data } from "effect";
+
+import { formatError } from "@/util/errors.ts";
+
 export type ToolBridgeFailureKind = "discord-api" | "bridge-internal";
 
 export type ToolBridgeFailure = {
@@ -6,87 +11,69 @@ export type ToolBridgeFailure = {
   error: string;
 };
 
-export class ToolBridgeResponseError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
+export class ToolBridgeResponseError extends Data.TaggedError("ToolBridgeResponseError")<{
+  readonly status: number;
+  readonly message: string;
+}> {}
 
-const asRecord = (value: unknown): Record<string, unknown> | null =>
-  typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+export class ToolBridgeInternalError extends Data.TaggedError("ToolBridgeInternalError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
 
-const stringProp = (record: Record<string, unknown> | null, key: string): string | null =>
-  typeof record?.[key] === "string" ? (record[key] as string) : null;
+export class ToolBridgeDiscordApiError extends Data.TaggedError("ToolBridgeDiscordApiError")<{
+  readonly message: string;
+  readonly status: number;
+  readonly code: string | number;
+  readonly cause: DiscordAPIError;
+}> {}
 
-const numberProp = (record: Record<string, unknown> | null, key: string): number | null =>
-  typeof record?.[key] === "number" ? (record[key] as number) : null;
-
-// Bridge handlers preserve raw promise rejections at the boundary. This is only a fallback for
-// wrapped failures that already crossed an Effect.tryPromise boundary elsewhere.
-const unwrapEffectUnknownException = (error: unknown): unknown => {
-  const record = asRecord(error);
-  if (record?._tag !== "UnknownException" && record?._tag !== "UnknownError") {
-    return error;
+const formatBoundaryMessage = (cause: unknown, fallbackMessage: string) => {
+  if (cause === undefined) {
+    return fallbackMessage;
   }
 
-  return record.error ?? record.cause ?? error;
+  const message = formatError(cause);
+  return message.length > 0 ? message : fallbackMessage;
 };
 
-const formatErrorMessage = (error: unknown) => {
-  const unwrapped = unwrapEffectUnknownException(error);
-  const record = asRecord(unwrapped);
-  const directMessage = stringProp(record, "message");
-  if (directMessage) {
-    return directMessage;
-  }
+export const toolBridgeInternalError = (message: string, cause?: unknown) =>
+  new ToolBridgeInternalError({ message, cause });
 
-  const rawError = asRecord(record?.rawError);
-  const rawMessage = stringProp(rawError, "message");
-  if (rawMessage) {
-    return rawMessage;
-  }
-
-  if (unwrapped instanceof Error) {
-    return unwrapped.message;
-  }
-  return String(unwrapped);
-};
-
-const isDiscordApiError = (error: unknown) => {
-  const record = asRecord(unwrapEffectUnknownException(error));
-  const name = stringProp(record, "name");
-  return Boolean(
-    (name && name.startsWith("DiscordAPIError")) ||
-    (record && "rawError" in record && typeof record.status === "number"),
-  );
+export const toolBridgeInternalBoundaryError = (message: string, cause: unknown) => {
+  return cause instanceof ToolBridgeInternalError
+    ? cause
+    : toolBridgeInternalError(formatBoundaryMessage(cause, message), cause);
 };
 
 export const classifyToolBridgeFailure = (operation: string, error: unknown): ToolBridgeFailure => {
-  const unwrapped = unwrapEffectUnknownException(error);
-  const record = asRecord(unwrapped);
-  const message = formatErrorMessage(error);
+  const bridgeError =
+    error instanceof ToolBridgeDiscordApiError || error instanceof ToolBridgeInternalError
+      ? error
+      : error instanceof DiscordAPIError
+        ? new ToolBridgeDiscordApiError({
+            message: error.message,
+            status: error.status,
+            code: error.code,
+            cause: error,
+          })
+        : toolBridgeInternalError(formatError(error), error);
 
-  if (isDiscordApiError(unwrapped)) {
-    const status = numberProp(record, "status");
-    const code = record?.code;
+  if (bridgeError instanceof ToolBridgeDiscordApiError) {
     const details = [
-      status !== null ? `status ${status}` : null,
-      typeof code === "number" || typeof code === "string" ? `code ${code}` : null,
+      `status ${bridgeError.status}`,
+      bridgeError.code !== undefined ? `code ${bridgeError.code}` : null,
     ].filter(Boolean);
-
     return {
       kind: "discord-api",
       status: 502,
-      error: `Discord rejected ${operation}${details.length > 0 ? ` (${details.join(", ")})` : ""}: ${message}`,
+      error: `Discord rejected ${operation}${details.length > 0 ? ` (${details.join(", ")})` : ""}: ${bridgeError.message}`,
     };
   }
 
   return {
     kind: "bridge-internal",
     status: 500,
-    error: `Discord bridge failed while performing ${operation}: ${message}`,
+    error: `Discord bridge failed while performing ${operation}: ${bridgeError.message}`,
   };
 };

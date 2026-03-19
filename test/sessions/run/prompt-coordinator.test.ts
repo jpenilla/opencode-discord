@@ -10,6 +10,7 @@ import { enqueueRunRequest } from "@/sessions/request-routing.ts";
 import type { RunRequest } from "@/sessions/session.ts";
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
 import { makeMessage, makeSessionHandle, makeSilentLogger } from "../../support/fixtures.ts";
+import { failTest } from "../../support/errors.ts";
 
 const makeRequest = (
   id: string,
@@ -381,7 +382,7 @@ describe("coordinateActiveRunPrompts", () => {
           activeRun,
           initialRequests: [makeRequest("m-1", "initial")],
           awaitIdleCompaction: () => Effect.void,
-          submitPrompt: () => Effect.fail(new Error("submit failed")),
+          submitPrompt: () => failTest("submit failed"),
           handlePromptCompleted: () => Effect.void,
           logger: makeSilentLogger(),
         }),

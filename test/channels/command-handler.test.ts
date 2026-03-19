@@ -39,6 +39,7 @@ import {
 } from "@/state/persistence.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
 import { getRef } from "../support/fixtures.ts";
+import { failTest } from "../support/errors.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const makeConfig = (defaults: {
@@ -217,7 +218,7 @@ const makeHarness = async (options?: HarnessOptions) => {
     }) =>
       Effect.gen(function* () {
         if (options?.failInfoCardUpsert) {
-          return yield* Effect.fail(new Error("card post failed"));
+          return yield* failTest("card post failed");
         }
         const card = unsafeStub<Message>({
           id: `${title}-${channel.id}`,
@@ -376,12 +377,12 @@ const makeHarness = async (options?: HarnessOptions) => {
       readSession(channelId).pipe(Effect.flatMap(readChannelActivity)),
     readRestoredChannelActivity: (channelId: string) =>
       readSession(channelId).pipe(Effect.flatMap(readChannelActivity)),
-    queueMessageRunRequest: () => Effect.fail(new Error("unused in command tests")),
+    queueMessageRunRequest: () => failTest("unused in command tests"),
     routeQuestionInteraction: () => Effect.void,
     invalidate: (channelId: string, reason: string) =>
       Effect.gen(function* () {
         if (options?.invalidateResult === "failure") {
-          return yield* Effect.fail(new Error("invalidate failed"));
+          return yield* failTest("invalidate failed");
         }
         if (options?.invalidateResult === "busy") {
           return false;

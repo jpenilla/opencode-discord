@@ -23,6 +23,7 @@ import {
   makeUserMessageUpdatedEvent,
 } from "../support/opencode-events.ts";
 import { getRef, makeMessage, makeSessionHandle, makeSilentLogger } from "../support/fixtures.ts";
+import { failTest } from "../support/errors.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const makeSession = async (withActiveRun: boolean, showCompactionSummaries = true) => {
@@ -84,7 +85,7 @@ const noopIdleCompactionWorkflow = {
   handleCompacted: () => Effect.void,
 };
 
-const unexpectedPromptResultLoad = () => Effect.fail(new Error("unexpected prompt result load"));
+const unexpectedPromptResultLoad = () => failTest("unexpected prompt result load");
 
 const makeRuntime = (input: {
   session?: ChannelSession | null;
@@ -601,7 +602,7 @@ describe("createEventHandler", () => {
       activeRun,
       readPromptResult: () =>
         Ref.update(readPromptCalls, (count) => count + 1).pipe(
-          Effect.flatMap(() => Effect.fail(new Error("unexpected prompt result load"))),
+          Effect.flatMap(() => failTest("unexpected prompt result load")),
         ),
     });
 

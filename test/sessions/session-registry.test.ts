@@ -8,6 +8,7 @@ import type { ActiveRun } from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import type { PersistedChannelSession } from "@/state/persistence.ts";
 import { makeMessage, makeSilentLogger } from "../support/fixtures.ts";
+import { failTest } from "../support/errors.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const makeRegistryMessage = (channelId = "channel-1") =>
@@ -237,7 +238,7 @@ describe("createSessionRegistry", () => {
           yield* Deferred.succeed(createStarted, undefined).pipe(Effect.ignore);
           yield* Deferred.await(releaseCreate);
           if (count === 1) {
-            return yield* Effect.fail(new Error("create failed"));
+            return yield* failTest("create failed");
           }
           return makeHandle(`session-${count}`, workdir, () => {});
         }),

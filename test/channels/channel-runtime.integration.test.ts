@@ -55,6 +55,7 @@ import {
   toGlobalEvent,
 } from "../support/opencode-events.ts";
 import { getRef } from "../support/fixtures.ts";
+import { failTest, interruptedTestError, timeoutTestError } from "../support/errors.ts";
 import { unsafeEffect, unsafeStub } from "../support/stub.ts";
 
 const TEST_STATE_DIR = join(tmpdir(), `.opencode-discord-test-storage-${process.pid}`);
@@ -105,14 +106,12 @@ const waitForNoActiveRun = (
   sessionId: string,
 ) =>
   sessions.getActiveRunBySessionId(sessionId).pipe(
-    Effect.flatMap((activeRun) =>
-      activeRun ? Effect.fail(new Error("run still active")) : Effect.void,
-    ),
+    Effect.flatMap((activeRun) => (activeRun ? failTest("run still active") : Effect.void)),
     Effect.eventually,
     Effect.timeoutOrElse({
       duration: "1 second",
       onTimeout: () =>
-        Effect.fail(new Error(`Timed out waiting for active run ${sessionId} to clear`)),
+        Effect.fail(timeoutTestError(`Timed out waiting for active run ${sessionId} to clear`)),
     }),
   );
 
@@ -128,12 +127,12 @@ const waitForReplyPayload = (
 ) =>
   Ref.get(replyPayloads).pipe(
     Effect.flatMap((payloads) =>
-      payloads.some(predicate) ? Effect.void : Effect.fail(new Error("payload not posted yet")),
+      payloads.some(predicate) ? Effect.void : failTest("payload not posted yet"),
     ),
     Effect.eventually,
     Effect.timeoutOrElse({
       duration: "1 second",
-      onTimeout: () => Effect.fail(new Error("Timed out waiting for reply payload")),
+      onTimeout: () => Effect.fail(timeoutTestError("Timed out waiting for reply payload")),
     }),
   );
 
@@ -210,9 +209,11 @@ const withHarness = <A>(
   Effect.runPromise(
     Effect.scoped(
       Effect.gen(function* () {
+        const channels = yield* ChannelRuntime;
+        const sessions = yield* SessionRunAccess;
         return yield* run({
-          channels: yield* ChannelRuntime,
-          sessions: yield* SessionRunAccess,
+          channels,
+          sessions,
         });
       }).pipe(Effect.provide(harness.harnessLayer)),
     ),
@@ -741,7 +742,7 @@ describe("ChannelRuntimeLayer integration", () => {
           .getActiveRunBySessionId("session-1")
           .pipe(
             Effect.flatMap((activeRun) =>
-              activeRun ? Effect.void : Effect.fail(new Error("active run cleared before idle")),
+              activeRun ? Effect.void : failTest("active run cleared before idle"),
             ),
           );
 
@@ -975,7 +976,7 @@ describe("ChannelRuntimeLayer integration", () => {
           Effect.gen(function* () {
             yield* Deferred.succeed(promptStarted, undefined);
             yield* Deferred.await(interruptRequested);
-            return yield* Effect.fail(new Error("interrupted"));
+            return yield* interruptedTestError("interrupted");
           }).pipe(Effect.ensuring(Deferred.succeed(promptFinished, undefined).pipe(Effect.ignore))),
         ),
       interruptSessionImpl: () =>
@@ -1217,7 +1218,7 @@ describe("ChannelRuntimeLayer integration", () => {
           ? unsafeEffect(
               Effect.gen(function* () {
                 yield* Ref.set(healthy, false);
-                return yield* Effect.fail(new Error("boom"));
+                return yield* failTest("boom");
               }),
             )
           : completePrompt({
@@ -1414,7 +1415,7 @@ describe("ChannelRuntimeLayer integration", () => {
       promptImpl: () =>
         Deferred.succeed(promptStarted, undefined).pipe(
           Effect.andThen(Deferred.await(interruptRequested)),
-          Effect.andThen(Effect.fail(new Error("interrupted"))),
+          Effect.andThen(Effect.fail(interruptedTestError("interrupted"))),
         ),
       interruptSessionImpl: () =>
         Deferred.succeed(interruptRequested, undefined).pipe(Effect.asVoid),
@@ -1492,13 +1493,15 @@ describe("ChannelRuntimeLayer integration", () => {
           Effect.flatMap((activeRun) =>
             activeRun && activeRun.questionOutcome._tag === "ui-failure"
               ? Effect.void
-              : Effect.fail(new Error("question UI failure not recorded yet")),
+              : failTest("question UI failure not recorded yet"),
           ),
           Effect.eventually,
           Effect.timeoutOrElse({
             duration: "1 second",
             onTimeout: () =>
-              Effect.fail(new Error("Timed out waiting for the current question UI failure state")),
+              Effect.fail(
+                timeoutTestError("Timed out waiting for the current question UI failure state"),
+              ),
           }),
         );
         yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore);
