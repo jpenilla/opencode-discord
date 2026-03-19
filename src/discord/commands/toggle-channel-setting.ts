@@ -1,42 +1,13 @@
 import { Effect } from "effect";
 
-import { AppConfig } from "@/config.ts";
-import { CommandContext } from "@/discord/commands/command-context.ts";
-import type { ChannelSettings } from "@/state/channel-settings.ts";
 import {
-  defaultChannelSettings,
-  resolveChannelSettings,
-  type PersistedChannelSettings,
-} from "@/state/channel-settings.ts";
+  ChannelSettingsRuntime,
+  type ToggleableChannelSetting,
+} from "@/channels/channel-settings-runtime.ts";
 import { GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/channels/command-policy.ts";
-import { SessionRuntime } from "@/sessions/session-runtime.ts";
-import { SessionStore } from "@/state/store.ts";
+import { CommandContext } from "@/discord/commands/command-context.ts";
 
 import { defineGuildCommand } from "./definition.ts";
-
-type ToggleableChannelSetting = keyof Pick<
-  ChannelSettings,
-  "showThinking" | "showCompactionSummaries"
->;
-
-const resolveToggledSettings = (
-  defaults: ChannelSettings,
-  persisted: PersistedChannelSettings | null,
-  setting: ToggleableChannelSetting,
-) => {
-  const current = resolveChannelSettings(defaults, persisted);
-  const next: PersistedChannelSettings = {
-    channelId: persisted?.channelId ?? "",
-    showThinking: persisted?.showThinking,
-    showCompactionSummaries: persisted?.showCompactionSummaries,
-  };
-  next[setting] = !current[setting];
-
-  return {
-    next,
-    resolved: resolveChannelSettings(defaults, next),
-  };
-};
 
 const defineChannelSettingToggleCommand = <
   const TName extends string,
@@ -52,25 +23,14 @@ const defineChannelSettingToggleCommand = <
     description: input.description,
     execute: Effect.gen(function* () {
       const context = yield* CommandContext;
-      const config = yield* AppConfig;
-      const sessionRuntime = yield* SessionRuntime;
-      const sessionStore = yield* SessionStore;
+      const channelSettings = yield* ChannelSettingsRuntime;
 
       if (!context.inGuildTextChannel) {
         yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
         return;
       }
 
-      const persisted = yield* sessionStore.getChannelSettings(context.channelId);
-      const { next, resolved } = resolveToggledSettings(
-        defaultChannelSettings(config),
-        persisted,
-        input.setting,
-      );
-      next.channelId = context.channelId;
-      yield* sessionStore.upsertChannelSettings(next);
-
-      yield* sessionRuntime.updateLoadedChannelSettings(context.channelId, resolved);
+      const resolved = yield* channelSettings.toggle(context.channelId, input.setting);
 
       yield* context.complete(
         `${input.label} are now ${resolved[input.setting] ? "enabled" : "disabled"} in this channel.`,

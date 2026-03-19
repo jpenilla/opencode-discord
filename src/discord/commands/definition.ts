@@ -1,18 +1,12 @@
 import { Effect } from "effect";
 
+import { ChannelSettingsRuntime } from "@/channels/channel-settings-runtime.ts";
 import { CommandContext } from "@/discord/commands/command-context.ts";
-import { AppConfig } from "@/config.ts";
 import { InfoCards } from "@/discord/info-cards.ts";
 import { SessionRuntime } from "@/sessions/session-runtime.ts";
-import { SessionStore } from "@/state/store.ts";
 import { Logger } from "@/util/logging.ts";
 
-export type GuildCommandDependencies =
-  | AppConfig
-  | InfoCards
-  | SessionRuntime
-  | SessionStore
-  | Logger;
+export type GuildCommandDependencies = ChannelSettingsRuntime | InfoCards | SessionRuntime | Logger;
 
 export type GuildCommand = {
   name: string;
