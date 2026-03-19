@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { Deferred, Effect, Exit, Option, Queue, Ref } from "effect";
-import type { Message } from "discord.js";
 
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
 import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
@@ -23,20 +22,23 @@ import {
   makeToolEvent,
   makeUserMessageUpdatedEvent,
 } from "../support/opencode-events.ts";
+import {
+  getRef,
+  makeMessage,
+  makeSessionHandle,
+  makeSilentLogger,
+} from "../support/fixtures.ts";
 import { unsafeStub } from "../support/stub.ts";
-
-const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
 
 const makeSession = async (withActiveRun: boolean, showCompactionSummaries = true) => {
   const progressQueue = await Effect.runPromise(Queue.unbounded<RunProgressEvent>());
   const promptState = await Effect.runPromise(createPromptState());
   const activeRun = withActiveRun
     ? unsafeStub<ActiveRun>({
-        originMessage: unsafeStub<Message>({
+        originMessage: makeMessage({
           id: "discord-message",
           channelId: "channel-1",
           channel: { id: "channel-1" },
-          attachments: new Map(),
         }),
         workdir: "/home/opencode/workspace",
         attachmentMessagesById: new Map(),
@@ -63,13 +65,7 @@ const makeSession = async (withActiveRun: boolean, showCompactionSummaries = tru
 
   const session = unsafeStub<ChannelSession>({
     channelId: "channel-1",
-    opencode: {
-      sessionId: "session-1",
-      client: {} as never,
-      workdir: "/home/opencode/workspace",
-      backend: "bwrap",
-      close: () => Effect.void,
-    },
+    opencode: makeSessionHandle(),
     rootDir: "/tmp/session-root",
     workdir: "/home/opencode/workspace",
     createdAt: Date.now(),
@@ -92,12 +88,6 @@ const noopIdleCompactionWorkflow = {
   emitSummary: () => Effect.void,
   handleCompacted: () => Effect.void,
 };
-
-const logger = {
-  info: () => Effect.void,
-  warn: () => Effect.void,
-  error: () => Effect.void,
-} as const;
 
 const unexpectedPromptResultLoad = () => Effect.fail(new Error("unexpected prompt result load"));
 
@@ -126,7 +116,7 @@ const makeRuntime = (input: {
     handleQuestionEvent: input.handleQuestionEvent ?? (() => Effect.void),
     idleCompactionWorkflow: input.idleCompactionWorkflow ?? noopIdleCompactionWorkflow,
     readPromptResult: input.readPromptResult ?? unexpectedPromptResultLoad,
-    logger,
+    logger: makeSilentLogger(),
     formatError: (error) => String(error),
   });
 

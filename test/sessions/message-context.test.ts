@@ -1,27 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
-import type { Message } from "discord.js";
 
 import { collectAttachmentMessages, resolveReferencedMessage } from "@/sessions/message-context.ts";
-import { unsafeStub } from "../support/stub.ts";
-
-const makeMessage = (input: {
-  id: string;
-  reference?: { messageId: string } | null;
-  fetchReference?: () => Promise<Message>;
-  attachmentCount?: number;
-}) =>
-  unsafeStub<Message>({
-    id: input.id,
-    reference: input.reference,
-    attachments: new Map(
-      Array.from({ length: input.attachmentCount ?? 0 }, (_, index) => [
-        `att-${input.id}-${index}`,
-        { id: `att-${input.id}-${index}` },
-      ]),
-    ),
-    fetchReference: input.fetchReference,
-  });
+import { makeMessage } from "../support/fixtures.ts";
 
 describe("resolveReferencedMessage", () => {
   test("returns null when the message is not a reply", async () => {

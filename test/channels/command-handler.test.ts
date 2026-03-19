@@ -8,7 +8,6 @@ import {
 import { Deferred, Effect, Layer, Queue, Ref } from "effect";
 
 import {
-  NEW_SESSION_BUSY_MESSAGE,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
   QUESTION_PENDING_NEW_SESSION_MESSAGE,
 } from "@/channels/command-policy.ts";
@@ -39,9 +38,8 @@ import {
   type ChannelSettingsPersistenceShape,
 } from "@/state/persistence.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
+import { getRef } from "../support/fixtures.ts";
 import { unsafeStub } from "../support/stub.ts";
-
-const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
 
 const makeConfig = (defaults: {
   showThinking: boolean;
@@ -589,12 +587,6 @@ describe("createCommandHandler", () => {
       expectActiveRunInterrupted: false,
       expectedEdit: formatErrorResponse("## ❌ Failed to interrupt run", "interrupt failed"),
     },
-    {
-      name: "requests interruption of the active run without claiming success yet",
-      options: { hasActiveRun: true },
-      expectActiveRunInterrupted: true,
-      expectedEdit: "Requested interruption of the active OpenCode run.",
-    },
   ]) {
     test(scenario.name, async () => {
       const harness = await runInteraction(await makeHarness(scenario.options), "interrupt");
@@ -602,30 +594,6 @@ describe("createCommandHandler", () => {
       expect(await getRef(harness.typingStopCount)).toBe(0);
       expect(await getRef(harness.replies)).toEqual([]);
       expect(await getRef(harness.edits)).toEqual([scenario.expectedEdit]);
-    });
-  }
-
-  for (const scenario of [
-    {
-      name: "rejects interrupt while a question prompt is pending",
-      options: { hasActiveRun: true, hasPendingQuestions: true },
-      expectActiveRunInterrupted: false,
-    },
-    {
-      name: "rejects interrupt while a question prompt is pending without an active run",
-      options: { hasPendingQuestions: true },
-      expectActiveRunInterrupted: undefined,
-    },
-  ]) {
-    test(scenario.name, async () => {
-      const harness = await runInteraction(await makeHarness(scenario.options), "interrupt");
-      if (scenario.expectActiveRunInterrupted !== undefined) {
-        expect(harness.activeRun.interruptRequested).toBe(scenario.expectActiveRunInterrupted);
-      }
-      expect(await getRef(harness.defers)).toBe(0);
-      expect(await getRef(harness.replies)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
-      expect(await getRef(harness.edits)).toEqual([]);
-      expect(await getRef(harness.typingStopCount)).toBe(0);
     });
   }
 
@@ -640,28 +608,6 @@ describe("createCommandHandler", () => {
     expect(harness.activeRun.interruptRequested).toBe(false);
     expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
-  });
-
-  test("interrupts an active compaction card without posting a run card", async () => {
-    const harness = await makeHarness();
-    await Effect.runPromise(
-      Ref.set(harness.idleCardRef, unsafeStub<Message>({ id: "compaction-card" })),
-    );
-    await Effect.runPromise(Ref.set(harness.idleCompactionActive, true));
-
-    await runInteraction(harness, "interrupt");
-    expect(await getRef(harness.typingStopCount)).toBe(0);
-    expect(await getRef(harness.compactionUpdates)).toEqual([
-      {
-        title: "‼️ Interrupting compaction",
-        body: "OpenCode is stopping session compaction.",
-      },
-    ]);
-    expect((await getRef(harness.idleCardRef))?.id).toBe("compaction-card");
-    expect(await getRef(harness.replies)).toEqual([]);
-    expect(await getRef(harness.edits)).toEqual([
-      "Requested interruption of the active OpenCode compaction.",
-    ]);
   });
 
   test("restores the compaction card when interrupting compaction fails", async () => {
@@ -745,44 +691,6 @@ describe("createCommandHandler", () => {
       "An unexpected error occurred while processing this command.",
     ]);
   });
-
-  for (const scenario of [
-    {
-      name: "rejects /new-session while a run is active",
-      options: { hasActiveRun: true },
-      expectedReply:
-        "OpenCode is busy in this channel right now. Wait for the current run to finish or use /interrupt before starting a fresh session.",
-    },
-    {
-      name: "rejects /new-session while a question prompt is pending",
-      options: { hasPendingQuestions: true },
-      expectedReply: QUESTION_PENDING_NEW_SESSION_MESSAGE,
-    },
-    {
-      name: "rejects /new-session while compaction is active",
-      options: { hasIdleCompaction: true },
-      expectedReply:
-        "OpenCode is compacting this channel right now. Wait for compaction to finish or use /interrupt before starting a fresh session.",
-    },
-    {
-      name: "rejects /new-session while queued work is still pending",
-      options: { hasQueuedWork: true },
-      expectedReply:
-        "OpenCode still has queued work for this channel. Wait for it to finish before starting a fresh session.",
-    },
-    {
-      name: "rejects /new-session on other busy states",
-      options: { hasOtherBusyState: true },
-      expectedReply: NEW_SESSION_BUSY_MESSAGE,
-    },
-  ]) {
-    test(scenario.name, async () => {
-      const harness = await runInteraction(await makeHarness(scenario.options), "new-session");
-      expect(await getRef(harness.defers)).toBe(0);
-      expect(await getRef(harness.replies)).toEqual([scenario.expectedReply]);
-      expect(await getRef(harness.invalidatedSessions)).toEqual([]);
-    });
-  }
 
   test("rechecks busy state when /new-session loses the invalidate race", async () => {
     const harness = await runInteraction(

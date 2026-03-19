@@ -12,9 +12,13 @@ import {
 import { makeQuestionRuntime } from "@/sessions/question/question-runtime.ts";
 import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
+import {
+  getRef,
+  makeMessage,
+  makeSessionHandle,
+  makeSilentLogger,
+} from "../../support/fixtures.ts";
 import { unsafeStub } from "../../support/stub.ts";
-
-const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
 
 const makeRequest = (id = "req-1") =>
   unsafeStub<QuestionRequest>({
@@ -52,7 +56,7 @@ const makeHarness = async (options?: {
   const questionPostStarted = await Effect.runPromise(Deferred.make<void>());
   const allowQuestionPost = await Effect.runPromise(Deferred.make<void>());
 
-  const questionMessage: Message = unsafeStub<Message>({
+  const questionMessage: Message = makeMessage({
     id: "question-message",
     edit: (payload: MessageEditOptions): Promise<Message> =>
       Effect.runPromise(Ref.update(editedPayloads, (current) => [...current, payload])).then(
@@ -61,7 +65,7 @@ const makeHarness = async (options?: {
   });
 
   const makeReplyTargetMessage = (id: string) =>
-    unsafeStub<Message>({
+    makeMessage({
       id,
       channelId: "channel-1",
       author: { id: "owner", tag: "owner#0001" },
@@ -125,13 +129,7 @@ const makeHarness = async (options?: {
 
   const session: ChannelSession = {
     channelId: "channel-1",
-    opencode: {
-      sessionId: "session-1",
-      client: {} as never,
-      workdir: "/home/opencode/workspace",
-      backend: "bwrap",
-      close: () => Effect.void,
-    },
+    opencode: makeSessionHandle(),
     rootDir: "/tmp/root",
     workdir: "/home/opencode/workspace",
     createdAt: Date.now(),
@@ -169,11 +167,7 @@ const makeHarness = async (options?: {
             Ref.update(sentQuestionUiFailures, (current) => [...current, String(error)]),
           ),
         ),
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
+      logger: makeSilentLogger(),
       formatError: (error: unknown) => (error instanceof Error ? error.message : String(error)),
     }),
   );

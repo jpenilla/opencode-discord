@@ -9,14 +9,11 @@ import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import { enqueueRunRequest } from "@/sessions/request-routing.ts";
 import type { RunRequest } from "@/sessions/session.ts";
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
-import type { LoggerShape } from "@/util/logging.ts";
-import { unsafeStub } from "../../support/stub.ts";
-
-const makeMessage = (id: string) =>
-  unsafeStub<Message>({
-    id,
-    attachments: new Map(),
-  });
+import {
+  makeMessage,
+  makeSessionHandle,
+  makeSilentLogger,
+} from "../../support/fixtures.ts";
 
 const makeRequest = (
   id: string,
@@ -27,21 +24,6 @@ const makeRequest = (
   prompt,
   attachmentMessages: attachmentMessageIds.map((messageId) => makeMessage(messageId)),
 });
-
-const makeLogger = (): LoggerShape => ({
-  info: () => Effect.void,
-  warn: () => Effect.void,
-  error: () => Effect.void,
-});
-
-const makeSessionHandle = (): SessionHandle =>
-  ({
-    sessionId: "ses-1",
-    client: {} as never,
-    workdir: "/tmp/workdir",
-    backend: "bwrap",
-    close: () => Effect.void,
-  }) satisfies SessionHandle;
 
 const resolveCurrentPrompt = (
   activeRun: Awaited<ReturnType<typeof makeActiveRunState>>,
@@ -99,7 +81,7 @@ describe("coordinateActiveRunPrompts", () => {
     const result = await Effect.runPromise(
       coordinateActiveRunPrompts({
         channelId: "c-1",
-        session: makeSessionHandle(),
+        session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
         activeRun,
         initialRequests: [makeRequest("m-1", "initial", ["m-1"])],
         awaitIdleCompaction: () => Effect.void,
@@ -111,7 +93,7 @@ describe("coordinateActiveRunPrompts", () => {
               transcript: result.transcript,
             });
           }),
-        logger: makeLogger(),
+        logger: makeSilentLogger(),
       }),
     );
 
@@ -161,13 +143,13 @@ describe("coordinateActiveRunPrompts", () => {
     await Effect.runPromise(
       coordinateActiveRunPrompts({
         channelId: "c-1",
-        session: makeSessionHandle(),
+        session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
         activeRun,
         initialRequests: [makeRequest("m-1", "initial")],
         awaitIdleCompaction: () => Effect.void,
         submitPrompt,
         handlePromptCompleted: () => Effect.void,
-        logger: makeLogger(),
+        logger: makeSilentLogger(),
       }),
     );
 
@@ -201,13 +183,13 @@ describe("coordinateActiveRunPrompts", () => {
     const result = await Effect.runPromise(
       coordinateActiveRunPrompts({
         channelId: "c-1",
-        session: makeSessionHandle(),
+        session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
         activeRun,
         initialRequests: [makeRequest("m-1", "initial", ["m-1"])],
         awaitIdleCompaction: () => Effect.void,
         submitPrompt,
         handlePromptCompleted: () => Effect.void,
-        logger: makeLogger(),
+        logger: makeSilentLogger(),
       }),
     );
 
@@ -245,7 +227,7 @@ describe("coordinateActiveRunPrompts", () => {
       Effect.runPromise(
         coordinateActiveRunPrompts({
           channelId: "c-1",
-          session: makeSessionHandle(),
+          session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
           activeRun,
           initialRequests: [makeRequest("m-1", "initial")],
           awaitIdleCompaction: () => Effect.void,
@@ -254,7 +236,7 @@ describe("coordinateActiveRunPrompts", () => {
             Effect.sync(() => {
               activeRun.interruptRequested = true;
             }),
-          logger: makeLogger(),
+          logger: makeSilentLogger(),
         }),
       ),
     ).rejects.toThrow("interrupted");
@@ -294,13 +276,13 @@ describe("coordinateActiveRunPrompts", () => {
     await Effect.runPromise(
       coordinateActiveRunPrompts({
         channelId: "c-1",
-        session: makeSessionHandle(),
+        session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
         activeRun,
         initialRequests: [makeRequest("m-1", "initial")],
         awaitIdleCompaction: () => Effect.void,
         submitPrompt,
         handlePromptCompleted: () => Effect.void,
-        logger: makeLogger(),
+        logger: makeSilentLogger(),
       }),
     );
 
@@ -361,13 +343,13 @@ describe("coordinateActiveRunPrompts", () => {
     await Effect.runPromise(
       coordinateActiveRunPrompts({
         channelId: "c-1",
-        session: makeSessionHandle(),
+        session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
         activeRun,
         initialRequests: [makeRequest("m-1", "initial")],
         awaitIdleCompaction: () => Effect.void,
         submitPrompt,
         handlePromptCompleted: () => Effect.void,
-        logger: makeLogger(),
+        logger: makeSilentLogger(),
       }),
     );
 
@@ -399,13 +381,13 @@ describe("coordinateActiveRunPrompts", () => {
       Effect.runPromise(
         coordinateActiveRunPrompts({
           channelId: "c-1",
-          session: makeSessionHandle(),
+          session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
           activeRun,
           initialRequests: [makeRequest("m-1", "initial")],
           awaitIdleCompaction: () => Effect.void,
           submitPrompt: () => Effect.fail(new Error("submit failed")),
           handlePromptCompleted: () => Effect.void,
-          logger: makeLogger(),
+          logger: makeSilentLogger(),
         }),
       ),
     ).rejects.toThrow("submit failed");

@@ -7,21 +7,18 @@ import { InfoCards, type InfoCardsShape } from "@/discord/info-cards.ts";
 import { makeIdleCompactionWorkflow } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import { OpencodeService, type OpencodeServiceShape } from "@/opencode/service.ts";
 import type { ChannelSession } from "@/sessions/session.ts";
-import { Logger, type LoggerShape } from "@/util/logging.ts";
+import { Logger } from "@/util/logging.ts";
+import {
+  getRef,
+  makeSessionHandle,
+  makeSilentLogger,
+} from "../../support/fixtures.ts";
 import { unsafeStub } from "../../support/stub.ts";
-
-const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
 
 const makeSession = (): ChannelSession =>
   unsafeStub<ChannelSession>({
     channelId: "channel-1",
-    opencode: {
-      sessionId: "session-1",
-      client: {} as never,
-      workdir: "/home/opencode/workspace",
-      backend: "bwrap",
-      close: () => Effect.void,
-    },
+    opencode: makeSessionHandle(),
     rootDir: "/tmp/session-root",
     workdir: "/home/opencode/workspace",
     createdAt: Date.now(),
@@ -37,12 +34,6 @@ const makeSession = (): ChannelSession =>
     activeRun: null,
   });
 
-const logger: LoggerShape = {
-  info: () => Effect.void,
-  warn: () => Effect.void,
-  error: () => Effect.void,
-};
-
 describe("makeIdleCompactionWorkflow", () => {
   test("clears active state when card post and compaction both fail", async () => {
     const workflow = await Effect.runPromise(
@@ -54,7 +45,7 @@ describe("makeIdleCompactionWorkflow", () => {
               edit: () => Effect.void,
               upsert: () => Effect.fail(new Error("channel send failed")),
             } satisfies InfoCardsShape),
-            Layer.succeed(Logger, logger),
+            Layer.succeed(Logger, makeSilentLogger()),
             Layer.succeed(OpencodeService, {
               createSession: () => Effect.fail(new Error("unexpected")),
               attachSession: () => Effect.fail(new Error("unexpected")),
@@ -100,7 +91,7 @@ describe("makeIdleCompactionWorkflow", () => {
               edit: () => Effect.void,
               upsert: () => Effect.succeed(card),
             } satisfies InfoCardsShape),
-            Layer.succeed(Logger, logger),
+            Layer.succeed(Logger, makeSilentLogger()),
             Layer.succeed(OpencodeService, {
               createSession: () => Effect.fail(new Error("unexpected")),
               attachSession: () => Effect.fail(new Error("unexpected")),
@@ -144,7 +135,7 @@ describe("makeIdleCompactionWorkflow", () => {
                   Effect.as(unsafeStub<Message>({ id: "late-card" })),
                 ),
             } satisfies InfoCardsShape),
-            Layer.succeed(Logger, logger),
+            Layer.succeed(Logger, makeSilentLogger()),
             Layer.succeed(OpencodeService, {
               createSession: () => Effect.fail(new Error("unexpected")),
               attachSession: () => Effect.fail(new Error("unexpected")),
@@ -196,7 +187,7 @@ describe("makeIdleCompactionWorkflow", () => {
               edit: () => Effect.void,
               upsert: () => Effect.fail(new Error("channel send failed")),
             } satisfies InfoCardsShape),
-            Layer.succeed(Logger, logger),
+            Layer.succeed(Logger, makeSilentLogger()),
             Layer.succeed(OpencodeService, {
               createSession: () => Effect.fail(new Error("unexpected")),
               attachSession: () => Effect.fail(new Error("unexpected")),

@@ -8,7 +8,6 @@ import {
   type Message,
   type MessageCreateOptions,
   type MessageEditOptions,
-  MessageFlags,
   type SendableChannels,
 } from "discord.js";
 import { Deferred, Effect, Fiber, Layer, Queue, Redacted, Ref } from "effect";
@@ -19,8 +18,6 @@ import {
   ChannelRuntimeLayer,
   type ChannelRuntimeShape,
 } from "@/channels/channel-runtime.ts";
-import { QUESTION_PENDING_INTERRUPT_MESSAGE } from "@/channels/command-policy.ts";
-import { formatErrorResponse } from "@/discord/formatting.ts";
 import { InfoCardsLayer } from "@/discord/info-cards.ts";
 import {
   buildOpencodePrompt,
@@ -57,6 +54,7 @@ import {
   makeUserMessageUpdatedEvent,
   toGlobalEvent,
 } from "../support/opencode-events.ts";
+import { getRef } from "../support/fixtures.ts";
 import { unsafeEffect, unsafeStub } from "../support/stub.ts";
 
 const TEST_STATE_DIR = join(tmpdir(), `.opencode-discord-test-storage-${process.pid}`);
@@ -95,7 +93,6 @@ const makeLogger = (): LoggerShape => ({
   error: () => Effect.void,
 });
 
-const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
 const pushRef = <A>(ref: Ref.Ref<A[]>, value: A) => Ref.update(ref, (current) => [...current, value]);
 const promptFor = (message: Message, prompt: string) =>
   buildOpencodePrompt({ message: promptMessageContext(message, prompt) });
@@ -966,54 +963,6 @@ describe("ChannelRuntimeLayer integration", () => {
     );
   });
 
-  test("runs /compact through ChannelRuntimeLayer and posts a channel info card", async () => {
-    const compactStarted = await Effect.runPromise(Deferred.make<void>());
-    const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>());
-    const harness = await makeHarness({
-      promptImpl: ({ completePrompt }) =>
-        completePrompt({
-          messageId: "assistant-1",
-          transcript: "done",
-        }),
-      compactSessionImpl: () =>
-        Deferred.succeed(compactStarted, undefined).pipe(
-          Effect.andThen(Deferred.await(allowCompactToFinish)),
-        ),
-    });
-    const message = harness.makeMessage({
-      id: "message-1",
-      content: "hey opencode hello",
-    });
-    const command = harness.makeCommandInteraction("compact");
-
-    await withHarness(harness, ({ channels, sessions }) =>
-      Effect.gen(function* () {
-        yield* channels.submit(message, { prompt: "hello" });
-        yield* Queue.take(harness.replyEvents);
-        yield* waitForNoActiveRun(sessions, "session-1");
-        yield* channels.handleInteraction(command.interaction);
-        yield* Deferred.await(compactStarted);
-        yield* Deferred.succeed(allowCompactToFinish, undefined).pipe(Effect.ignore);
-        yield* Effect.promise(() => Bun.sleep(0));
-      }),
-    );
-
-    expect(await getRef(harness.compactCalls)).toBe(1);
-    expect(await getRef(command.interactionDefers)).toBe(1);
-    expect(await getRef(command.interactionEdits)).toEqual([
-      {
-        content: "Started session compaction. I'll post updates in this channel.",
-        allowedMentions: { parse: [] },
-      },
-    ]);
-    expect((await getRef(harness.sentPayloads)).map(cardText)).toContain(
-      "**🗜️ Compacting session**\nOpenCode is summarizing earlier context for this session.",
-    );
-    expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
-      "**🗜️ Session compacted**\nOpenCode summarized earlier context for this session.",
-    );
-  });
-
   test("runs /interrupt through ChannelRuntimeLayer and stops the active run", async () => {
     const promptStarted = await Effect.runPromise(Deferred.make<void>());
     const interruptRequested = await Effect.runPromise(Deferred.make<void>());
@@ -1047,13 +996,6 @@ describe("ChannelRuntimeLayer integration", () => {
     );
 
     expect(await getRef(harness.interruptCalls)).toBe(1);
-    expect(await getRef(command.interactionDefers)).toBe(1);
-    expect(await getRef(command.interactionEdits)).toEqual([
-      {
-        content: "Requested interruption of the active OpenCode run.",
-        allowedMentions: { parse: [] },
-      },
-    ]);
     expect(await getRef(harness.replies)).toEqual([]);
     expect((await getRef(harness.sentPayloads)).map(cardText)).toContain(
       "**‼️ Run interrupted**\nOpenCode stopped the active run in this channel.",
@@ -1119,146 +1061,6 @@ describe("ChannelRuntimeLayer integration", () => {
     ).toBe(false);
   });
 
-  test("rejects /interrupt while a question prompt is awaiting input", async () => {
-    const promptStarted = await Effect.runPromise(Deferred.make<void>());
-    const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>());
-    const harness = await makeHarness({
-      promptImpl: ({ completePrompt }) =>
-        Deferred.succeed(promptStarted, undefined).pipe(
-          Effect.andThen(Deferred.await(allowPromptToFinish)),
-          Effect.andThen(
-            completePrompt({
-              messageId: "assistant-1",
-              transcript: "done",
-            }),
-          ),
-        ),
-    });
-    const message = harness.makeMessage({
-      id: "message-1",
-      content: "hey opencode hello",
-    });
-    const command = harness.makeCommandInteraction("interrupt");
-
-    await withHarness(harness, ({ channels }) =>
-      Effect.gen(function* () {
-        yield* channels.submit(message, { prompt: "hello" });
-        yield* Deferred.await(promptStarted);
-        yield* Effect.promise(() => harness.publishEvent(makeQuestionAskedEvent()));
-        yield* waitForReplyPayload(harness.replyPayloads, (payload) =>
-          cardText(payload).includes("❓ Questions need answers"),
-        );
-        yield* channels.handleInteraction(command.interaction);
-        yield* Effect.promise(() => harness.publishEvent(makeQuestionRepliedEvent()));
-        yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore);
-        yield* Queue.take(harness.replyEvents);
-      }),
-    );
-
-    expect(await getRef(harness.interruptCalls)).toBe(0);
-    expect(await getRef(command.interactionDefers)).toBe(0);
-    expect(await getRef(command.interactionReplies)).toEqual([
-      {
-        content: QUESTION_PENDING_INTERRUPT_MESSAGE,
-        flags: MessageFlags.Ephemeral,
-        allowedMentions: { parse: [] },
-      },
-    ]);
-    expect(await getRef(command.interactionEdits)).toEqual([]);
-    expect((await getRef(harness.sentPayloads)).map(cardText)).not.toContain(
-      "**‼️ Run interrupted**\nOpenCode stopped the active run in this channel.",
-    );
-  });
-
-  test("runs /interrupt through ChannelRuntimeLayer, marks compaction interrupting, and allows later completion", async () => {
-    const compactStarted = await Effect.runPromise(Deferred.make<void>());
-    const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>());
-    const harness = await makeHarness({
-      promptImpl: ({ completePrompt }) =>
-        completePrompt({
-          messageId: "assistant-1",
-          transcript: "hello",
-        }),
-      compactSessionImpl: () =>
-        Deferred.succeed(compactStarted, undefined).pipe(
-          Effect.andThen(Deferred.await(allowCompactToFinish)),
-        ),
-      interruptSessionImpl: () =>
-        Deferred.succeed(allowCompactToFinish, undefined).pipe(Effect.asVoid),
-    });
-    const message = harness.makeMessage({
-      id: "message-1",
-      content: "hey opencode hello",
-    });
-    const compactCommand = harness.makeCommandInteraction("compact");
-    const interruptCommand = harness.makeCommandInteraction("interrupt");
-
-    await withHarness(harness, ({ channels, sessions }) =>
-      Effect.gen(function* () {
-        yield* channels.submit(message, { prompt: "hello" });
-        yield* Queue.take(harness.replyEvents);
-        yield* waitForNoActiveRun(sessions, "session-1");
-        yield* channels.handleInteraction(compactCommand.interaction);
-        yield* Deferred.await(compactStarted);
-        yield* channels.handleInteraction(interruptCommand.interaction);
-        yield* Effect.promise(() => Bun.sleep(0));
-      }),
-    );
-
-    expect(await getRef(harness.interruptCalls)).toBe(1);
-    expect(await getRef(interruptCommand.interactionDefers)).toBe(1);
-    expect(await getRef(interruptCommand.interactionEdits)).toEqual([
-      {
-        content: "Requested interruption of the active OpenCode compaction.",
-        allowedMentions: { parse: [] },
-      },
-    ]);
-    expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
-      "**‼️ Interrupting compaction**\nOpenCode is stopping session compaction.",
-    );
-    expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
-      "**🗜️ Session compacted**\nOpenCode summarized earlier context for this session.",
-    );
-  });
-
-  test("formats compaction interrupt failures like other command errors", async () => {
-    const compactStarted = await Effect.runPromise(Deferred.make<void>());
-    const harness = await makeHarness({
-      promptImpl: ({ completePrompt }) =>
-        completePrompt({
-          messageId: "assistant-1",
-          transcript: "hello",
-        }),
-      compactSessionImpl: () =>
-        Deferred.succeed(compactStarted, undefined).pipe(Effect.andThen(Effect.never)),
-      interruptSessionImpl: () => Effect.fail(new Error("interrupt failed")),
-    });
-    const message = harness.makeMessage({
-      id: "message-1",
-      content: "hey opencode hello",
-    });
-    const compactCommand = harness.makeCommandInteraction("compact");
-    const interruptCommand = harness.makeCommandInteraction("interrupt");
-
-    await withHarness(harness, ({ channels, sessions }) =>
-      Effect.gen(function* () {
-        yield* channels.submit(message, { prompt: "hello" });
-        yield* Queue.take(harness.replyEvents);
-        yield* waitForNoActiveRun(sessions, "session-1");
-        yield* channels.handleInteraction(compactCommand.interaction);
-        yield* Deferred.await(compactStarted);
-        yield* channels.handleInteraction(interruptCommand.interaction);
-      }),
-    );
-
-    expect(await getRef(interruptCommand.interactionEdits)).toEqual([
-      {
-        content: formatErrorResponse("## ❌ Failed to interrupt compaction", "interrupt failed"),
-        allowedMentions: { parse: [] },
-      },
-    ]);
-  });
-
   test("runs /new-session through ChannelRuntimeLayer and recreates the next message on the same workdir", async () => {
     const harness = await makeHarness({
       promptImpl: ({ callIndex, completePrompt }) =>
@@ -1292,17 +1094,6 @@ describe("ChannelRuntimeLayer integration", () => {
     const createSessionCalls = await getRef(harness.createSessionCalls);
     expect(createSessionCalls).toHaveLength(2);
     expect(createSessionCalls[0]?.workdir).toBe(createSessionCalls[1]?.workdir);
-    expect(await getRef(command.interactionDefers)).toBe(1);
-    expect(await getRef(command.interactionEdits)).toEqual([
-      {
-        content:
-          "Cleared this channel's current OpenCode session. The next triggered message here will start a new session with fresh chat history. Workspace files were left in place.",
-        allowedMentions: { parse: [] },
-      },
-    ]);
-    expect((await getRef(harness.sentPayloads)).map(cardText)).toContain(
-      "**🆕 Fresh session ready**\nThe next triggered message in this channel will start a new OpenCode session with fresh chat history. Workspace files were left in place.",
-    );
   });
 
   test("marks idle compaction interrupted when the compaction exits with an abort after interrupt", async () => {

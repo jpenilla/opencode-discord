@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ChannelType, type Message } from "discord.js";
+import { ChannelType } from "discord.js";
 import { Deferred, Effect, Fiber, Ref } from "effect";
 
 import type { SessionHandle } from "@/opencode/service.ts";
@@ -7,10 +7,12 @@ import { createSessionRegistry, type SessionRegistryState } from "@/sessions/ses
 import type { ActiveRun } from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import type { PersistedChannelSession } from "@/state/persistence.ts";
+import { makeMessage, makeSilentLogger } from "../support/fixtures.ts";
 import { unsafeStub } from "../support/stub.ts";
 
-const makeMessage = (channelId = "channel-1") =>
-  unsafeStub<Message>({
+const makeRegistryMessage = (channelId = "channel-1") =>
+  makeMessage({
+    id: `message-${channelId}`,
     channelId,
     guildId: "guild-1",
     guild: { name: "Guild One" },
@@ -43,11 +45,7 @@ const makeState = (): SessionRegistryState => ({
   activeRunsBySessionId: new Map(),
 });
 
-const logger = {
-  info: () => Effect.void,
-  warn: () => Effect.void,
-  error: () => Effect.void,
-} as const;
+const logger = makeSilentLogger();
 
 const makeHarness = async (options?: {
   createOpencodeSession?: (input: {
@@ -208,7 +206,7 @@ describe("createSessionRegistry", () => {
           });
         }),
     });
-    const message = makeMessage("channel-1");
+    const message = makeRegistryMessage("channel-1");
 
     const [first, second] = await Effect.runPromise(
       Effect.gen(function* () {
@@ -244,7 +242,7 @@ describe("createSessionRegistry", () => {
           return makeHandle(`session-${count}`, workdir, () => {});
         }),
     });
-    const message = makeMessage("channel-retry");
+    const message = makeRegistryMessage("channel-retry");
 
     const exits = await Effect.runPromise(
       Effect.gen(function* () {
@@ -278,7 +276,7 @@ describe("createSessionRegistry", () => {
           Effect.as(true),
         ),
     });
-    const message = makeMessage("channel-busy");
+    const message = makeRegistryMessage("channel-busy");
     const session = await Effect.runPromise(lifecycle.createOrGetSession(message));
     session.activeRun = makeActiveRun();
 
@@ -312,7 +310,7 @@ describe("createSessionRegistry", () => {
       isSessionHealthy: (session) => Effect.succeed(session.sessionId !== "session-1"),
     });
 
-    const message = makeMessage("channel-recover");
+    const message = makeRegistryMessage("channel-recover");
     const session = await Effect.runPromise(lifecycle.createOrGetSession(message));
     const previousSessionId = session.opencode.sessionId;
     await Effect.runPromise(lifecycle.setActiveRun(session, makeActiveRun()));
@@ -352,8 +350,8 @@ describe("createSessionRegistry", () => {
   test("shuts down sessions, closes handles, and keeps persistent session roots", async () => {
     const { lifecycle, closed, removedRoots } = await makeHarness();
 
-    await Effect.runPromise(lifecycle.createOrGetSession(makeMessage("channel-1")));
-    await Effect.runPromise(lifecycle.createOrGetSession(makeMessage("channel-2")));
+    await Effect.runPromise(lifecycle.createOrGetSession(makeRegistryMessage("channel-1")));
+    await Effect.runPromise(lifecycle.createOrGetSession(makeRegistryMessage("channel-2")));
     await Effect.runPromise(lifecycle.shutdownSessions());
 
     expect(await Effect.runPromise(Ref.get(closed))).toEqual(["session-1", "session-2"]);
@@ -362,7 +360,7 @@ describe("createSessionRegistry", () => {
 
   test("invalidates the loaded session without deleting the session root", async () => {
     const { lifecycle, closed, removedRoots, persisted } = await makeHarness();
-    const message = makeMessage("channel-1");
+    const message = makeRegistryMessage("channel-1");
     const session = await Effect.runPromise(lifecycle.createOrGetSession(message));
 
     expect(
@@ -390,7 +388,7 @@ describe("createSessionRegistry", () => {
           });
         }),
     });
-    const message = makeMessage("channel-race");
+    const message = makeRegistryMessage("channel-race");
 
     const [created, invalidated] = await Effect.runPromise(
       Effect.gen(function* () {
@@ -415,7 +413,7 @@ describe("createSessionRegistry", () => {
     const { lifecycle, closed, persisted } = await makeHarness({
       isSessionBusy: () => Effect.succeed(true),
     });
-    const message = makeMessage("channel-1");
+    const message = makeRegistryMessage("channel-1");
     const session = await Effect.runPromise(lifecycle.createOrGetSession(message));
 
     expect(
@@ -448,7 +446,9 @@ describe("createSessionRegistry", () => {
       isSessionBusy: () => Effect.succeed(true),
     });
 
-    const session = await Effect.runPromise(lifecycle.createOrGetSession(makeMessage("channel-1")));
+    const session = await Effect.runPromise(
+      lifecycle.createOrGetSession(makeRegistryMessage("channel-1")),
+    );
     session.lastActivityAt = 0;
 
     await Effect.runPromise(lifecycle.closeExpiredSessions(30 * 60 * 1_000 + 1));

@@ -8,18 +8,7 @@ import {
   takeQueuedRunBatch,
 } from "@/sessions/run/run-batch.ts";
 import type { RunRequest } from "@/sessions/session.ts";
-import { unsafeStub } from "../../support/stub.ts";
-
-const makeMessage = (id: string, attachmentCount = 0) =>
-  unsafeStub<Message>({
-    id,
-    attachments: new Map(
-      Array.from({ length: attachmentCount }, (_, index) => [
-        `att-${id}-${index}`,
-        { id: `att-${id}-${index}` },
-      ]),
-    ),
-  });
+import { makeMessage } from "../../support/fixtures.ts";
 
 const makeRequest = (prompt: string, attachmentMessages: ReadonlyArray<Message>): RunRequest => ({
   message: attachmentMessages[0]!,
@@ -127,8 +116,8 @@ describe("admitRequestBatchToActiveRun", () => {
 
   test("tracks referenced messages even when they have no attachments", () => {
     const current = new Map<string, Message>();
-    const main = makeMessage("m-1", 1);
-    const referenced = makeMessage("m-2", 0);
+    const main = makeMessage({ id: "m-1", attachmentCount: 1 });
+    const referenced = makeMessage({ id: "m-2", attachmentCount: 0 });
 
     admitRequestBatchToActiveRun(current, [makeRequest("prompt", [main, referenced])], "initial");
 

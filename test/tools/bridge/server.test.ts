@@ -173,72 +173,68 @@ const runBridgeRequest = (
   );
 };
 
+const expectPromptResponse = <A, E>(
+  effect: Effect.Effect<A, E>,
+  onTimeout: string,
+) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const fiber = yield* effect.pipe(Effect.forkChild);
+      return yield* Fiber.join(fiber).pipe(
+        Effect.timeoutOrElse({
+          duration: "1 second",
+          onTimeout: () => Effect.fail(new Error(onTimeout)),
+        }),
+      );
+    }),
+  );
+
 describe("handleToolBridgeRequest", () => {
-  test("returns unauthorized when the bridge token is invalid", async () => {
-    const response = await runBridgeRequest({
-      request: makeUploadRequest({
-        bridgeToken: "wrong-token",
-        uploadMetadata,
-      }),
-    });
-
-    expect(response).toEqual({
-      status: 401,
-      body: {
-        error: "unauthorized",
+  for (const scenario of [
+    {
+      name: "returns unauthorized when the bridge token is invalid",
+      input: {
+        request: makeUploadRequest({
+          bridgeToken: "wrong-token",
+          uploadMetadata,
+        }),
       },
-    });
-  });
-
-  test("returns not found for unknown routes", async () => {
-    const response = await runBridgeRequest({
-      pathname: "/tool/unknown",
-    });
-
-    expect(response).toEqual({
-      status: 404,
-      body: {
-        error: "not found",
+      expected: { status: 401, body: { error: "unauthorized" } },
+    },
+    {
+      name: "returns not found for unknown routes",
+      input: { pathname: "/tool/unknown" },
+      expected: { status: 404, body: { error: "not found" } },
+    },
+    {
+      name: "returns conflict when the session has no active run",
+      input: {},
+      expected: { status: 409, body: { error: "no active run for session" } },
+    },
+    {
+      name: "returns direct request validation failures without bridge classification",
+      input: {
+        request: makeUploadRequest({
+          bridgeToken,
+        }),
       },
+      expected: { status: 400, body: { error: "missing upload metadata" } },
+    },
+  ]) {
+    test(scenario.name, async () => {
+      const loggedErrors: Array<Record<string, unknown>> = [];
+      const response = await runBridgeRequest({
+        ...scenario.input,
+        loggedErrors,
+      });
+      expect(response).toEqual(scenario.expected);
+      expect(loggedErrors).toHaveLength(0);
     });
-  });
+  }
 
-  test("returns conflict when the session has no active run", async () => {
-    const response = await runBridgeRequest();
-
-    expect(response).toEqual({
-      status: 409,
-      body: {
-        error: "no active run for session",
-      },
-    });
-  });
-
-  test("returns direct request validation failures without bridge classification", async () => {
-    const loggedErrors: Array<Record<string, unknown>> = [];
-
-    const response = await runBridgeRequest({
-      request: makeUploadRequest({
-        bridgeToken,
-      }),
-      loggedErrors,
-    });
-
-    expect(response).toEqual({
-      status: 400,
-      body: {
-        error: "missing upload metadata",
-      },
-    });
-    expect(loggedErrors).toHaveLength(0);
-  });
-
-  test("formats Discord API upload failures through the server error path", async () => {
-    const discordApiError = makeDiscordApiError();
-    let sendCalls = 0;
-    const loggedErrors: Array<Record<string, unknown>> = [];
-
-    const response = await runBridgeRequest({
+  for (const scenario of [
+    {
+      name: "formats Discord API upload failures through the server error path",
       request: makeUploadRequest({
         bridgeToken,
         uploadMetadata: {
@@ -247,64 +243,68 @@ describe("handleToolBridgeRequest", () => {
         },
         chunks: [Buffer.from("payload")],
       }),
-      activeRun: makeActiveRun(async (_payload: MessageCreateOptions) => {
-        sendCalls += 1;
-        throw discordApiError;
-      }),
-      loggedErrors,
-    });
-
-    expect(sendCalls).toBe(1);
-    expect(response).toEqual(discordUploadFailure);
-    expect(loggedErrors).toHaveLength(1);
-    expect(loggedErrors[0]).toMatchObject({
-      message: "tool bridge request failed",
-      context: {
-        pathname: "/tool/send-file",
-        operation: "file upload",
-        kind: "discord-api",
-        error:
-          "Discord rejected file upload (status 400, code 50035): Invalid Form Body\nfiles[0]: This file cannot be sent",
-      },
-    });
-    expect(loggedErrors[0]?.context).toEqual(
-      expect.objectContaining({
-        cause: expect.stringContaining("DiscordAPIError[50035]"),
-      }),
-    );
-  });
-
-  test("classifies local upload failures as bridge-internal with the resolved route operation", async () => {
-    const loggedErrors: Array<Record<string, unknown>> = [];
-
-    const response = await runBridgeRequest({
+      send: async (_payload: MessageCreateOptions) => Promise.reject(makeDiscordApiError()),
+      expectedResponse: discordUploadFailure,
+      expectedKind: "discord-api",
+      expectedError:
+        "Discord rejected file upload (status 400, code 50035): Invalid Form Body\nfiles[0]: This file cannot be sent",
+      expectedCause: "DiscordAPIError[50035]",
+    },
+    {
+      name: "classifies local upload failures as bridge-internal with the resolved route operation",
       request: makeUploadRequest({
         bridgeToken,
         uploadMetadata,
         chunks: [Buffer.from("payload")],
       }),
-      activeRun: makeActiveRun(() => Promise.reject(new Error("socket closed before response"))),
-      loggedErrors,
-    });
+      send: async (_payload: MessageCreateOptions) =>
+        Promise.reject(new Error("socket closed before response")),
+      expectedResponse: {
+        status: 500,
+        body: {
+          error:
+            "Discord bridge failed while performing file upload: socket closed before response",
+          kind: "bridge-internal",
+        },
+      },
+      expectedKind: "bridge-internal",
+      expectedError:
+        "Discord bridge failed while performing file upload: socket closed before response",
+    },
+  ]) {
+    test(scenario.name, async () => {
+      let sendCalls = 0;
+      const loggedErrors: Array<Record<string, unknown>> = [];
+      const response = await runBridgeRequest({
+        request: scenario.request,
+        activeRun: makeActiveRun(async (payload) => {
+          sendCalls += 1;
+          return scenario.send(payload);
+        }),
+        loggedErrors,
+      });
 
-    expect(response).toEqual({
-      status: 500,
-      body: {
-        error: "Discord bridge failed while performing file upload: socket closed before response",
-        kind: "bridge-internal",
-      },
+      expect(sendCalls).toBe(1);
+      expect(response).toEqual(scenario.expectedResponse);
+      expect(loggedErrors).toHaveLength(1);
+      expect(loggedErrors[0]).toMatchObject({
+        message: "tool bridge request failed",
+        context: {
+          pathname: "/tool/send-file",
+          operation: "file upload",
+          kind: scenario.expectedKind,
+          error: scenario.expectedError,
+        },
+      });
+      if (scenario.expectedCause) {
+        expect(loggedErrors[0]?.context).toEqual(
+          expect.objectContaining({
+            cause: expect.stringContaining(scenario.expectedCause),
+          }),
+        );
+      }
     });
-    expect(loggedErrors).toHaveLength(1);
-    expect(loggedErrors[0]).toMatchObject({
-      message: "tool bridge request failed",
-      context: {
-        pathname: "/tool/send-file",
-        operation: "file upload",
-        kind: "bridge-internal",
-        error: "Discord bridge failed while performing file upload: socket closed before response",
-      },
-    });
-  });
+  }
 
   test("returns the upload failure before the client finishes sending the HTTP request body", async () => {
     const request = new IncomingMessage(new Socket());
@@ -317,7 +317,7 @@ describe("handleToolBridgeRequest", () => {
       ),
     };
 
-    const response = await Effect.runPromise(
+    const response = await expectPromptResponse(
       Effect.gen(function* () {
         const fiber = yield* handleToolBridgeRequest({
           request,
@@ -328,17 +328,9 @@ describe("handleToolBridgeRequest", () => {
         }).pipe(Effect.forkChild);
 
         request.push(Buffer.from("chunk-1"));
-
-        return yield* Fiber.join(fiber).pipe(
-          Effect.timeoutOrElse({
-            duration: "1 second",
-            onTimeout: () =>
-              Effect.fail(
-                new Error("server did not respond before the client finished the request body"),
-              ),
-          }),
-        );
+        return yield* Fiber.join(fiber);
       }),
+      "server did not respond before the client finished the request body",
     );
 
     expect(response).toEqual(discordUploadFailure);
@@ -349,7 +341,7 @@ describe("handleToolBridgeRequest", () => {
     const discordApiError = makeDiscordApiError();
     let nextCalls = 0;
 
-    const response = await Effect.runPromise(
+    const response = await expectPromptResponse(
       Effect.gen(function* () {
         const secondChunkRequested = yield* Deferred.make<void>();
         const fiber = yield* handleToolBridgeRequest({
@@ -382,17 +374,13 @@ describe("handleToolBridgeRequest", () => {
           logger: makeLogger([]),
         }).pipe(Effect.forkChild);
 
-        const result = yield* Fiber.join(fiber).pipe(
-          Effect.timeoutOrElse({
-            duration: "1 second",
-            onTimeout: () => Effect.fail(new Error("upload failure did not return promptly")),
-          }),
-        );
+        const result = yield* Fiber.join(fiber);
 
         expect(nextCalls).toBe(1);
         expect(Option.isNone(yield* Deferred.poll(secondChunkRequested))).toBe(true);
         return result;
       }),
+      "upload failure did not return promptly",
     );
 
     expect(response).toEqual(discordUploadFailure);
@@ -401,9 +389,8 @@ describe("handleToolBridgeRequest", () => {
   test("returns a bridge failure when the request stream aborts before Discord finishes consuming the upload", async () => {
     let nextCalls = 0;
 
-    const response = await Effect.runPromise(
-      Effect.gen(function* () {
-        const fiber = yield* handleToolBridgeRequest({
+    const response = await expectPromptResponse(
+      handleToolBridgeRequest({
           request: makeUploadRequest({
             bridgeToken,
             uploadMetadata,
@@ -440,16 +427,8 @@ describe("handleToolBridgeRequest", () => {
             }),
           ),
           logger: makeLogger([]),
-        }).pipe(Effect.forkChild);
-
-        return yield* Fiber.join(fiber).pipe(
-          Effect.timeoutOrElse({
-            duration: "1 second",
-            onTimeout: () =>
-              Effect.fail(new Error("request stream failure did not return promptly")),
-          }),
-        );
       }),
+      "request stream failure did not return promptly",
     );
 
     expect(nextCalls).toBe(2);
@@ -463,9 +442,8 @@ describe("handleToolBridgeRequest", () => {
   });
 
   test("returns a bridge failure when Discord closes a backpressured attachment stream", async () => {
-    const response = await Effect.runPromise(
-      Effect.gen(function* () {
-        const fiber = yield* handleToolBridgeRequest({
+    const response = await expectPromptResponse(
+      handleToolBridgeRequest({
           request: makeUploadRequest({
             bridgeToken,
             uploadMetadata,
@@ -511,18 +489,8 @@ describe("handleToolBridgeRequest", () => {
             }),
           ),
           logger: makeLogger([]),
-        }).pipe(Effect.forkChild);
-
-        return yield* Fiber.join(fiber).pipe(
-          Effect.timeoutOrElse({
-            duration: "1 second",
-            onTimeout: () =>
-              Effect.fail(
-                new Error("destroyed backpressured attachment stream did not return promptly"),
-              ),
-          }),
-        );
       }),
+      "destroyed backpressured attachment stream did not return promptly",
     );
 
     expect(response).toEqual({
