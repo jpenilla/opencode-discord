@@ -2,10 +2,10 @@ import type { Message } from "discord.js";
 import { Deferred, Effect, Fiber, Queue, Ref } from "effect";
 
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
-import type { PendingPrompt } from "@/sessions/prompt-state.ts";
-import type { AdmittedPromptContext } from "@/sessions/prompt-context.ts";
-import type { NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts";
-import { decideRunCompletion } from "@/sessions/run-completion.ts";
+import type { PendingPrompt } from "@/sessions/run/prompt-state.ts";
+import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
+import type { NonEmptyRunRequestBatch } from "@/sessions/run/run-batch.ts";
+import { decideRunCompletion } from "@/sessions/run/run-completion.ts";
 import {
   currentPromptReplyTargetMessage,
   noQuestionOutcome,

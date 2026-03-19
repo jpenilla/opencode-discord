@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { decideRunCompletion } from "@/sessions/run-completion.ts";
+import { decideRunCompletion } from "@/sessions/run/run-completion.ts";
 
 describe("decideRunCompletion", () => {
   test("sends the final response when transcript content is present", () => {

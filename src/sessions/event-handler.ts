@@ -3,10 +3,10 @@ import { Effect } from "effect";
 
 import { getEventSessionId } from "@/opencode/events.ts";
 import type { OpencodeServiceShape } from "@/opencode/service.ts";
-import { routeCompactionEvent } from "@/sessions/compaction-event-router.ts";
-import type { IdleCompactionWorkflowShape } from "@/sessions/idle-compaction-workflow.ts";
-import { routeQuestionEvent } from "@/sessions/question-event-router.ts";
-import { routeRunEvent } from "@/sessions/run-event-router.ts";
+import { routeCompactionEvent } from "@/sessions/compaction/compaction-event-router.ts";
+import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
+import { routeQuestionEvent } from "@/sessions/question/question-event-router.ts";
+import { routeRunEvent } from "@/sessions/run/run-event-router.ts";
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 

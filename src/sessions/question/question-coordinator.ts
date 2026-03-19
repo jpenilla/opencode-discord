@@ -28,7 +28,7 @@ import {
   setQuestionBatchStatus,
   terminateQuestionBatch,
   type QuestionWorkflowBatch,
-} from "@/sessions/question-workflow-state.ts";
+} from "@/sessions/question/question-workflow-state.ts";
 import type { SessionContext } from "@/sessions/session-runtime.ts";
 import {
   currentPromptReplyTargetMessage,

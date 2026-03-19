@@ -7,7 +7,7 @@ import {
   isCompactionSummaryAssistant,
   isObservedAssistantMessage,
 } from "@/opencode/events.ts";
-import type { IdleCompactionWorkflowShape } from "@/sessions/idle-compaction-workflow.ts";
+import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import type { ChannelSession } from "@/sessions/session.ts";
 
 type CompactionEventRouterDeps = {

@@ -6,8 +6,8 @@ import { Deferred, Effect, Ref } from "effect";
 import {
   createQuestionWorkflow,
   type QuestionWorkflowSignal,
-} from "@/sessions/question-coordinator.ts";
-import { createPromptState } from "@/sessions/prompt-state.ts";
+} from "@/sessions/question/question-coordinator.ts";
+import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
 import { unsafeStub } from "../support/stub.ts";
 

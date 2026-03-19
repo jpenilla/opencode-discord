@@ -3,8 +3,8 @@ import { Effect, Ref } from "effect";
 import type { Message, MessageCreateOptions, MessageEditOptions } from "discord.js";
 import type { QuestionRequest } from "@opencode-ai/sdk/v2";
 
-import { makeQuestionRuntime } from "@/sessions/question-runtime.ts";
-import { createPromptState } from "@/sessions/prompt-state.ts";
+import { makeQuestionRuntime } from "@/sessions/question/question-runtime.ts";
+import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
 import { unsafeStub } from "../support/stub.ts";
 

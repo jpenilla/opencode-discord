@@ -17,18 +17,18 @@ import {
   type IdleCompactionWorkflowShape,
   type IdleCompactionWorkflowStartResult,
   makeIdleCompactionWorkflow,
-} from "@/sessions/idle-compaction-workflow.ts";
+} from "@/sessions/compaction/idle-compaction-workflow.ts";
 import { createEventHandler } from "@/sessions/event-handler.ts";
-import { coordinateActiveRunPrompts } from "@/sessions/prompt-coordinator.ts";
-import { runProgressWorker } from "@/sessions/progress.ts";
+import { coordinateActiveRunPrompts } from "@/sessions/run/prompt-coordinator.ts";
+import { runProgressWorker } from "@/sessions/run/progress.ts";
 import {
   type QuestionWorkflowEvent,
   type QuestionWorkflowSignal,
-} from "@/sessions/question-coordinator.ts";
-import { makeQuestionRuntime, type QuestionRuntime } from "@/sessions/question-runtime.ts";
+} from "@/sessions/question/question-coordinator.ts";
+import { makeQuestionRuntime, type QuestionRuntime } from "@/sessions/question/question-runtime.ts";
 import { enqueueRunRequest, type RunRequestDestination } from "@/sessions/request-routing.ts";
-import { executeRunBatch } from "@/sessions/run-executor.ts";
-import { takeQueuedRunBatch } from "@/sessions/run-batch.ts";
+import { executeRunBatch } from "@/sessions/run/run-executor.ts";
+import { takeQueuedRunBatch } from "@/sessions/run/run-batch.ts";
 import {
   buildSessionCreateSpec,
   type ActiveRun,

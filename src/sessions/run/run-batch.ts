@@ -2,7 +2,7 @@ import type { Message } from "discord.js";
 import { Effect, Queue } from "effect";
 
 import { buildBatchedOpencodePrompt, buildQueuedFollowUpPrompt } from "@/discord/messages.ts";
-import type { AdmittedPromptContext, ActiveRunBatchKind } from "@/sessions/prompt-context.ts";
+import type { AdmittedPromptContext, ActiveRunBatchKind } from "@/sessions/run/prompt-context.ts";
 import type { RunRequest } from "@/sessions/session.ts";
 
 export type NonEmptyRunRequestBatch = readonly [RunRequest, ...RunRequest[]];

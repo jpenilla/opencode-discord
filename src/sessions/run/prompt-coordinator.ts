@@ -1,12 +1,12 @@
 import { Deferred, Effect, Queue, Ref } from "effect";
 
 import type { PromptResult, SessionHandle, OpencodeServiceShape } from "@/opencode/service.ts";
-import { beginPendingPrompt, failPendingPrompt } from "@/sessions/prompt-state.ts";
-import type { AdmittedPromptContext } from "@/sessions/prompt-context.ts";
+import { beginPendingPrompt, failPendingPrompt } from "@/sessions/run/prompt-state.ts";
+import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
 import {
   admitRequestBatchToActiveRun,
   type NonEmptyRunRequestBatch,
-} from "@/sessions/run-batch.ts";
+} from "@/sessions/run/run-batch.ts";
 import { resetActivePromptTracking, type ActiveRun } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
