@@ -1,4 +1,4 @@
-import { Effect, Schema, SchemaGetter } from "effect";
+import { Effect, Schema } from "effect";
 
 import { normalizeReactionEmoji } from "@/discord/assets.ts";
 import { ToolBridgeResponseError } from "@/tools/bridge/errors.ts";
@@ -32,6 +32,17 @@ export type AttachmentSummary = {
   url: string;
 };
 
+export type AttachmentListMessage = {
+  description: string;
+  list: Array<{
+    attachmentId: string;
+    name: string;
+    size: number;
+    type: string;
+    url: string;
+  }>;
+};
+
 export const formatAttachmentList = (attachments: AttachmentSummary[]) => {
   return attachments.map((attachment) => {
     return {
@@ -43,13 +54,6 @@ export const formatAttachmentList = (attachments: AttachmentSummary[]) => {
     };
   });
 };
-
-const prettyJsonStringSchema = Schema.String.pipe(
-  Schema.decodeTo(Schema.Json, {
-    decode: SchemaGetter.parseJson(),
-    encode: SchemaGetter.stringifyJson({ space: 2 }),
-  }),
-);
 
 export const handleReact = (context: ToolBridgeHandlerContext<ReactPayload>) => {
   return Effect.gen(function* () {
@@ -96,7 +100,7 @@ export const handleListAttachments = (
       });
     }
 
-    return yield* Schema.encodeUnknownEffect(prettyJsonStringSchema)({
+    return {
       description: `Attachments on Discord message ${messageId}`,
       list: formatAttachmentList(
         attachments.map((attachment) => ({
@@ -107,6 +111,6 @@ export const handleListAttachments = (
           url: attachment.url,
         })),
       ),
-    });
+    } satisfies AttachmentListMessage;
   });
 };

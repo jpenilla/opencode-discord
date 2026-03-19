@@ -85,6 +85,14 @@ const parseBridgeResponse = <T>(response: { statusCode: number; body: string }) 
   return data;
 };
 
+export const formatBridgeMessage = (message: unknown) => {
+  if (message === undefined) {
+    return "ok";
+  }
+
+  return typeof message === "string" ? message : JSON.stringify(message, null, 2);
+};
+
 export const raceBridgeUploadWithResponse = async <A>(input: {
   upload: Promise<void>;
   response: Promise<A>;
@@ -158,8 +166,8 @@ const bridgeRequest = async <T>(path: string, body: Record<string, unknown>): Pr
 };
 
 export const sendBridgeRequest = async (path: string, body: Record<string, unknown>) => {
-  const data = await bridgeRequest<{ message?: string }>(path, body);
-  return data.message ?? "ok";
+  const data = await bridgeRequest<{ message?: unknown }>(path, body);
+  return formatBridgeMessage(data.message);
 };
 
 export const sendBridgeUpload = async (path: string, upload: BridgeUpload) => {
@@ -178,7 +186,7 @@ export const sendBridgeUpload = async (path: string, upload: BridgeUpload) => {
   const data = await raceBridgeUploadWithResponse({
     upload: pipeline(file, req),
     response: waitForBridgeResponse(req).then((response) =>
-      parseBridgeResponse<{ message?: string }>(response),
+      parseBridgeResponse<{ message?: unknown }>(response),
     ),
     abortUpload: (error) => stopBridgeUpload(req, file, error),
     abortResponse: (error) => {
@@ -187,5 +195,5 @@ export const sendBridgeUpload = async (path: string, upload: BridgeUpload) => {
       }
     },
   });
-  return data.message ?? "ok";
+  return formatBridgeMessage(data.message);
 };
