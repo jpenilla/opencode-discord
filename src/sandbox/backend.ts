@@ -429,7 +429,7 @@ const stageHostOpencodeState = async (homeDir: string) => {
 const baseServerEnvironment = (
   input: LaunchSandboxedServerInput,
   homeDir: string,
-  xdg: ReturnType<typeof workerXdgHomes>,
+  xdg: ReturnType<typeof xdgHomes>,
   bridgeSocketPath: string,
 ) => ({
   ...buildWorkerEnvironment(input.config),

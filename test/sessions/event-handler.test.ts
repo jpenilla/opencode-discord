@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { Deferred, Effect, Option, Queue, Ref } from "effect";
+import { Deferred, Effect, Exit, Option, Queue, Ref } from "effect";
 import type { Message } from "discord.js";
 
-import type { SessionHandle } from "@/opencode/service.ts";
+import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
+import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import { createEventHandler } from "@/sessions/event-handler.ts";
 import { beginPendingPrompt, createPromptState } from "@/sessions/run/prompt-state.ts";
 import {
@@ -92,25 +93,51 @@ const noopIdleCompactionWorkflow = {
   handleCompacted: () => Effect.void,
 };
 
+const logger = {
+  info: () => Effect.void,
+  warn: () => Effect.void,
+  error: () => Effect.void,
+} as const;
+
+const unexpectedPromptResultLoad = () => Effect.fail(new Error("unexpected prompt result load"));
+
+const makeRuntime = (input: {
+  session?: ChannelSession | null;
+  activeRun?: ActiveRun | null;
+  getSessionContext?: (
+    sessionId: string,
+  ) => Effect.Effect<{ session: ChannelSession; activeRun: ActiveRun | null } | null>;
+  handleQuestionEvent?: (event: unknown) => Effect.Effect<void>;
+  idleCompactionWorkflow?: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">;
+  readPromptResult?: (
+    session: SessionHandle,
+    messageId: string,
+  ) => Effect.Effect<PromptResult, unknown>;
+}) =>
+  createEventHandler({
+    getSessionContext:
+      input.getSessionContext ??
+      ((sessionId) =>
+        Effect.succeed(
+          input.session && sessionId === input.session.opencode.sessionId
+            ? { session: input.session, activeRun: input.activeRun ?? null }
+            : null,
+        )),
+    handleQuestionEvent: input.handleQuestionEvent ?? (() => Effect.void),
+    idleCompactionWorkflow: input.idleCompactionWorkflow ?? noopIdleCompactionWorkflow,
+    readPromptResult: input.readPromptResult ?? unexpectedPromptResultLoad,
+    logger,
+    formatError: (error) => String(error),
+  });
+
 describe("createEventHandler", () => {
   test("routes question asked events to the question coordinator", async () => {
     const { session } = await makeSession(false);
     const questionEvents = await Effect.runPromise(Ref.make<unknown[]>([]));
 
-    const runtime = createEventHandler({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(
-          sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
-        ),
+    const runtime = makeRuntime({
+      session,
       handleQuestionEvent: (event) => Ref.update(questionEvents, (current) => [...current, event]),
-      idleCompactionWorkflow: noopIdleCompactionWorkflow,
-      readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
     });
 
     await Effect.runPromise(runtime.handleEvent(makeQuestionAskedEvent()));
@@ -128,20 +155,9 @@ describe("createEventHandler", () => {
     const { session } = await makeSession(false);
     const questionEvents = await Effect.runPromise(Ref.make<unknown[]>([]));
 
-    const runtime = createEventHandler({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(
-          sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
-        ),
+    const runtime = makeRuntime({
+      session,
       handleQuestionEvent: (event) => Ref.update(questionEvents, (current) => [...current, event]),
-      idleCompactionWorkflow: noopIdleCompactionWorkflow,
-      readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
     });
 
     await Effect.runPromise(runtime.handleEvent(makeQuestionRepliedEvent()));
@@ -165,19 +181,7 @@ describe("createEventHandler", () => {
   test("enqueues progress events for active runs", async () => {
     const { session, activeRun, progressQueue } = await makeSession(true);
 
-    const runtime = createEventHandler({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
-      handleQuestionEvent: () => Effect.void,
-      idleCompactionWorkflow: noopIdleCompactionWorkflow,
-      readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
-    });
+    const runtime = makeRuntime({ session, activeRun });
 
     await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent()));
 
@@ -193,24 +197,12 @@ describe("createEventHandler", () => {
     const { session } = await makeSession(false);
     const idleUpdates = await Effect.runPromise(Ref.make<string[]>([]));
 
-    const runtime = createEventHandler({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(
-          sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
-        ),
-      handleQuestionEvent: () => Effect.void,
+    const runtime = makeRuntime({
+      session,
       idleCompactionWorkflow: {
         ...noopIdleCompactionWorkflow,
-        handleCompacted: (sessionId) =>
-          Ref.update(idleUpdates, (current) => [...current, sessionId]),
+        handleCompacted: (sessionId) => Ref.update(idleUpdates, (current) => [...current, sessionId]),
       },
-      readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
     });
 
     await Effect.runPromise(runtime.handleEvent(makeSessionCompactedEvent()));
@@ -222,20 +214,13 @@ describe("createEventHandler", () => {
     const questionEvents = await Effect.runPromise(Ref.make(0));
     const idleUpdates = await Effect.runPromise(Ref.make(0));
 
-    const runtime = createEventHandler({
+    const runtime = makeRuntime({
       getSessionContext: () => Effect.succeed(null),
       handleQuestionEvent: () => Ref.update(questionEvents, (count) => count + 1),
       idleCompactionWorkflow: {
         ...noopIdleCompactionWorkflow,
         handleCompacted: () => Ref.update(idleUpdates, (count) => count + 1),
       },
-      readPromptResult: () => Effect.fail(new Error("unexpected prompt result load")),
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
     });
 
     await Effect.runPromise(runtime.handleEvent(makeQuestionAskedEvent("missing-session")));
@@ -260,12 +245,8 @@ describe("createEventHandler", () => {
     const sendCompactionSummary = (_session: ChannelSession, text: string) =>
       Ref.update(sentSummaries, (current) => [...current, text]).pipe(Effect.asVoid);
 
-    const runtime = createEventHandler({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(
-          sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
-        ),
-      handleQuestionEvent: () => Effect.void,
+    const runtime = makeRuntime({
+      session,
       idleCompactionWorkflow: {
         ...noopIdleCompactionWorkflow,
         emitSummary: ({ session, messageId }) =>
@@ -286,12 +267,6 @@ describe("createEventHandler", () => {
           ),
       },
       readPromptResult,
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
     });
 
     const summaryEvent = makeAssistantMessageUpdatedEvent({
@@ -324,12 +299,8 @@ describe("createEventHandler", () => {
     const sendCompactionSummary = (_session: ChannelSession, text: string) =>
       Ref.update(sentSummaries, (current) => [...current, text]).pipe(Effect.asVoid);
 
-    const runtime = createEventHandler({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(
-          sessionId === session.opencode.sessionId ? { session, activeRun: null } : null,
-        ),
-      handleQuestionEvent: () => Effect.void,
+    const runtime = makeRuntime({
+      session,
       idleCompactionWorkflow: {
         ...noopIdleCompactionWorkflow,
         emitSummary: ({ session, messageId }) =>
@@ -350,12 +321,6 @@ describe("createEventHandler", () => {
           ),
       },
       readPromptResult,
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
     });
 
     await Effect.runPromise(
@@ -398,10 +363,9 @@ describe("createEventHandler", () => {
     const sendCompactionSummary = (_session: ChannelSession, text: string) =>
       Ref.update(sentSummaries, (current) => [...current, text]).pipe(Effect.asVoid);
 
-    const runtime = createEventHandler({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
-      handleQuestionEvent: () => Effect.void,
+    const runtime = makeRuntime({
+      session,
+      activeRun,
       idleCompactionWorkflow: {
         ...noopIdleCompactionWorkflow,
         emitSummary: ({ session, messageId }) =>
@@ -422,12 +386,6 @@ describe("createEventHandler", () => {
           ),
       },
       readPromptResult,
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
     });
 
     await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
@@ -475,22 +433,14 @@ describe("createEventHandler", () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
 
-    const runtime = createEventHandler({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
-      handleQuestionEvent: () => Effect.void,
-      idleCompactionWorkflow: noopIdleCompactionWorkflow,
+    const runtime = makeRuntime({
+      session,
+      activeRun,
       readPromptResult: (_session, messageId) =>
         Effect.succeed({
           messageId,
           transcript: "final reply",
         }),
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
     });
 
     await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
@@ -525,22 +475,14 @@ describe("createEventHandler", () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
 
-    const runtime = createEventHandler({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
-      handleQuestionEvent: () => Effect.void,
-      idleCompactionWorkflow: noopIdleCompactionWorkflow,
+    const runtime = makeRuntime({
+      session,
+      activeRun,
       readPromptResult: (_session, messageId) =>
         Effect.succeed({
           messageId,
           transcript: "final reply",
         }),
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
     });
 
     await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
@@ -571,22 +513,14 @@ describe("createEventHandler", () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
 
-    const runtime = createEventHandler({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
-      handleQuestionEvent: () => Effect.void,
-      idleCompactionWorkflow: noopIdleCompactionWorkflow,
+    const runtime = makeRuntime({
+      session,
+      activeRun,
       readPromptResult: (_session, messageId) =>
         Effect.succeed({
           messageId,
           transcript: "final reply",
         }),
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
     });
 
     await Effect.runPromise(
@@ -621,22 +555,14 @@ describe("createEventHandler", () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
 
-    const runtime = createEventHandler({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
-      handleQuestionEvent: () => Effect.void,
-      idleCompactionWorkflow: noopIdleCompactionWorkflow,
+    const runtime = makeRuntime({
+      session,
+      activeRun,
       readPromptResult: (_session, messageId) =>
         Effect.succeed({
           messageId,
           transcript: "final reply",
         }),
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
     });
 
     await Effect.runPromise(
@@ -684,21 +610,13 @@ describe("createEventHandler", () => {
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
     const readPromptCalls = await Effect.runPromise(Ref.make(0));
 
-    const runtime = createEventHandler({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
-      handleQuestionEvent: () => Effect.void,
-      idleCompactionWorkflow: noopIdleCompactionWorkflow,
+    const runtime = makeRuntime({
+      session,
+      activeRun,
       readPromptResult: () =>
         Ref.update(readPromptCalls, (count) => count + 1).pipe(
           Effect.flatMap(() => Effect.fail(new Error("unexpected prompt result load"))),
         ),
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
     });
 
     await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
@@ -719,7 +637,7 @@ describe("createEventHandler", () => {
     );
 
     const exit = await Effect.runPromise(Effect.exit(Deferred.await(completion)));
-    expect(exit._tag).toBe("Failure");
+    expect(Exit.isFailure(exit)).toBe(true);
     expect(await getRef(readPromptCalls)).toBe(0);
   });
 
@@ -727,22 +645,14 @@ describe("createEventHandler", () => {
     const { session, activeRun, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
 
-    const runtime = createEventHandler({
-      getSessionContext: (sessionId) =>
-        Effect.succeed(sessionId === session.opencode.sessionId ? { session, activeRun } : null),
-      handleQuestionEvent: () => Effect.void,
-      idleCompactionWorkflow: noopIdleCompactionWorkflow,
+    const runtime = makeRuntime({
+      session,
+      activeRun,
       readPromptResult: (_session, messageId) =>
         Effect.succeed({
           messageId,
           transcript: "final reply",
         }),
-      logger: {
-        info: () => Effect.void,
-        warn: () => Effect.void,
-        error: () => Effect.void,
-      },
-      formatError: (error) => String(error),
     });
 
     await Effect.runPromise(
