@@ -38,7 +38,7 @@ import {
   SessionPersistence,
   type ChannelSettingsPersistenceShape,
   type SessionPersistenceShape,
-} from "@/state/store.ts";
+} from "@/state/persistence.ts";
 import { SessionRunAccess, SessionRuntimeLayer } from "@/sessions/session-runtime.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
 import { unsafeEffect, unsafeStub } from "../support/stub.ts";

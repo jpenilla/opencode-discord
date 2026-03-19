@@ -3,10 +3,10 @@ import { ChannelType, type Message } from "discord.js";
 import { Deferred, Effect, Fiber, Ref } from "effect";
 
 import type { SessionHandle } from "@/opencode/service.ts";
-import { createSessionLifecycle, type SessionLifecycleState } from "@/sessions/session-runtime.ts";
+import { createSessionRegistry, type SessionRegistryState } from "@/sessions/session-runtime.ts";
 import type { ActiveRun } from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
-import type { PersistedChannelSession } from "@/state/store.ts";
+import type { PersistedChannelSession } from "@/state/persistence.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const makeMessage = (channelId = "channel-1") =>
@@ -37,7 +37,7 @@ const makeHandle = (
 
 const makeActiveRun = () => unsafeStub<ActiveRun>({});
 
-const makeState = (): SessionLifecycleState => ({
+const makeState = (): SessionRegistryState => ({
   sessionsByChannelId: new Map(),
   sessionsBySessionId: new Map(),
   activeRunsBySessionId: new Map(),
@@ -118,7 +118,7 @@ const makeHarness = async (options?: {
       });
     });
 
-  const lifecycle = createSessionLifecycle({
+  const lifecycle = createSessionRegistry({
     stateRef,
     createOpencodeSession: (workdir, title, systemPromptAppend) =>
       (options?.createOpencodeSession ?? defaultCreateOpencodeSession)({
@@ -188,7 +188,7 @@ const makeHarness = async (options?: {
   };
 };
 
-describe("createSessionLifecycle", () => {
+describe("createSessionRegistry", () => {
   test("single-flights concurrent cold starts for the same channel", async () => {
     const createStarted = await Effect.runPromise(Deferred.make<void>());
     const releaseCreate = await Effect.runPromise(Deferred.make<void>());

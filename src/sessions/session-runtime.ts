@@ -48,14 +48,14 @@ import {
   ChannelSettingsPersistence,
   SessionPersistence,
   type PersistedChannelSession,
-} from "@/state/store.ts";
+} from "@/state/persistence.ts";
 import { formatError } from "@/util/errors.ts";
 import { Logger } from "@/util/logging.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
 export type SessionGate = Deferred.Deferred<void, never>;
 
-export type SessionLifecycleState = {
+export type SessionRegistryState = {
   sessionsByChannelId: Map<string, ChannelSession>;
   sessionsBySessionId: Map<string, ChannelSession>;
   activeRunsBySessionId: Map<string, ActiveRun>;
@@ -153,7 +153,7 @@ type SessionPaths = {
   workdir: string;
 };
 
-type SessionLifecycleDeps<State extends SessionLifecycleState> = {
+type SessionLifecycleDeps<State extends SessionRegistryState> = {
   stateRef: Ref.Ref<State>;
   createOpencodeSession: (
     workdir: string,
@@ -204,7 +204,7 @@ const defaultCreateSessionPaths = (sessionsRootDir: string, channelId: string) =
 const defaultDeleteSessionRoot = (rootDir: string) =>
   Effect.promise(() => rm(resolve(rootDir), { recursive: true, force: true })).pipe(Effect.ignore);
 
-export const createSessionLifecycle = <State extends SessionLifecycleState>(
+export const createSessionRegistry = <State extends SessionRegistryState>(
   deps: SessionLifecycleDeps<State>,
 ) => {
   const createSessionPaths =
@@ -911,7 +911,7 @@ export const makeSessionRuntime = (deps: {
   };
 };
 
-type SessionRuntimeLayerState = SessionLifecycleState;
+type SessionRuntimeLayerState = SessionRegistryState;
 
 const createSessionRuntimeState = (): SessionRuntimeLayerState => ({
   sessionsByChannelId: new Map(),
@@ -967,7 +967,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
     const sendQuestionUiFailure = (message: Message, error: unknown) =>
       sendErrorReply(message, "## ❌ Failed to show questions", error);
 
-    const sessionLifecycle = createSessionLifecycle({
+    const sessionLifecycle = createSessionRegistry({
       stateRef,
       createOpencodeSession: opencode.createSession,
       attachOpencodeSession: opencode.attachSession,
