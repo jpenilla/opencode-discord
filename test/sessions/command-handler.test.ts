@@ -8,16 +8,12 @@ import {
 import { Deferred, Effect, Layer, Queue, Ref } from "effect";
 
 import {
-  ChannelSettingsRuntime,
-  makeChannelSettingsRuntime,
-  type ChannelSettingsRuntimeShape,
-} from "@/channels/channel-settings-runtime.ts";
-import {
   NEW_SESSION_BUSY_MESSAGE,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
   QUESTION_PENDING_NEW_SESSION_MESSAGE,
 } from "@/channels/command-policy.ts";
 import { createCommandHandler } from "@/channels/command-handler.ts";
+import { AppConfig, type AppConfigShape } from "@/config.ts";
 import { InfoCards, type InfoCardsShape } from "@/discord/info-cards.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { createPromptState } from "@/sessions/prompt-state.ts";
@@ -27,7 +23,7 @@ import {
   type IdleCompactionWorkflowStartResult,
 } from "@/sessions/idle-compaction-workflow.ts";
 import {
-  makeSessionRuntime,
+  type ChannelActivity,
   SessionChannelBridge,
   type SessionChannelBridgeShape,
 } from "@/sessions/session-runtime.ts";
@@ -38,10 +34,37 @@ import {
   type RunRequest,
 } from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
+import {
+  ChannelSettingsPersistence,
+  type ChannelSettingsPersistenceShape,
+} from "@/state/persistence.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
+
+const makeConfig = (defaults: {
+  showThinking: boolean;
+  showCompactionSummaries: boolean;
+}): AppConfigShape => ({
+  discordToken: { raw: "<redacted>" } as never,
+  triggerPhrase: "hey opencode",
+  ignoreOtherBotTriggers: false,
+  sessionInstructions: "",
+  stateDir: "/tmp/opencode-discord-test-state",
+  defaultProviderId: undefined,
+  defaultModelId: undefined,
+  showThinkingByDefault: defaults.showThinking,
+  showCompactionSummariesByDefault: defaults.showCompactionSummaries,
+  sessionIdleTimeoutMs: 30 * 60 * 1_000,
+  toolBridgeSocketPath: "/tmp/bridge.sock",
+  toolBridgeToken: { raw: "<redacted>" } as never,
+  sandboxBackend: "bwrap",
+  opencodeBin: "opencode",
+  bwrapBin: "bwrap",
+  sandboxReadOnlyPaths: [],
+  sandboxEnvPassthrough: [],
+});
 
 type HarnessOptions = {
   sessionHealthy?: boolean;
@@ -60,12 +83,14 @@ type HarnessOptions = {
 
 const makeCommandsLayer = (deps: {
   sessionBridge: SessionChannelBridgeShape;
-  channelSettingsRuntime: ChannelSettingsRuntimeShape;
+  channelSettingsPersistence: ChannelSettingsPersistenceShape;
   infoCards: InfoCardsShape;
   logger: LoggerShape;
+  config: AppConfigShape;
 }) =>
   Layer.mergeAll(
-    Layer.succeed(ChannelSettingsRuntime, deps.channelSettingsRuntime),
+    Layer.succeed(AppConfig, deps.config),
+    Layer.succeed(ChannelSettingsPersistence, deps.channelSettingsPersistence),
     Layer.succeed(SessionChannelBridge, deps.sessionBridge),
     Layer.succeed(InfoCards, deps.infoCards),
     Layer.succeed(Logger, deps.logger),
@@ -179,97 +204,6 @@ const makeHarness = async (options?: HarnessOptions) => {
     Ref.make((options?.hasSession ?? true) ? session : null),
   );
 
-  const sessionRuntime = makeSessionRuntime({
-    getLoaded: (channelId) =>
-      Ref.get(sessionRef).pipe(
-        Effect.map((current) => (current && current.channelId === channelId ? current : null)),
-      ),
-    getOrRestore: (channelId) =>
-      Ref.get(sessionRef).pipe(
-        Effect.map((current) => (current && current.channelId === channelId ? current : null)),
-      ),
-    invalidate: (channelId, reason) =>
-      Effect.gen(function* () {
-        if (options?.invalidateResult === "failure") {
-          return yield* Effect.fail(new Error("invalidate failed"));
-        }
-        if (options?.invalidateResult === "busy") {
-          return false;
-        }
-        yield* Ref.update(invalidatedSessions, (current) => [
-          ...current,
-          { channelId: session.channelId, reason },
-        ]);
-        yield* Ref.update(sessionRef, (current) =>
-          current && current.channelId === channelId ? null : current,
-        );
-        return true;
-      }),
-    updateLoadedChannelSettings: (channelId, settings) =>
-      Ref.update(sessionRef, (current) => {
-        if (current && current.channelId === channelId) {
-          current.channelSettings = settings;
-        }
-        return current;
-      }),
-    interruptSession: () =>
-      options?.interruptResult === "failure"
-        ? Effect.fail(new Error("interrupt failed"))
-        : Effect.void,
-    setRunInterruptRequested: (currentActiveRun, requested, source = requested ? "user" : null) =>
-      Effect.sync(() => {
-        currentActiveRun.interruptRequested = requested;
-        currentActiveRun.interruptSource = requested ? source : null;
-      }),
-    isSessionBusy: (currentSession) =>
-      Ref.get(idleCompactionActive).pipe(
-        Effect.map(
-          (idleCompactionBusy) =>
-            Boolean(currentSession.activeRun) ||
-            idleCompactionBusy ||
-            (options?.hasPendingQuestions ?? false) ||
-            (options?.hasOtherBusyState ?? false),
-        ),
-      ),
-    hasPendingQuestions: () =>
-      Ref.updateAndGet(pendingQuestionCheckCount, (count) => count + 1).pipe(
-        Effect.map((count) => {
-          const sequence = options?.hasPendingQuestionsSequence;
-          if (sequence && sequence.length > 0) {
-            return sequence[Math.min(count - 1, sequence.length - 1)] ?? false;
-          }
-          return options?.hasPendingQuestions ?? false;
-        }),
-      ),
-    hasIdleCompaction: () => Ref.get(idleCompactionActive),
-    getActiveRunBySessionId: () => Effect.succeed(null),
-    queueMessageRunRequest: () => Effect.fail(new Error("unused in command tests")),
-    routeQuestionInteraction: () => Effect.void,
-    startCompaction: (channelId, channel) =>
-      Ref.get(sessionRef).pipe(
-        Effect.flatMap((currentSession) =>
-          !currentSession || currentSession.channelId !== channelId
-            ? Effect.succeed({
-                type: "rejected",
-                message: "No OpenCode session exists in this channel yet.",
-              } satisfies IdleCompactionWorkflowStartResult)
-            : idleCompactionWorkflow.start({ session: currentSession, channel }),
-        ),
-      ),
-    requestCompactionInterrupt: (channelId) =>
-      Ref.get(sessionRef).pipe(
-        Effect.flatMap((currentSession) =>
-          !currentSession || currentSession.channelId !== channelId
-            ? Effect.succeed({
-                type: "failed",
-                message: "No active OpenCode run or compaction is running in this channel.",
-              } satisfies IdleCompactionWorkflowInterruptResult)
-            : idleCompactionWorkflow.requestInterrupt({ session: currentSession }),
-        ),
-      ),
-    shutdown: () => Effect.void,
-  });
-
   const infoCards: InfoCardsShape = {
     send: () => Effect.succeed(unsafeStub<Message>({ id: "info-cards-send" })),
     edit: () => Effect.void,
@@ -304,18 +238,16 @@ const makeHarness = async (options?: HarnessOptions) => {
     error: () => Effect.void,
   };
 
-  const channelSettingsRuntime = makeChannelSettingsRuntime({
-    defaults: channelSettingsDefaults,
-    getPersistedChannelSettings: (channelId: string) =>
+  const channelSettingsPersistence: ChannelSettingsPersistenceShape = {
+    getChannelSettings: (channelId: string) =>
       Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(channelId) ?? null)),
-    upsertPersistedChannelSettings: (settings: PersistedChannelSettings) =>
+    upsertChannelSettings: (settings: PersistedChannelSettings) =>
       Ref.update(persistedSettings, (current) => {
         const next = new Map(current);
         next.set(settings.channelId, settings);
         return next;
       }),
-    updateLoadedChannelSettings: sessionRuntime.updateLoadedChannelSettings,
-  });
+  };
 
   const idleCompactionWorkflow: IdleCompactionWorkflowShape = {
     hasActive: () => Ref.get(idleCompactionActive),
@@ -399,11 +331,153 @@ const makeHarness = async (options?: HarnessOptions) => {
     shutdown: () => Effect.void,
   };
 
+  const readSession = (channelId: string) =>
+    Ref.get(sessionRef).pipe(
+      Effect.map((current) => (current && current.channelId === channelId ? current : null)),
+    );
+
+  const readChannelActivity = (
+    currentSession: ChannelSession | null,
+  ): Effect.Effect<ChannelActivity> => {
+    if (!currentSession) {
+      return Effect.succeed({ type: "missing" });
+    }
+    return Effect.all({
+      idleCompactionBusy: Ref.get(idleCompactionActive),
+      queueSize: Queue.size(currentSession.queue),
+      pendingQuestionCheckCount: Ref.updateAndGet(pendingQuestionCheckCount, (count) => count + 1),
+    }).pipe(
+      Effect.map(({ idleCompactionBusy, queueSize, pendingQuestionCheckCount }) => {
+        const sequence = options?.hasPendingQuestionsSequence;
+        const hasPendingQuestions =
+          sequence && sequence.length > 0
+            ? (sequence[Math.min(pendingQuestionCheckCount - 1, sequence.length - 1)] ?? false)
+            : (options?.hasPendingQuestions ?? false);
+        const hasQueuedWork = queueSize > 0;
+        return {
+          type: "present",
+          activity: {
+            hasActiveRun: Boolean(currentSession.activeRun),
+            hasPendingQuestions,
+            hasIdleCompaction: idleCompactionBusy,
+            hasQueuedWork,
+            isBusy:
+              Boolean(currentSession.activeRun) ||
+              idleCompactionBusy ||
+              hasPendingQuestions ||
+              hasQueuedWork ||
+              (options?.hasOtherBusyState ?? false),
+          },
+        } satisfies ChannelActivity;
+      }),
+    );
+  };
+
+  const sessionBridge: SessionChannelBridgeShape = {
+    readLoadedChannelActivity: (channelId: string) =>
+      readSession(channelId).pipe(Effect.flatMap(readChannelActivity)),
+    readRestoredChannelActivity: (channelId: string) =>
+      readSession(channelId).pipe(Effect.flatMap(readChannelActivity)),
+    queueMessageRunRequest: () => Effect.fail(new Error("unused in command tests")),
+    routeQuestionInteraction: () => Effect.void,
+    invalidate: (channelId: string, reason: string) =>
+      Effect.gen(function* () {
+        if (options?.invalidateResult === "failure") {
+          return yield* Effect.fail(new Error("invalidate failed"));
+        }
+        if (options?.invalidateResult === "busy") {
+          return false;
+        }
+        yield* Ref.update(invalidatedSessions, (current) => [
+          ...current,
+          { channelId: session.channelId, reason },
+        ]);
+        yield* Ref.update(sessionRef, (current) =>
+          current && current.channelId === channelId ? null : current,
+        );
+        return true;
+      }),
+    updateLoadedChannelSettings: (channelId: string, settings) =>
+      Ref.update(sessionRef, (current) => {
+        if (current && current.channelId === channelId) {
+          current.channelSettings = settings;
+        }
+        return current;
+      }),
+    requestRunInterrupt: (channelId: string) =>
+      readSession(channelId).pipe(
+        Effect.flatMap((currentSession) => {
+          if (!currentSession || !currentSession.activeRun) {
+            return Effect.succeed({
+              type: "failed",
+              error: new Error("no active run for session"),
+            } as const);
+          }
+
+          return Effect.sync(() => {
+            const activeRun: ActiveRun = currentSession.activeRun!;
+            activeRun.interruptRequested = true;
+            activeRun.interruptSource = "user";
+
+            if (options?.interruptResult === "failure") {
+              activeRun.interruptRequested = false;
+              activeRun.interruptSource = null;
+              return {
+                type: "failed",
+                error: new Error("interrupt failed"),
+              } as const;
+            }
+
+            const hasPendingQuestions =
+              options?.hasPendingQuestionsSequence?.[1] ??
+              options?.hasPendingQuestionsSequence?.[0] ??
+              options?.hasPendingQuestions ??
+              false;
+            if (hasPendingQuestions) {
+              activeRun.interruptRequested = false;
+              activeRun.interruptSource = null;
+              return {
+                type: "question-pending",
+              } as const;
+            }
+
+            return {
+              type: "requested",
+            } as const;
+          });
+        }),
+      ),
+    startCompaction: (channelId: string, channel) =>
+      readSession(channelId).pipe(
+        Effect.flatMap((currentSession) =>
+          !currentSession
+            ? Effect.succeed({
+                type: "rejected",
+                message: "No OpenCode session exists in this channel yet.",
+              } satisfies IdleCompactionWorkflowStartResult)
+            : idleCompactionWorkflow.start({ session: currentSession, channel }),
+        ),
+      ),
+    requestCompactionInterrupt: (channelId: string) =>
+      readSession(channelId).pipe(
+        Effect.flatMap((currentSession) =>
+          !currentSession
+            ? Effect.succeed({
+                type: "failed",
+                message: "No active OpenCode run or compaction is running in this channel.",
+              } satisfies IdleCompactionWorkflowInterruptResult)
+            : idleCompactionWorkflow.requestInterrupt({ session: currentSession }),
+        ),
+      ),
+    shutdown: () => Effect.void,
+  };
+
   const commandsLayer = makeCommandsLayer({
-    sessionBridge: sessionRuntime,
-    channelSettingsRuntime,
+    sessionBridge,
+    channelSettingsPersistence,
     infoCards,
     logger,
+    config: makeConfig(channelSettingsDefaults),
   });
 
   const runtime = createCommandHandler({
