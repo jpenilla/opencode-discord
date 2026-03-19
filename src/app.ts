@@ -11,8 +11,8 @@ import { Effect, Layer, Redacted } from "effect";
 
 import { AppConfig } from "@/config.ts";
 import { ChannelRuntime } from "@/channels/channel-runtime.ts";
-import { syncGuildCommands } from "@/discord/commands.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
+import { syncGuildCommands } from "@/discord/slash-command-sync.ts";
 import { detectInvocation } from "@/discord/triggers.ts";
 import { Logger } from "@/util/logging.ts";
 
