@@ -3,7 +3,7 @@ import { Effect, Layer } from "effect";
 
 import { getGuildCommand } from "@/channels/commands.ts";
 import type { GuildCommandDependencies } from "@/channels/commands/definition.ts";
-import { CommandContext, makeCommandContextLayer } from "@/discord/commands/command-context.ts";
+import { CommandContext, makeCommandContextLayer } from "@/discord/command-context.ts";
 
 export type CommandHandler = {
   handleInteraction: (interaction: ChatInputCommandInteraction) => Effect.Effect<void, unknown>;

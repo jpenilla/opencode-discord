@@ -3,9 +3,9 @@ import type { Message } from "discord.js";
 import { Deferred, Effect, Queue, Ref } from "effect";
 
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
-import type { AdmittedPromptContext } from "@/sessions/prompt-context.ts";
-import { executeRunBatch } from "@/sessions/run-executor.ts";
-import type { NonEmptyRunRequestBatch } from "@/sessions/run-batch.ts";
+import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
+import { executeRunBatch } from "@/sessions/run/run-executor.ts";
+import type { NonEmptyRunRequestBatch } from "@/sessions/run/run-batch.ts";
 import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
 import { unsafeStub } from "../support/stub.ts";
 

@@ -13,9 +13,9 @@ import type { Ref } from "effect/Ref";
 
 import type { TypingLoop } from "@/discord/messages.ts";
 import type { SessionHandle } from "@/opencode/service.ts";
-import type { AdmittedPromptContext } from "@/sessions/prompt-context.ts";
+import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
 import type { ChannelSettings } from "@/state/channel-settings.ts";
-import type { PendingPrompt } from "@/sessions/prompt-state.ts";
+import type { PendingPrompt } from "@/sessions/run/prompt-state.ts";
 
 export type SessionCreateSpec = {
   workdir: string;

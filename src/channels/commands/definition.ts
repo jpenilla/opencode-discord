@@ -1,7 +1,7 @@
 import { Effect } from "effect";
 
 import { AppConfig } from "@/config.ts";
-import { CommandContext } from "@/discord/commands/command-context.ts";
+import { CommandContext } from "@/discord/command-context.ts";
 import { InfoCards } from "@/discord/info-cards.ts";
 import { SessionChannelBridge } from "@/sessions/session-runtime.ts";
 import { ChannelSettingsPersistence } from "@/state/persistence.ts";

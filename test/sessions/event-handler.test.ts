@@ -11,7 +11,7 @@ import type { Message } from "discord.js";
 
 import type { SessionHandle } from "@/opencode/service.ts";
 import { createEventHandler } from "@/sessions/event-handler.ts";
-import { beginPendingPrompt, createPromptState } from "@/sessions/prompt-state.ts";
+import { beginPendingPrompt, createPromptState } from "@/sessions/run/prompt-state.ts";
 import {
   noQuestionOutcome,
   type ActiveRun,

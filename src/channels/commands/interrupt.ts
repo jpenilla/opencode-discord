@@ -5,7 +5,7 @@ import {
   GUILD_TEXT_COMMAND_ONLY_MESSAGE,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
 } from "@/channels/command-policy.ts";
-import { CommandContext } from "@/discord/commands/command-context.ts";
+import { CommandContext } from "@/discord/command-context.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { SessionChannelBridge } from "@/sessions/session-runtime.ts";
 import { formatError } from "@/util/errors.ts";

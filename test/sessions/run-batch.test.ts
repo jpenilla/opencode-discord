@@ -6,7 +6,7 @@ import {
   admitRequestBatchToActiveRun,
   maxQueuedRunBatchSize,
   takeQueuedRunBatch,
-} from "@/sessions/run-batch.ts";
+} from "@/sessions/run/run-batch.ts";
 import type { RunRequest } from "@/sessions/session.ts";
 import { unsafeStub } from "../support/stub.ts";
 

@@ -16,12 +16,12 @@ import { createCommandHandler } from "@/channels/command-handler.ts";
 import { AppConfig, type AppConfigShape } from "@/config.ts";
 import { InfoCards, type InfoCardsShape } from "@/discord/info-cards.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
-import { createPromptState } from "@/sessions/prompt-state.ts";
+import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import {
   type IdleCompactionWorkflowShape,
   type IdleCompactionWorkflowInterruptResult,
   type IdleCompactionWorkflowStartResult,
-} from "@/sessions/idle-compaction-workflow.ts";
+} from "@/sessions/compaction/idle-compaction-workflow.ts";
 import {
   type ChannelActivity,
   SessionChannelBridge,

@@ -8,7 +8,7 @@ import {
   handleAssistantMessageUpdated,
   handleSessionStatusUpdated,
   handleUserMessageUpdated,
-} from "@/sessions/prompt-state.ts";
+} from "@/sessions/run/prompt-state.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const makeAssistantMessage = (input: {

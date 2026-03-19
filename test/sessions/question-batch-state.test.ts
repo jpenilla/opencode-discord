@@ -13,7 +13,7 @@ import {
   createQuestionWorkflowBatch,
   setQuestionBatchStatus,
   terminateQuestionBatch,
-} from "@/sessions/question-workflow-state.ts";
+} from "@/sessions/question/question-workflow-state.ts";
 
 const request: QuestionRequest = {
   id: "req-1",

@@ -3,9 +3,9 @@ import { Deferred, Effect, Queue, Ref } from "effect";
 import type { Message } from "discord.js";
 
 import { buildQueuedFollowUpPrompt } from "@/discord/messages.ts";
-import { coordinateActiveRunPrompts } from "@/sessions/prompt-coordinator.ts";
-import type { AdmittedPromptContext } from "@/sessions/prompt-context.ts";
-import { createPromptState } from "@/sessions/prompt-state.ts";
+import { coordinateActiveRunPrompts } from "@/sessions/run/prompt-coordinator.ts";
+import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
+import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import { enqueueRunRequest } from "@/sessions/request-routing.ts";
 import type { RunRequest } from "@/sessions/session.ts";
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";

@@ -2,9 +2,9 @@ import { Effect, Option } from "effect";
 import { type SendableChannels } from "discord.js";
 
 import type { InfoCardsShape } from "@/discord/info-cards.ts";
-import type { IdleCompactionWorkflowShape } from "@/sessions/idle-compaction-workflow.ts";
+import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import type { OpencodeServiceShape } from "@/opencode/service.ts";
-import type { QuestionRuntime } from "@/sessions/question-runtime.ts";
+import type { QuestionRuntime } from "@/sessions/question/question-runtime.ts";
 import type { SessionRegistryState } from "@/sessions/session-runtime.ts";
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";

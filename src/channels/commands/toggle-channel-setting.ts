@@ -2,7 +2,7 @@ import { Effect } from "effect";
 
 import { GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/channels/command-policy.ts";
 import { AppConfig } from "@/config.ts";
-import { CommandContext } from "@/discord/commands/command-context.ts";
+import { CommandContext } from "@/discord/command-context.ts";
 import type { ChannelSettings } from "@/state/channel-settings.ts";
 import {
   defaultChannelSettings,

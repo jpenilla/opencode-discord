@@ -15,7 +15,7 @@ import {
   type PromptTrackingAction,
   handleUserMessageUpdated,
   resolvePromptTrackingActions,
-} from "@/sessions/prompt-state.ts";
+} from "@/sessions/run/prompt-state.ts";
 import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
