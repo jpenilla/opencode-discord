@@ -1,9 +1,20 @@
 import { Redacted } from "effect";
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { cp, lstat, mkdir, mkdtemp, readdir, realpath, rm, symlink } from "node:fs/promises";
+import {
+  cp,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:net";
-import { homedir, tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import type { AppConfigShape } from "@/config.ts";
@@ -88,12 +99,19 @@ const DEFAULT_PASSTHROUGH_ENV_NAMES = new Set([
 const DEFAULT_PASSTHROUGH_ENV_PREFIXES = ["LC_"];
 
 const SANDBOX_TOOL_BRIDGE_SOCKET_PATH = "/run/opencode-discord/bridge.sock";
+const SANDBOX_IDENTITY_PATHS = ["/etc/passwd", "/etc/group"] as const;
 const IGNORED_GLOBAL_CONFIG_ENTRIES = new Set([
   ".gitignore",
   "bun.lock",
   "node_modules",
   "package.json",
 ]);
+
+type StagedSandboxIdentity = {
+  passwdPath: string;
+  groupPath: string;
+  cleanup: () => Promise<void>;
+};
 
 const resolveSandboxBackend = (
   backend: AppConfigShape["sandboxBackend"],
@@ -377,6 +395,114 @@ const xdgHomes = (homeDir: string, env: Partial<NodeJS.ProcessEnv> = {}) => ({
   cache: env.XDG_CACHE_HOME ?? join(homeDir, ".cache"),
 });
 
+const sanitizeIdentityField = (value: string, fallback: string) => {
+  const sanitized = value.replaceAll(":", "").replaceAll("\n", "").replaceAll("\r", "");
+  return sanitized || fallback;
+};
+
+const parseGroupNames = (content: string) => {
+  const groupNames = new Map<number, string>();
+  for (const line of content.split("\n")) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    const [name = "", , gidField = ""] = line.split(":", 4);
+    const gid = Number.parseInt(gidField, 10);
+    if (!Number.isInteger(gid) || gid < 0) {
+      continue;
+    }
+
+    groupNames.set(gid, sanitizeIdentityField(name, `gid-${gid}`));
+  }
+  return groupNames;
+};
+
+const hostGroupNames = async () => {
+  try {
+    return parseGroupNames(await readFile("/etc/group", "utf8"));
+  } catch {
+    return new Map<number, string>();
+  }
+};
+
+export const renderSyntheticPasswdFile = (input: {
+  username: string;
+  uid: number;
+  gid: number;
+  shell?: string;
+  homeDir?: string;
+}) => {
+  const username = sanitizeIdentityField(input.username, "opencode");
+  const shell = sanitizeIdentityField(input.shell?.trim() || "/bin/sh", "/bin/sh");
+  const homeDir = sanitizeIdentityField(input.homeDir ?? SANDBOX_HOME_DIR, SANDBOX_HOME_DIR);
+  return `${username}:x:${input.uid}:${input.gid}:${username}:${homeDir}:${shell}\n`;
+};
+
+export const renderSyntheticGroupFile = (input: {
+  username: string;
+  primaryGid: number;
+  gids: ReadonlyArray<number>;
+  groupNames?: ReadonlyMap<number, string>;
+}) => {
+  const username = sanitizeIdentityField(input.username, "opencode");
+  const gids = [...new Set(input.gids)].sort((left, right) => left - right);
+  return gids
+    .map((gid) => {
+      const fallbackName = gid === input.primaryGid ? username : `gid-${gid}`;
+      const name = sanitizeIdentityField(input.groupNames?.get(gid) ?? fallbackName, fallbackName);
+      const members = gid === input.primaryGid ? "" : username;
+      return `${name}:x:${gid}:${members}`;
+    })
+    .join("\n")
+    .concat("\n");
+};
+
+const stageSandboxIdentity = async (): Promise<StagedSandboxIdentity> => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "opencode-discord-identity-"));
+  const cleanup = async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  };
+
+  try {
+    const currentUser = userInfo();
+    const gids = [...new Set([currentUser.gid, ...(process.getgroups?.() ?? [])])].sort(
+      (left, right) => left - right,
+    );
+    const groupNames = await hostGroupNames();
+    const passwdPath = join(tempRoot, "passwd");
+    const groupPath = join(tempRoot, "group");
+
+    await writeFile(
+      passwdPath,
+      renderSyntheticPasswdFile({
+        username: currentUser.username,
+        uid: currentUser.uid,
+        gid: currentUser.gid,
+        shell: currentUser.shell ?? undefined,
+      }),
+    );
+    await writeFile(
+      groupPath,
+      renderSyntheticGroupFile({
+        username: currentUser.username,
+        primaryGid: currentUser.gid,
+        gids,
+        groupNames,
+      }),
+    );
+
+    return {
+      passwdPath,
+      groupPath,
+      cleanup,
+    };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+};
+
 const copyInto = async (source: string, destination: string) => {
   if (!existsSync(source)) {
     return;
@@ -446,15 +572,19 @@ const baseServerEnvironment = (
   TMPDIR: "/tmp",
 });
 
-const existingReadOnlyPaths = (input: LaunchSandboxedServerInput, opencodeBin: string) => {
+const existingReadOnlyPaths = (
+  input: LaunchSandboxedServerInput,
+  opencodeBin: string,
+  excludedPaths: ReadonlySet<string> = new Set(),
+) => {
   const configured =
     input.config.sandboxReadOnlyPaths.length > 0
       ? input.config.sandboxReadOnlyPaths
       : DEFAULT_BWRAP_READ_ONLY_PATHS;
 
   const extra = isAbsolute(opencodeBin) ? [dirname(opencodeBin)] : [];
-  const paths = [...new Set([input.configDir, ...configured, ...extra])].filter((entry) =>
-    existsSync(entry),
+  const paths = [...new Set([input.configDir, ...configured, ...extra])].filter(
+    (entry) => !excludedPaths.has(entry) && existsSync(entry),
   );
   return paths.sort((left, right) => left.localeCompare(right));
 };
@@ -505,75 +635,100 @@ const launchBwrapServer = async (
   const homeDir = sessionHomeDir(input.workdir);
   const hostXdg = await stageHostOpencodeState(homeDir);
   await mkdir(hostXdg.cache, { recursive: true });
+  const identity = await stageSandboxIdentity();
 
-  const opencodeBin = resolveSpawnBinary(input.config.opencodeBin, "opencode");
-  const bwrapBin = resolveSpawnBinary(input.config.bwrapBin, "bwrap");
-  if (!existsSync(input.config.toolBridgeSocketPath)) {
-    throw new Error(`Discord tool bridge socket not found: ${input.config.toolBridgeSocketPath}`);
-  }
-
-  const args: string[] = [
-    "--die-with-parent",
-    "--new-session",
-    "--unshare-user-try",
-    "--unshare-pid",
-    "--unshare-ipc",
-    "--unshare-uts",
-    "--proc",
-    "/proc",
-    "--dev",
-    "/dev",
-    "--tmpfs",
-    "/tmp",
-  ];
-
-  const ensuredDirectories = new Set<string>();
-  const writeableMounts = [[homeDir, SANDBOX_HOME_DIR]] as const;
-  for (const [source, destination] of writeableMounts) {
-    appendParentDirectories(args, destination, ensuredDirectories);
-    args.push("--bind", source, destination);
-  }
-
-  appendParentDirectories(args, SANDBOX_TOOL_BRIDGE_SOCKET_PATH, ensuredDirectories);
-  args.push(
-    "--ro-bind",
-    dirname(input.config.toolBridgeSocketPath),
-    dirname(SANDBOX_TOOL_BRIDGE_SOCKET_PATH),
-  );
-
-  for (const mount of existingReadOnlyPaths(input, opencodeBin)) {
-    appendParentDirectories(args, mount, ensuredDirectories);
-    args.push("--ro-bind", mount, mount);
-  }
-
-  const environment = baseServerEnvironment(
-    input,
-    SANDBOX_HOME_DIR,
-    xdgHomes(SANDBOX_HOME_DIR),
-    SANDBOX_TOOL_BRIDGE_SOCKET_PATH,
-  );
-  for (const [key, value] of Object.entries(environment)) {
-    if (value === undefined) {
-      continue;
+  try {
+    const opencodeBin = resolveSpawnBinary(input.config.opencodeBin, "opencode");
+    const bwrapBin = resolveSpawnBinary(input.config.bwrapBin, "bwrap");
+    if (!existsSync(input.config.toolBridgeSocketPath)) {
+      throw new Error(`Discord tool bridge socket not found: ${input.config.toolBridgeSocketPath}`);
     }
-    args.push("--setenv", key, value);
+
+    const args: string[] = [
+      "--die-with-parent",
+      "--new-session",
+      "--unshare-user-try",
+      "--unshare-pid",
+      "--unshare-ipc",
+      "--unshare-uts",
+      "--proc",
+      "/proc",
+      "--dev",
+      "/dev",
+      "--tmpfs",
+      "/tmp",
+    ];
+
+    const ensuredDirectories = new Set<string>();
+    const writeableMounts = [[homeDir, SANDBOX_HOME_DIR]] as const;
+    for (const [source, destination] of writeableMounts) {
+      appendParentDirectories(args, destination, ensuredDirectories);
+      args.push("--bind", source, destination);
+    }
+
+    appendParentDirectories(args, SANDBOX_TOOL_BRIDGE_SOCKET_PATH, ensuredDirectories);
+    args.push(
+      "--ro-bind",
+      dirname(input.config.toolBridgeSocketPath),
+      dirname(SANDBOX_TOOL_BRIDGE_SOCKET_PATH),
+    );
+
+    for (const [source, destination] of [
+      [identity.passwdPath, "/etc/passwd"],
+      [identity.groupPath, "/etc/group"],
+    ] as const) {
+      appendParentDirectories(args, destination, ensuredDirectories);
+      args.push("--ro-bind", source, destination);
+    }
+
+    for (const mount of existingReadOnlyPaths(
+      input,
+      opencodeBin,
+      new Set(SANDBOX_IDENTITY_PATHS),
+    )) {
+      appendParentDirectories(args, mount, ensuredDirectories);
+      args.push("--ro-bind", mount, mount);
+    }
+
+    const environment = baseServerEnvironment(
+      input,
+      SANDBOX_HOME_DIR,
+      xdgHomes(SANDBOX_HOME_DIR),
+      SANDBOX_TOOL_BRIDGE_SOCKET_PATH,
+    );
+    for (const [key, value] of Object.entries(environment)) {
+      if (value === undefined) {
+        continue;
+      }
+      args.push("--setenv", key, value);
+    }
+
+    args.push(
+      "--chdir",
+      SANDBOX_WORKSPACE_DIR,
+      opencodeBin,
+      "serve",
+      "--hostname=127.0.0.1",
+      `--port=${port}`,
+    );
+
+    const server = await spawnServerProcess({
+      backend: "bwrap",
+      command: bwrapBin,
+      args,
+      cwd: input.workdir,
+    });
+    return {
+      ...server,
+      close: () => {
+        server.close();
+        void identity.cleanup().catch(() => {});
+      },
+    };
+  } catch (error) {
+    await identity.cleanup();
+    throw error;
   }
-
-  args.push(
-    "--chdir",
-    SANDBOX_WORKSPACE_DIR,
-    opencodeBin,
-    "serve",
-    "--hostname=127.0.0.1",
-    `--port=${port}`,
-  );
-
-  return await spawnServerProcess({
-    backend: "bwrap",
-    command: bwrapBin,
-    args,
-    cwd: input.workdir,
-  });
 };
 
 export const launchSandboxedServer = async (
