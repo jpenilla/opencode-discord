@@ -13,7 +13,7 @@ import type { Invocation } from "@/discord/triggers.ts";
 import { collectAttachmentMessages } from "@/sessions/message-context.ts";
 import { SessionChannelBridge } from "@/sessions/session-runtime.ts";
 import type { RunRequest } from "@/sessions/session.ts";
-import { SessionStore } from "@/state/store.ts";
+import { ChannelSettingsPersistence } from "@/state/store.ts";
 import { Logger } from "@/util/logging.ts";
 
 export type ChannelRuntimeShape = {
@@ -35,15 +35,15 @@ export const ChannelRuntimeLayer = Layer.effect(
     const logger = yield* Logger;
     const infoCards = yield* InfoCards;
     const sessionBridge = yield* SessionChannelBridge;
-    const sessionStore = yield* SessionStore;
+    const channelSettingsPersistence = yield* ChannelSettingsPersistence;
     const shutdownStartedRef = yield* Ref.make(false);
     const channelSettings = makeChannelSettingsRuntime({
       defaults: {
         showThinking: config.showThinkingByDefault,
         showCompactionSummaries: config.showCompactionSummariesByDefault,
       },
-      getPersistedChannelSettings: sessionStore.getChannelSettings,
-      upsertPersistedChannelSettings: sessionStore.upsertChannelSettings,
+      getPersistedChannelSettings: channelSettingsPersistence.getChannelSettings,
+      upsertPersistedChannelSettings: channelSettingsPersistence.upsertChannelSettings,
       updateLoadedChannelSettings: sessionBridge.updateLoadedChannelSettings,
     });
 
