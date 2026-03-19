@@ -113,6 +113,23 @@ type StagedSandboxIdentity = {
   cleanup: () => Promise<void>;
 };
 
+const withTemporaryRoot = async <A>(
+  prefix: string,
+  run: (input: { tempRoot: string; cleanup: () => Promise<void> }) => Promise<A>,
+): Promise<A> => {
+  const tempRoot = await mkdtemp(join(tmpdir(), prefix));
+  const cleanup = async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  };
+
+  try {
+    return await run({ tempRoot, cleanup });
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+};
+
 const resolveSandboxBackend = (
   backend: AppConfigShape["sandboxBackend"],
 ): ResolvedSandboxBackend => {
@@ -242,13 +259,8 @@ export const stageSandboxConfigDirectory = async (
     throw new Error(`Sandbox config directory not found: ${sourceDir}`);
   }
 
-  const tempRoot = await mkdtemp(join(tmpdir(), "opencode-discord-config-"));
-  const stagedConfigDir = join(tempRoot, "opencode");
-  const cleanup = async () => {
-    await rm(tempRoot, { recursive: true, force: true });
-  };
-
-  try {
+  return withTemporaryRoot("opencode-discord-config-", async ({ tempRoot, cleanup }) => {
+    const stagedConfigDir = join(tempRoot, "opencode");
     await mkdir(stagedConfigDir, { recursive: true });
 
     const copiedStoreRoots = new Map<string, string>();
@@ -274,10 +286,7 @@ export const stageSandboxConfigDirectory = async (
       configDir: stagedConfigDir,
       cleanup,
     };
-  } catch (error) {
-    await cleanup();
-    throw error;
-  }
+  });
 };
 
 const nextAvailablePort = async () =>
@@ -459,12 +468,7 @@ export const renderSyntheticGroupFile = (input: {
 };
 
 const stageSandboxIdentity = async (): Promise<StagedSandboxIdentity> => {
-  const tempRoot = await mkdtemp(join(tmpdir(), "opencode-discord-identity-"));
-  const cleanup = async () => {
-    await rm(tempRoot, { recursive: true, force: true });
-  };
-
-  try {
+  return withTemporaryRoot("opencode-discord-identity-", async ({ tempRoot, cleanup }) => {
     const currentUser = userInfo();
     const gids = [...new Set([currentUser.gid, ...(process.getgroups?.() ?? [])])].sort(
       (left, right) => left - right,
@@ -497,10 +501,7 @@ const stageSandboxIdentity = async (): Promise<StagedSandboxIdentity> => {
       groupPath,
       cleanup,
     };
-  } catch (error) {
-    await cleanup();
-    throw error;
-  }
+  });
 };
 
 const copyInto = async (source: string, destination: string) => {
