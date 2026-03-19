@@ -2,7 +2,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import type { Interaction, Message, SendableChannels } from "discord.js";
-import { Deferred, Effect, FiberSet, Layer, Queue, Ref, ServiceMap } from "effect";
+import { Effect, FiberSet, Layer, Queue, Ref, ServiceMap } from "effect";
 
 import { AppConfig } from "@/config.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
@@ -56,16 +56,14 @@ import {
   type PersistedChannelSession,
 } from "@/state/persistence.ts";
 import { formatError } from "@/util/errors.ts";
+import { createKeyedSingleflight } from "@/util/keyed-singleflight.ts";
 import { Logger } from "@/util/logging.ts";
 import type { LoggerShape } from "@/util/logging.ts";
-
-export type SessionGate = Deferred.Deferred<void, never>;
 
 export type SessionRegistryState = {
   sessionsByChannelId: Map<string, ChannelSession>;
   sessionsBySessionId: Map<string, ChannelSession>;
   activeRunsBySessionId: Map<string, ActiveRun>;
-  gatesByChannelId: Map<string, SessionGate>;
 };
 
 export type SessionContext = {
@@ -149,11 +147,6 @@ export class SessionRunAccess extends ServiceMap.Service<SessionRunAccess, Sessi
   "SessionRunAccess",
 ) {}
 
-type SessionGateDecision = {
-  gate: SessionGate;
-  owner: boolean;
-};
-
 type SessionPaths = {
   rootDir: string;
   workdir: string;
@@ -213,6 +206,7 @@ const defaultDeleteSessionRoot = (rootDir: string) =>
 export const createSessionRegistry = <State extends SessionRegistryState>(
   deps: SessionLifecycleDeps<State>,
 ) => {
+  const sessionGate = createKeyedSingleflight<string>();
   const createSessionPaths =
     deps.createSessionPaths ??
     ((channelId: string) => defaultCreateSessionPaths(deps.sessionsRootDir, channelId));
@@ -331,59 +325,10 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
     );
   };
 
-  const clearSessionGate = (channelId: string, gate: SessionGate) =>
-    Ref.update(deps.stateRef, (current) => {
-      if (current.gatesByChannelId.get(channelId) !== gate) {
-        return current;
-      }
-
-      const gatesByChannelId = new Map(current.gatesByChannelId);
-      gatesByChannelId.delete(channelId);
-      return {
-        ...current,
-        gatesByChannelId,
-      };
-    });
-
   const withSessionGate = <A>(
     channelId: string,
     task: Effect.Effect<A, unknown>,
-  ): Effect.Effect<A, unknown> =>
-    Effect.gen(function* () {
-      const gate = yield* Deferred.make<void, never>();
-      const { gate: currentGate, owner } = yield* Ref.modify(
-        deps.stateRef,
-        (current): readonly [SessionGateDecision, State] => {
-          const existing = current.gatesByChannelId.get(channelId);
-          if (existing) {
-            return [{ gate: existing, owner: false }, current];
-          }
-
-          const gatesByChannelId = new Map(current.gatesByChannelId);
-          gatesByChannelId.set(channelId, gate);
-          return [
-            { gate, owner: true },
-            {
-              ...current,
-              gatesByChannelId,
-            },
-          ];
-        },
-      );
-
-      if (owner) {
-        return yield* task.pipe(
-          Effect.ensuring(
-            clearSessionGate(channelId, currentGate).pipe(
-              Effect.andThen(Deferred.succeed(currentGate, undefined).pipe(Effect.ignore)),
-            ),
-          ),
-        );
-      }
-
-      yield* Deferred.await(currentGate);
-      return yield* withSessionGate(channelId, task);
-    });
+  ): Effect.Effect<A, unknown> => sessionGate.waitAndRetry(channelId, task);
 
   const touchSessionActivity = (session: ChannelSession, at = Date.now()) =>
     Effect.gen(function* () {
@@ -811,7 +756,6 @@ const createSessionRuntimeState = (): SessionRuntimeLayerState => ({
   sessionsByChannelId: new Map(),
   sessionsBySessionId: new Map(),
   activeRunsBySessionId: new Map(),
-  gatesByChannelId: new Map(),
 });
 
 export const SessionRuntimeLayer = Layer.unwrap(

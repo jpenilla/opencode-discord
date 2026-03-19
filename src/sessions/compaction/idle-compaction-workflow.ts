@@ -9,6 +9,7 @@ import { formatCompactionSummary } from "@/discord/progress.ts";
 import { OpencodeService, type OpencodeServiceShape } from "@/opencode/service.ts";
 import type { ChannelSession } from "@/sessions/session.ts";
 import { formatError } from "@/util/errors.ts";
+import { createKeyedSingleflight } from "@/util/keyed-singleflight.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
 
 export type IdleCompactionWorkflowStartResult =
@@ -63,21 +64,6 @@ type SessionIdleCompactionWorkflow = {
   handleInterrupted: () => Effect.Effect<void, unknown>;
   shutdown: () => Effect.Effect<void, unknown>;
 };
-
-type IdleCompactionWorkflowGate = Deferred.Deferred<SessionIdleCompactionWorkflow, unknown>;
-type IdleCompactionWorkflowRegistryState = {
-  workflows: Map<string, SessionIdleCompactionWorkflow>;
-  gates: Map<string, IdleCompactionWorkflowGate>;
-};
-type IdleCompactionWorkflowGateDecision =
-  | { type: "existing"; workflow: SessionIdleCompactionWorkflow }
-  | { type: "await"; gate: IdleCompactionWorkflowGate }
-  | { type: "create"; gate: IdleCompactionWorkflowGate };
-
-const createIdleCompactionWorkflowRegistryState = (): IdleCompactionWorkflowRegistryState => ({
-  workflows: new Map(),
-  gates: new Map(),
-});
 
 const sendCompactionSummary = (session: ChannelSession, text: string, logger: LoggerShape) => {
   if (!session.channelSettings.showCompactionSummaries) {
@@ -386,121 +372,50 @@ export const makeIdleCompactionWorkflow = (): Effect.Effect<
     const infoCards = yield* InfoCards;
     const logger = yield* Logger;
     const opencode = yield* OpencodeService;
-    const workflowsRef = yield* Ref.make(createIdleCompactionWorkflowRegistryState());
+    const workflowCreation = createKeyedSingleflight<string>();
+    const workflows = new Map<string, SessionIdleCompactionWorkflow>();
 
     const getWorkflow = (sessionId: string) =>
-      Ref.get(workflowsRef).pipe(Effect.map((state) => state.workflows.get(sessionId) ?? null));
-
-    const storeCreatedWorkflow = (
-      sessionId: string,
-      gate: IdleCompactionWorkflowGate,
-      workflow: SessionIdleCompactionWorkflow,
-    ) =>
-      Ref.update(workflowsRef, (current) => {
-        if (current.gates.get(sessionId) !== gate) {
-          return current;
-        }
-
-        const workflows = new Map(current.workflows);
-        workflows.set(sessionId, workflow);
-        const gates = new Map(current.gates);
-        gates.delete(sessionId);
-        return {
-          workflows,
-          gates,
-        };
-      });
-
-    const clearWorkflowCreation = (sessionId: string, gate: IdleCompactionWorkflowGate) =>
-      Ref.update(workflowsRef, (current) => {
-        if (current.gates.get(sessionId) !== gate) {
-          return current;
-        }
-
-        const gates = new Map(current.gates);
-        gates.delete(sessionId);
-        return {
-          ...current,
-          gates,
-        };
-      });
+      Effect.sync(() => workflows.get(sessionId) ?? null);
 
     const deleteWorkflow = (sessionId: string, workflow?: SessionIdleCompactionWorkflow) =>
-      Ref.update(workflowsRef, (current) => {
-        const existing = current.workflows.get(sessionId);
+      Effect.sync(() => {
+        const existing = workflows.get(sessionId);
         if (!existing || (workflow && existing !== workflow)) {
-          return current;
+          return;
         }
-
-        const workflows = new Map(current.workflows);
         workflows.delete(sessionId);
-        return {
-          ...current,
-          workflows,
-        };
       });
 
     const getOrCreateWorkflow = (sessionId: string) =>
-      Effect.gen(function* () {
-        const gate = yield* Deferred.make<SessionIdleCompactionWorkflow, unknown>();
-        const decision = yield* Ref.modify(
-          workflowsRef,
-          (
-            current,
-          ): readonly [IdleCompactionWorkflowGateDecision, IdleCompactionWorkflowRegistryState] => {
-            const existing = current.workflows.get(sessionId);
-            if (existing) {
-              return [{ type: "existing", workflow: existing }, current];
-            }
-
-            const currentGate = current.gates.get(sessionId);
-            if (currentGate) {
-              return [{ type: "await", gate: currentGate }, current];
-            }
-
-            const gates = new Map(current.gates);
-            gates.set(sessionId, gate);
-            return [
-              { type: "create", gate },
-              {
-                ...current,
-                gates,
-              },
-            ];
-          },
-        );
-
-        switch (decision.type) {
-          case "existing":
-            return decision.workflow;
-          case "await":
-            return yield* Deferred.await(decision.gate);
-          case "create":
-            break;
-        }
-
-        let workflow: SessionIdleCompactionWorkflow | null = null;
-        const exit = yield* createSessionIdleCompactionWorkflow({
-          infoCards,
-          logger,
-          opencode,
-          onDrained: () => (workflow ? deleteWorkflow(sessionId, workflow) : Effect.void),
-        }).pipe(
-          Effect.tap((created) =>
-            Effect.sync(() => {
-              workflow = created;
-            }).pipe(Effect.andThen(storeCreatedWorkflow(sessionId, decision.gate, created))),
-          ),
-          Effect.exit,
-        );
-
-        yield* Deferred.done(decision.gate, exit).pipe(Effect.ignore);
-        if (exit._tag === "Failure") {
-          yield* clearWorkflowCreation(sessionId, decision.gate);
-          return yield* Effect.failCause(exit.cause);
-        }
-        return exit.value;
-      });
+      getWorkflow(sessionId).pipe(
+        Effect.flatMap((existing) =>
+          existing
+            ? Effect.succeed(existing)
+            : workflowCreation.run(
+                sessionId,
+                getWorkflow(sessionId).pipe(
+                  Effect.flatMap((current) =>
+                    current
+                      ? Effect.succeed(current)
+                      : Effect.gen(function* () {
+                          let workflow: SessionIdleCompactionWorkflow | null = null;
+                          const created = yield* createSessionIdleCompactionWorkflow({
+                            infoCards,
+                            logger,
+                            opencode,
+                            onDrained: () =>
+                              workflow ? deleteWorkflow(sessionId, workflow) : Effect.void,
+                          });
+                          workflow = created;
+                          workflows.set(sessionId, created);
+                          return created;
+                        }),
+                  ),
+                ),
+              ),
+        ),
+      );
 
     const emitCompactionSummary = (input: { session: ChannelSession; messageId: string }) => {
       if (input.session.emittedCompactionSummaryMessageIds.has(input.messageId)) {
@@ -568,9 +483,9 @@ export const makeIdleCompactionWorkflow = (): Effect.Effect<
         ),
       emitSummary: emitCompactionSummary,
       shutdown: () =>
-        Ref.get(workflowsRef).pipe(
-          Effect.flatMap((state) =>
-            Effect.forEach(state.workflows.values(), (workflow) => workflow.shutdown(), {
+        Effect.sync(() => [...workflows.values()]).pipe(
+          Effect.flatMap((loadedWorkflows) =>
+            Effect.forEach(loadedWorkflows, (workflow) => workflow.shutdown(), {
               concurrency: "unbounded",
               discard: true,
             }),

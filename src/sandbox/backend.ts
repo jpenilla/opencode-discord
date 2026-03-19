@@ -370,24 +370,12 @@ const buildWorkerEnvironment = (config: LaunchSandboxedServerInput["config"]) =>
   return Object.fromEntries(allowedEntries);
 };
 
-const hostXdgHomes = () => {
-  const home = homedir();
-  return {
-    config: process.env.XDG_CONFIG_HOME ?? join(home, ".config"),
-    data: process.env.XDG_DATA_HOME ?? join(home, ".local", "share"),
-    state: process.env.XDG_STATE_HOME ?? join(home, ".local", "state"),
-    cache: process.env.XDG_CACHE_HOME ?? join(home, ".cache"),
-  };
-};
-
-const workerXdgHomes = (homeDir: string) => {
-  return {
-    config: join(homeDir, ".config"),
-    data: join(homeDir, ".local", "share"),
-    state: join(homeDir, ".local", "state"),
-    cache: join(homeDir, ".cache"),
-  };
-};
+const xdgHomes = (homeDir: string, env: Partial<NodeJS.ProcessEnv> = {}) => ({
+  config: env.XDG_CONFIG_HOME ?? join(homeDir, ".config"),
+  data: env.XDG_DATA_HOME ?? join(homeDir, ".local", "share"),
+  state: env.XDG_STATE_HOME ?? join(homeDir, ".local", "state"),
+  cache: env.XDG_CACHE_HOME ?? join(homeDir, ".cache"),
+});
 
 const copyInto = async (source: string, destination: string) => {
   if (!existsSync(source)) {
@@ -415,28 +403,25 @@ const copyConfigDirectory = async (sourceDir: string, destinationDir: string) =>
   }
 };
 
+const OPENCODE_STATE_FILES = [
+  ["data", "auth.json"],
+  ["data", "mcp-auth.json"],
+  ["state", "model.json"],
+] as const;
+
 const stageHostOpencodeState = async (homeDir: string) => {
-  const hostXdg = hostXdgHomes();
-  const workerXdg = workerXdgHomes(homeDir);
+  const hostXdg = xdgHomes(homedir(), process.env);
+  const workerXdg = xdgHomes(homeDir);
+  const workerOpencodeDirs = Object.values(workerXdg).map((directory) => join(directory, "opencode"));
 
-  await mkdir(join(workerXdg.config, "opencode"), { recursive: true });
-  await mkdir(join(workerXdg.data, "opencode"), { recursive: true });
-  await mkdir(join(workerXdg.state, "opencode"), { recursive: true });
-  await mkdir(join(workerXdg.cache, "opencode"), { recursive: true });
-
+  await Promise.all(workerOpencodeDirs.map((directory) => mkdir(directory, { recursive: true })));
   await copyConfigDirectory(join(hostXdg.config, "opencode"), join(workerXdg.config, "opencode"));
-  await copyInto(
-    join(hostXdg.data, "opencode", "auth.json"),
-    join(workerXdg.data, "opencode", "auth.json"),
-  );
-  await copyInto(
-    join(hostXdg.data, "opencode", "mcp-auth.json"),
-    join(workerXdg.data, "opencode", "mcp-auth.json"),
-  );
-  await copyInto(
-    join(hostXdg.state, "opencode", "model.json"),
-    join(workerXdg.state, "opencode", "model.json"),
-  );
+  for (const [root, file] of OPENCODE_STATE_FILES) {
+    await copyInto(
+      join(hostXdg[root], "opencode", file),
+      join(workerXdg[root], "opencode", file),
+    );
+  }
 
   return workerXdg;
 };
@@ -475,6 +460,27 @@ const existingReadOnlyPaths = (input: LaunchSandboxedServerInput, opencodeBin: s
   return paths.sort((left, right) => left.localeCompare(right));
 };
 
+const spawnServerProcess = async (input: {
+  backend: ResolvedSandboxBackend;
+  command: string;
+  args: string[];
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+}): Promise<SandboxedServer> => {
+  const proc = spawn(input.command, input.args, {
+    cwd: input.cwd,
+    env: input.env,
+  });
+  const url = await waitForServerUrl(proc, 10_000);
+  return {
+    backend: input.backend,
+    url,
+    close: () => {
+      proc.kill();
+    },
+  };
+};
+
 const launchUnsafeDevServer = async (
   input: LaunchSandboxedServerInput,
   port: number,
@@ -484,19 +490,13 @@ const launchUnsafeDevServer = async (
   await mkdir(xdg.cache, { recursive: true });
 
   const opencodeBin = resolveSpawnBinary(input.config.opencodeBin, "opencode");
-  const proc = spawn(opencodeBin, ["serve", "--hostname=127.0.0.1", `--port=${port}`], {
+  return await spawnServerProcess({
+    backend: "unsafe-dev",
+    command: opencodeBin,
+    args: ["serve", "--hostname=127.0.0.1", `--port=${port}`],
     cwd: input.workdir,
     env: baseServerEnvironment(input, homeDir, xdg, input.config.toolBridgeSocketPath),
   });
-
-  const url = await waitForServerUrl(proc, 10_000);
-  return {
-    backend: "unsafe-dev",
-    url,
-    close: () => {
-      proc.kill();
-    },
-  };
 };
 
 const launchBwrapServer = async (
@@ -550,7 +550,7 @@ const launchBwrapServer = async (
   const environment = baseServerEnvironment(
     input,
     SANDBOX_HOME_DIR,
-    workerXdgHomes(SANDBOX_HOME_DIR),
+    xdgHomes(SANDBOX_HOME_DIR),
     SANDBOX_TOOL_BRIDGE_SOCKET_PATH,
   );
   for (const [key, value] of Object.entries(environment)) {
@@ -569,18 +569,12 @@ const launchBwrapServer = async (
     `--port=${port}`,
   );
 
-  const proc = spawn(bwrapBin, args, {
+  return await spawnServerProcess({
+    backend: "bwrap",
+    command: bwrapBin,
+    args,
     cwd: input.workdir,
   });
-
-  const url = await waitForServerUrl(proc, 10_000);
-  return {
-    backend: "bwrap",
-    url,
-    close: () => {
-      proc.kill();
-    },
-  };
 };
 
 export const launchSandboxedServer = async (

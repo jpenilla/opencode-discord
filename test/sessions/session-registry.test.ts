@@ -41,7 +41,6 @@ const makeState = (): SessionRegistryState => ({
   sessionsByChannelId: new Map(),
   sessionsBySessionId: new Map(),
   activeRunsBySessionId: new Map(),
-  gatesByChannelId: new Map(),
 });
 
 const logger = {

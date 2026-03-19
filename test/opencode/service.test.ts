@@ -34,6 +34,85 @@ const logger: LoggerShape = {
   error: () => Effect.void,
 };
 
+const ok = <A>(data: A) => ({ data });
+const emptyEventStream = () => ({
+  stream: {
+    async *[Symbol.asyncIterator]() {},
+  },
+});
+
+type TestClientOverrides = {
+  global?: Record<string, unknown>;
+  session?: Record<string, unknown>;
+  question?: Record<string, unknown>;
+  permission?: Record<string, unknown>;
+};
+
+const makeClient = (overrides: TestClientOverrides = {}) =>
+  unsafeStub<SessionHandle["client"]>({
+    global: unsafeStub<SessionHandle["client"]["global"]>({
+      event: async () => emptyEventStream(),
+      health: async () => ok({ healthy: true }),
+      ...overrides.global,
+    }),
+    session: unsafeStub<SessionHandle["client"]["session"]>({
+      create: async () => ok({ id: "session-1" }),
+      get: async () => ok({ id: "session-1" }),
+      promptAsync: async () => ok(undefined),
+      message: async () => ok({ parts: [] }),
+      messages: async () => ok([]),
+      abort: async () => ok(true),
+      summarize: async () => ok(true),
+      ...overrides.session,
+    }),
+    question: unsafeStub<SessionHandle["client"]["question"]>({
+      reply: async () => ok(true),
+      reject: async () => ok(true),
+      ...overrides.question,
+    }),
+    permission: unsafeStub<SessionHandle["client"]["permission"]>({
+      reply: async () => ok(true),
+      ...overrides.permission,
+    }),
+  });
+
+const makeRuntime = (input: {
+  createClient?: () => SessionHandle["client"];
+  launchServer?: () => Promise<{ url: string; backend: "unsafe-dev"; close: () => void }>;
+} = {}) => ({
+  createClient: input.createClient ?? (() => makeClient()),
+  launchServer:
+    input.launchServer ??
+    (async () => ({
+      url: "http://opencode.invalid",
+      backend: "unsafe-dev" as const,
+      close: () => {},
+    })),
+  probeExecutables: () => ({
+    backend: "unsafe-dev" as const,
+    opencodeBin: "opencode",
+    bwrapBin: "bwrap",
+  }),
+  stageConfigDir: async () => ({
+    configDir: "/tmp/opencode-config",
+    cleanup: async () => {},
+  }),
+});
+
+const makeService = (input: {
+  logger?: LoggerShape;
+  eventQueue?: Queue.Queue<GlobalEvent>;
+  runtime?: Parameters<typeof makeRuntime>[0];
+}) =>
+  Effect.gen(function* () {
+    return yield* makeOpencodeService({
+      config: makeConfig(),
+      eventQueue: input.eventQueue ?? (yield* Queue.unbounded<GlobalEvent>()),
+      logger: input.logger ?? logger,
+      runtime: makeRuntime(input.runtime),
+    });
+  });
+
 describe("opencode log summaries", () => {
   test("logs a compact summary for tool events without raw tool payloads", () => {
     const summary = summarizeOpencodeEventForLog(
@@ -169,13 +248,11 @@ describe("makeOpencodeService", () => {
           const eventQueue = yield* Queue.unbounded<GlobalEvent>();
           const createStarted = yield* Deferred.make<void>();
 
-          const service = yield* makeOpencodeService({
-            config: makeConfig(),
+          const service = yield* makeService({
             eventQueue,
-            logger,
             runtime: {
               createClient: () =>
-                unsafeStub<SessionHandle["client"]>({
+                makeClient({
                   global: {
                     event: async ({ signal }: { signal: AbortSignal }) => {
                       signal.addEventListener(
@@ -195,11 +272,6 @@ describe("makeOpencodeService", () => {
                         },
                       };
                     },
-                    health: async () => ({
-                      data: {
-                        healthy: true,
-                      },
-                    }),
                   },
                   session: {
                     create: async () => {
@@ -208,44 +280,14 @@ describe("makeOpencodeService", () => {
                       );
                       return await new Promise(() => {});
                     },
-                    get: async () => ({
-                      data: {
-                        id: "session-1",
-                      },
-                    }),
-                    promptAsync: async () => ({ data: undefined }),
-                    message: async () => ({
-                      data: {
-                        parts: [],
-                      },
-                    }),
-                    messages: async () => ({ data: [] }),
-                    abort: async () => ({ data: true }),
-                    summarize: async () => ({ data: true }),
-                  },
-                  question: {
-                    reply: async () => ({ data: true }),
-                    reject: async () => ({ data: true }),
-                  },
-                  permission: {
-                    reply: async () => ({ data: true }),
                   },
                 }),
               launchServer: async () => ({
                 url: "http://opencode.invalid",
-                backend: "unsafe-dev" as const,
+                backend: "unsafe-dev",
                 close: () => {
                   serverClosed = true;
                 },
-              }),
-              probeExecutables: () => ({
-                backend: "unsafe-dev",
-                opencodeBin: "opencode",
-                bwrapBin: "bwrap",
-              }),
-              stageConfigDir: async () => ({
-                configDir: "/tmp/opencode-config",
-                cleanup: async () => {},
               }),
             },
           });
@@ -287,13 +329,11 @@ describe("makeOpencodeService", () => {
           let pendingNext: ((result: IteratorResult<GlobalEvent, undefined>) => void) | null = null;
           let abortSeen = false;
 
-          const service = yield* makeOpencodeService({
-            config: makeConfig(),
+          const service = yield* makeService({
             eventQueue,
-            logger,
             runtime: {
               createClient: () =>
-                unsafeStub<SessionHandle["client"]>({
+                makeClient({
                   global: {
                     event: async ({ signal }: { signal: AbortSignal }) => {
                       signal.addEventListener(
@@ -326,55 +366,8 @@ describe("makeOpencodeService", () => {
                         },
                       };
                     },
-                    health: async () => ({
-                      data: {
-                        healthy: true,
-                      },
-                    }),
-                  },
-                  session: {
-                    create: async () => ({
-                      data: {
-                        id: "session-1",
-                      },
-                    }),
-                    get: async () => ({
-                      data: {
-                        id: "session-1",
-                      },
-                    }),
-                    promptAsync: async () => ({ data: undefined }),
-                    message: async () => ({
-                      data: {
-                        parts: [],
-                      },
-                    }),
-                    messages: async () => ({ data: [] }),
-                    abort: async () => ({ data: true }),
-                    summarize: async () => ({ data: true }),
-                  },
-                  question: {
-                    reply: async () => ({ data: true }),
-                    reject: async () => ({ data: true }),
-                  },
-                  permission: {
-                    reply: async () => ({ data: true }),
                   },
                 }),
-              launchServer: async () => ({
-                url: "http://opencode.invalid",
-                backend: "unsafe-dev" as const,
-                close: () => {},
-              }),
-              probeExecutables: () => ({
-                backend: "unsafe-dev",
-                opencodeBin: "opencode",
-                bwrapBin: "bwrap",
-              }),
-              stageConfigDir: async () => ({
-                configDir: "/tmp/opencode-config",
-                cleanup: async () => {},
-              }),
             },
           });
 
@@ -401,8 +394,7 @@ describe("makeOpencodeService", () => {
           const streamStarted = yield* Deferred.make<void>();
           let rejectNext: ((error: unknown) => void) | null = null;
 
-          const service = yield* makeOpencodeService({
-            config: makeConfig(),
+          const service = yield* makeService({
             eventQueue,
             logger: {
               info: () => Effect.void,
@@ -414,7 +406,7 @@ describe("makeOpencodeService", () => {
             },
             runtime: {
               createClient: () =>
-                unsafeStub<SessionHandle["client"]>({
+                makeClient({
                   global: {
                     event: async ({ signal }: { signal: AbortSignal }) => {
                       signal.addEventListener(
@@ -442,55 +434,8 @@ describe("makeOpencodeService", () => {
                         },
                       };
                     },
-                    health: async () => ({
-                      data: {
-                        healthy: true,
-                      },
-                    }),
-                  },
-                  session: {
-                    create: async () => ({
-                      data: {
-                        id: "session-1",
-                      },
-                    }),
-                    get: async () => ({
-                      data: {
-                        id: "session-1",
-                      },
-                    }),
-                    promptAsync: async () => ({ data: undefined }),
-                    message: async () => ({
-                      data: {
-                        parts: [],
-                      },
-                    }),
-                    messages: async () => ({ data: [] }),
-                    abort: async () => ({ data: true }),
-                    summarize: async () => ({ data: true }),
-                  },
-                  question: {
-                    reply: async () => ({ data: true }),
-                    reject: async () => ({ data: true }),
-                  },
-                  permission: {
-                    reply: async () => ({ data: true }),
                   },
                 }),
-              launchServer: async () => ({
-                url: "http://opencode.invalid",
-                backend: "unsafe-dev" as const,
-                close: () => {},
-              }),
-              probeExecutables: () => ({
-                backend: "unsafe-dev",
-                opencodeBin: "opencode",
-                bwrapBin: "bwrap",
-              }),
-              stageConfigDir: async () => ({
-                configDir: "/tmp/opencode-config",
-                cleanup: async () => {},
-              }),
             },
           });
 
@@ -510,71 +455,17 @@ describe("makeOpencodeService", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const service = yield* makeOpencodeService({
-            config: makeConfig(),
-            eventQueue: yield* Queue.unbounded<GlobalEvent>(),
-            logger,
+          const service = yield* makeService({
             runtime: {
               createClient: () =>
-                unsafeStub<SessionHandle["client"]>({
-                  global: {
-                    event: async () => ({
-                      stream: {
-                        async *[Symbol.asyncIterator]() {},
-                      },
-                    }),
-                    health: async () => ({
-                      data: {
-                        healthy: true,
-                      },
-                    }),
-                  },
+                makeClient({
                   session: {
-                    create: async () => ({
-                      data: {
-                        id: "session-1",
-                      },
-                    }),
-                    get: async () => ({
-                      data: {
-                        id: "session-1",
-                      },
-                    }),
-                    promptAsync: async () => ({ data: undefined }),
-                    message: async () => ({
-                      data: {
-                        parts: [],
-                      },
-                    }),
-                    messages: async () => ({ data: [] }),
                     abort: async () => ({
                       data: false,
                       error: "already stopped",
                     }),
-                    summarize: async () => ({ data: true }),
-                  },
-                  question: {
-                    reply: async () => ({ data: true }),
-                    reject: async () => ({ data: true }),
-                  },
-                  permission: {
-                    reply: async () => ({ data: true }),
                   },
                 }),
-              launchServer: async () => ({
-                url: "http://opencode.invalid",
-                backend: "unsafe-dev" as const,
-                close: () => {},
-              }),
-              probeExecutables: () => ({
-                backend: "unsafe-dev",
-                opencodeBin: "opencode",
-                bwrapBin: "bwrap",
-              }),
-              stageConfigDir: async () => ({
-                configDir: "/tmp/opencode-config",
-                cleanup: async () => {},
-              }),
             },
           });
           const session = yield* service.createSession("/tmp/workdir", "Session", undefined);
