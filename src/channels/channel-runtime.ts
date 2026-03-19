@@ -1,10 +1,6 @@
 import { Effect, Layer, Ref, ServiceMap } from "effect";
 import { type Interaction, type Message } from "discord.js";
 
-import {
-  ChannelSettingsRuntime,
-  makeChannelSettingsRuntime,
-} from "@/channels/channel-settings-runtime.ts";
 import { AppConfig } from "@/config.ts";
 import { createCommandHandler } from "@/channels/command-handler.ts";
 import { InfoCards } from "@/discord/info-cards.ts";
@@ -37,18 +33,10 @@ export const ChannelRuntimeLayer = Layer.effect(
     const sessionBridge = yield* SessionChannelBridge;
     const channelSettingsPersistence = yield* ChannelSettingsPersistence;
     const shutdownStartedRef = yield* Ref.make(false);
-    const channelSettings = makeChannelSettingsRuntime({
-      defaults: {
-        showThinking: config.showThinkingByDefault,
-        showCompactionSummaries: config.showCompactionSummariesByDefault,
-      },
-      getPersistedChannelSettings: channelSettingsPersistence.getChannelSettings,
-      upsertPersistedChannelSettings: channelSettingsPersistence.upsertChannelSettings,
-      updateLoadedChannelSettings: sessionBridge.updateLoadedChannelSettings,
-    });
 
     const commandLayer = Layer.mergeAll(
-      Layer.succeed(ChannelSettingsRuntime, channelSettings),
+      Layer.succeed(AppConfig, config),
+      Layer.succeed(ChannelSettingsPersistence, channelSettingsPersistence),
       Layer.succeed(InfoCards, infoCards),
       Layer.succeed(SessionChannelBridge, sessionBridge),
       Layer.succeed(Logger, logger),
