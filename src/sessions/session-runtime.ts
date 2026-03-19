@@ -299,7 +299,8 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
     };
   };
 
-  const putSession = (session: ChannelSession) => Ref.update(deps.stateRef, (current) => writeSession(current, session));
+  const putSession = (session: ChannelSession) =>
+    Ref.update(deps.stateRef, (current) => writeSession(current, session));
 
   const deleteSession = (session: ChannelSession) =>
     Ref.update(deps.stateRef, (current) => removeSession(current, session));
@@ -309,7 +310,10 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
       session.activeRun = activeRun;
     }).pipe(Effect.andThen(Ref.update(deps.stateRef, (current) => writeSession(current, session))));
 
-  const replaceSessionHandle = (session: ChannelSession, replacement: ChannelSession["opencode"]) => {
+  const replaceSessionHandle = (
+    session: ChannelSession,
+    replacement: ChannelSession["opencode"],
+  ) => {
     const previousSessionId = session.opencode.sessionId;
     return Effect.sync(() => {
       session.opencode = replacement;
@@ -587,11 +591,13 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
 
   const getOrRestoreSession = (channelId: string): Effect.Effect<ChannelSession | null, unknown> =>
     withExistingOrGatedSession(channelId, () =>
-      deps.getPersistedSession(channelId).pipe(
-        Effect.flatMap((persisted) =>
-          persisted ? attachPersistedSession(channelId, persisted) : Effect.succeed(null),
+      deps
+        .getPersistedSession(channelId)
+        .pipe(
+          Effect.flatMap((persisted) =>
+            persisted ? attachPersistedSession(channelId, persisted) : Effect.succeed(null),
+          ),
         ),
-      ),
     ).pipe(Effect.map((session) => session as ChannelSession | null));
 
   const recreateSession = (
@@ -728,11 +734,10 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
   const shutdownSessions = () =>
     Ref.get(deps.stateRef).pipe(
       Effect.flatMap((state) =>
-        Effect.forEach(
-          state.sessionsByChannelId.values(),
-          unloadSession,
-          { concurrency: "unbounded", discard: true },
-        ),
+        Effect.forEach(state.sessionsByChannelId.values(), unloadSession, {
+          concurrency: "unbounded",
+          discard: true,
+        }),
       ),
     );
 

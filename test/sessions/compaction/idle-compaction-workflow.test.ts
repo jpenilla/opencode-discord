@@ -8,11 +8,7 @@ import { makeIdleCompactionWorkflow } from "@/sessions/compaction/idle-compactio
 import { OpencodeService, type OpencodeServiceShape } from "@/opencode/service.ts";
 import type { ChannelSession } from "@/sessions/session.ts";
 import { Logger } from "@/util/logging.ts";
-import {
-  getRef,
-  makeSessionHandle,
-  makeSilentLogger,
-} from "../../support/fixtures.ts";
+import { getRef, makeSessionHandle, makeSilentLogger } from "../../support/fixtures.ts";
 import { unsafeStub } from "../../support/stub.ts";
 
 const makeSession = (): ChannelSession =>

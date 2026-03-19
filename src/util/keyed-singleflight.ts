@@ -1,10 +1,7 @@
 import { Deferred, Effect, Exit } from "effect";
 
 export type KeyedSingleflight<K> = {
-  run: <A, E, R>(
-    key: K,
-    task: Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E, R>;
+  run: <A, E, R>(key: K, task: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
   waitAndRetry: <A, E, R>(key: K, task: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
 };
 

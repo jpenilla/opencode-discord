@@ -93,7 +93,8 @@ const makeLogger = (): LoggerShape => ({
   error: () => Effect.void,
 });
 
-const pushRef = <A>(ref: Ref.Ref<A[]>, value: A) => Ref.update(ref, (current) => [...current, value]);
+const pushRef = <A>(ref: Ref.Ref<A[]>, value: A) =>
+  Ref.update(ref, (current) => [...current, value]);
 const promptFor = (message: Message, prompt: string) =>
   buildOpencodePrompt({ message: promptMessageContext(message, prompt) });
 const queuedPromptFor = (message: Message, prompt: string) =>
@@ -358,20 +359,17 @@ const makeHarness = async (options: {
       guild: null,
       channel: messageChannel,
       reply: (payload: MessageCreateOptions) =>
-        Effect.runPromise(pushRef(replyTargetIds, input.id)).then(
-          () =>
-            Effect.runPromise(pushRef(replyPayloads, payload)).then(
-              async () => {
-                if (options.failComponentReplies && payload.components?.length) {
-                  throw new Error("question post failed");
-                }
-                if (payload.content) {
-                  await Effect.runPromise(pushRef(replies, String(payload.content)));
-                  await Effect.runPromise(Queue.offer(replyEvents, String(payload.content)));
-                }
-                return makePostedMessage(`reply-${input.id}`);
-              },
-            ),
+        Effect.runPromise(pushRef(replyTargetIds, input.id)).then(() =>
+          Effect.runPromise(pushRef(replyPayloads, payload)).then(async () => {
+            if (options.failComponentReplies && payload.components?.length) {
+              throw new Error("question post failed");
+            }
+            if (payload.content) {
+              await Effect.runPromise(pushRef(replies, String(payload.content)));
+              await Effect.runPromise(Queue.offer(replyEvents, String(payload.content)));
+            }
+            return makePostedMessage(`reply-${input.id}`);
+          }),
         ),
     });
 
@@ -439,8 +437,8 @@ const makeHarness = async (options: {
         return Effect.runPromise(pushRef(interactionReplies, payload));
       },
       update: (payload: unknown) =>
-        Effect.runPromise(pushRef(interactionEdits, payload)).then(
-          () => makePostedMessage("reply-message-1"),
+        Effect.runPromise(pushRef(interactionEdits, payload)).then(() =>
+          makePostedMessage("reply-message-1"),
         ),
       followUp: (_payload: unknown) => Promise.resolve(makePostedMessage("reply-message-1")),
       showModal: (_payload: unknown) => Promise.resolve(),
@@ -630,9 +628,7 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(await getRef(harness.promptCalls)).toEqual([
-      promptFor(message, "hello"),
-    ]);
+    expect(await getRef(harness.promptCalls)).toEqual([promptFor(message, "hello")]);
     expect(await getRef(harness.replies)).toEqual(["done"]);
     expect(await getRef(harness.createSessionCalls)).toHaveLength(1);
   });
@@ -673,7 +669,9 @@ describe("ChannelRuntimeLayer integration", () => {
         yield* channels.submit(secondMessage, { prompt: "follow up" });
         yield* Deferred.succeed(allowFirstPromptToFinish, undefined).pipe(Effect.ignore);
         expect(yield* Queue.take(harness.replyEvents)).toBe("intermediate");
-        expect(yield* Queue.take(harness.replyEvents)).toBe(`final:${queuedPromptFor(secondMessage, "follow up")}`);
+        expect(yield* Queue.take(harness.replyEvents)).toBe(
+          `final:${queuedPromptFor(secondMessage, "follow up")}`,
+        );
       }),
     );
 
@@ -739,18 +737,22 @@ describe("ChannelRuntimeLayer integration", () => {
         yield* Deferred.await(assistantFinished);
 
         expect(yield* Ref.get(harness.replies)).toEqual([]);
-        yield* sessions.getActiveRunBySessionId("session-1").pipe(
-          Effect.flatMap((activeRun) =>
-            activeRun ? Effect.void : Effect.fail(new Error("active run cleared before idle")),
-          ),
-        );
+        yield* sessions
+          .getActiveRunBySessionId("session-1")
+          .pipe(
+            Effect.flatMap((activeRun) =>
+              activeRun ? Effect.void : Effect.fail(new Error("active run cleared before idle")),
+            ),
+          );
 
         yield* channels.submit(secondMessage, { prompt: "follow up" });
         expect(yield* Ref.get(harness.replies)).toEqual([]);
 
         yield* Deferred.succeed(allowIdleStatus, undefined).pipe(Effect.ignore);
         expect(yield* Queue.take(harness.replyEvents)).toBe("intermediate");
-        expect(yield* Queue.take(harness.replyEvents)).toBe(`final:${queuedPromptFor(secondMessage, "follow up")}`);
+        expect(yield* Queue.take(harness.replyEvents)).toBe(
+          `final:${queuedPromptFor(secondMessage, "follow up")}`,
+        );
       }),
     );
 

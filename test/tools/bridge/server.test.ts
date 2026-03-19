@@ -173,10 +173,7 @@ const runBridgeRequest = (
   );
 };
 
-const expectPromptResponse = <A, E>(
-  effect: Effect.Effect<A, E>,
-  onTimeout: string,
-) =>
+const expectPromptResponse = <A, E>(effect: Effect.Effect<A, E>, onTimeout: string) =>
   Effect.runPromise(
     Effect.gen(function* () {
       const fiber = yield* effect.pipe(Effect.forkChild);
@@ -391,42 +388,42 @@ describe("handleToolBridgeRequest", () => {
 
     const response = await expectPromptResponse(
       handleToolBridgeRequest({
-          request: makeUploadRequest({
-            bridgeToken,
-            uploadMetadata,
-            requestFactory: () => ({
-              next: async () => {
-                nextCalls += 1;
-                if (nextCalls === 1) {
-                  return {
-                    done: false,
-                    value: Buffer.from("chunk-1"),
-                  };
-                }
-
-                throw new Error("request stream failed");
-              },
-            }),
-          }),
-          pathname: uploadPath,
-          config: makeConfig(bridgeToken),
-          sessions: makeSessions(
-            makeActiveRun(async (payload: MessageCreateOptions) => {
-              const attachment = (
-                payload.files?.[0] as { attachment?: NodeJS.ReadableStream } | undefined
-              )?.attachment;
-              if (!attachment) {
-                throw new Error("missing attachment stream");
+        request: makeUploadRequest({
+          bridgeToken,
+          uploadMetadata,
+          requestFactory: () => ({
+            next: async () => {
+              nextCalls += 1;
+              if (nextCalls === 1) {
+                return {
+                  done: false,
+                  value: Buffer.from("chunk-1"),
+                };
               }
 
-              await new Promise<void>((resolve, reject) => {
-                attachment.once("end", resolve);
-                attachment.once("error", reject);
-                attachment.resume?.();
-              });
-            }),
-          ),
-          logger: makeLogger([]),
+              throw new Error("request stream failed");
+            },
+          }),
+        }),
+        pathname: uploadPath,
+        config: makeConfig(bridgeToken),
+        sessions: makeSessions(
+          makeActiveRun(async (payload: MessageCreateOptions) => {
+            const attachment = (
+              payload.files?.[0] as { attachment?: NodeJS.ReadableStream } | undefined
+            )?.attachment;
+            if (!attachment) {
+              throw new Error("missing attachment stream");
+            }
+
+            await new Promise<void>((resolve, reject) => {
+              attachment.once("end", resolve);
+              attachment.once("error", reject);
+              attachment.resume?.();
+            });
+          }),
+        ),
+        logger: makeLogger([]),
       }),
       "request stream failure did not return promptly",
     );
@@ -444,51 +441,51 @@ describe("handleToolBridgeRequest", () => {
   test("returns a bridge failure when Discord closes a backpressured attachment stream", async () => {
     const response = await expectPromptResponse(
       handleToolBridgeRequest({
-          request: makeUploadRequest({
-            bridgeToken,
-            uploadMetadata,
-            chunks: [Buffer.alloc(1024 * 1024, 1)],
+        request: makeUploadRequest({
+          bridgeToken,
+          uploadMetadata,
+          chunks: [Buffer.alloc(1024 * 1024, 1)],
+        }),
+        pathname: uploadPath,
+        config: makeConfig(bridgeToken),
+        sessions: makeSessions(
+          makeActiveRun(async (payload: MessageCreateOptions) => {
+            const attachment = (
+              payload.files?.[0] as
+                | {
+                    attachment?: NodeJS.ReadableStream & {
+                      destroy: () => void;
+                      writableNeedDrain?: boolean;
+                    };
+                  }
+                | undefined
+            )?.attachment;
+            if (!attachment) {
+              throw new Error("missing attachment stream");
+            }
+
+            await new Promise<void>((resolve, reject) => {
+              const started = Date.now();
+              const poll = () => {
+                if (attachment.writableNeedDrain) {
+                  attachment.destroy();
+                  resolve();
+                  return;
+                }
+
+                if (Date.now() - started > 500) {
+                  reject(new Error("attachment stream never entered backpressure"));
+                  return;
+                }
+
+                setTimeout(poll, 1);
+              };
+
+              poll();
+            });
           }),
-          pathname: uploadPath,
-          config: makeConfig(bridgeToken),
-          sessions: makeSessions(
-            makeActiveRun(async (payload: MessageCreateOptions) => {
-              const attachment = (
-                payload.files?.[0] as
-                  | {
-                      attachment?: NodeJS.ReadableStream & {
-                        destroy: () => void;
-                        writableNeedDrain?: boolean;
-                      };
-                    }
-                  | undefined
-              )?.attachment;
-              if (!attachment) {
-                throw new Error("missing attachment stream");
-              }
-
-              await new Promise<void>((resolve, reject) => {
-                const started = Date.now();
-                const poll = () => {
-                  if (attachment.writableNeedDrain) {
-                    attachment.destroy();
-                    resolve();
-                    return;
-                  }
-
-                  if (Date.now() - started > 500) {
-                    reject(new Error("attachment stream never entered backpressure"));
-                    return;
-                  }
-
-                  setTimeout(poll, 1);
-                };
-
-                poll();
-              });
-            }),
-          ),
-          logger: makeLogger([]),
+        ),
+        logger: makeLogger([]),
       }),
       "destroyed backpressured attachment stream did not return promptly",
     );

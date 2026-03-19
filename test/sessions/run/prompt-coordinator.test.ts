@@ -9,11 +9,7 @@ import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import { enqueueRunRequest } from "@/sessions/request-routing.ts";
 import type { RunRequest } from "@/sessions/session.ts";
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
-import {
-  makeMessage,
-  makeSessionHandle,
-  makeSilentLogger,
-} from "../../support/fixtures.ts";
+import { makeMessage, makeSessionHandle, makeSilentLogger } from "../../support/fixtures.ts";
 
 const makeRequest = (
   id: string,

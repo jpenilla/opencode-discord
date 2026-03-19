@@ -681,9 +681,9 @@ describe("createCommandHandler", () => {
     });
 
     harness.interaction.commandName = "new-session";
-    await expect(Effect.runPromise(harness.runtime.handleInteraction(harness.interaction))).rejects.toThrow(
-      "invalidate failed",
-    );
+    await expect(
+      Effect.runPromise(harness.runtime.handleInteraction(harness.interaction)),
+    ).rejects.toThrow("invalidate failed");
 
     expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.replies)).toEqual([]);
@@ -707,7 +707,10 @@ describe("createCommandHandler", () => {
   });
 
   test("toggles thinking visibility for a channel without requiring a session", async () => {
-    const harness = await runInteraction(await makeHarness({ hasSession: false }), "toggle-thinking");
+    const harness = await runInteraction(
+      await makeHarness({ hasSession: false }),
+      "toggle-thinking",
+    );
     expect(await getRef(harness.replies)).toEqual([
       "Thinking messages are now disabled in this channel.",
     ]);

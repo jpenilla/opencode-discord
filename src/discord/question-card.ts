@@ -67,21 +67,14 @@ const STATUS_TITLES: Record<PendingQuestionBatchView["status"], string> = {
 const text = (content: string) => new TextDisplayBuilder().setContent(content);
 const addText = (container: ContainerBuilder, content: string | null) =>
   content ? container.addTextDisplayComponents(text(content)) : container;
-const button = (
-  action: QuestionAction,
-  label: string,
-  style: ButtonStyle,
-  disabled = false,
-) =>
+const button = (action: QuestionAction, label: string, style: ButtonStyle, disabled = false) =>
   new ButtonBuilder()
     .setCustomId(setQuestionActionId(action))
     .setLabel(label)
     .setStyle(style)
     .setDisabled(disabled);
-const addButtons = (
-  container: ContainerBuilder,
-  ...buttons: ReadonlyArray<ButtonBuilder>
-) => container.addActionRowComponents((row) => row.addComponents(...buttons));
+const addButtons = (container: ContainerBuilder, ...buttons: ReadonlyArray<ButtonBuilder>) =>
+  container.addActionRowComponents((row) => row.addComponents(...buttons));
 
 const compact = (value: string, maxLength: number) => {
   if (value.length <= maxLength) {

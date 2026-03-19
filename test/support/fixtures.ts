@@ -22,8 +22,11 @@ export const makeMessage = (
         attachments?: Message["attachments"];
       } & Record<string, unknown>),
 ): Message => {
-  const { attachmentCount = 0, attachments, ...message } =
-    typeof input === "string" ? { id: input } : input;
+  const {
+    attachmentCount = 0,
+    attachments,
+    ...message
+  } = typeof input === "string" ? { id: input } : input;
   return unsafeStub<Message>({
     attachments:
       attachments ??

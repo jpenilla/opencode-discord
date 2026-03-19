@@ -412,15 +412,14 @@ const OPENCODE_STATE_FILES = [
 const stageHostOpencodeState = async (homeDir: string) => {
   const hostXdg = xdgHomes(homedir(), process.env);
   const workerXdg = xdgHomes(homeDir);
-  const workerOpencodeDirs = Object.values(workerXdg).map((directory) => join(directory, "opencode"));
+  const workerOpencodeDirs = Object.values(workerXdg).map((directory) =>
+    join(directory, "opencode"),
+  );
 
   await Promise.all(workerOpencodeDirs.map((directory) => mkdir(directory, { recursive: true })));
   await copyConfigDirectory(join(hostXdg.config, "opencode"), join(workerXdg.config, "opencode"));
   for (const [root, file] of OPENCODE_STATE_FILES) {
-    await copyInto(
-      join(hostXdg[root], "opencode", file),
-      join(workerXdg[root], "opencode", file),
-    );
+    await copyInto(join(hostXdg[root], "opencode", file), join(workerXdg[root], "opencode", file));
   }
 
   return workerXdg;

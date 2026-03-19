@@ -375,8 +375,7 @@ export const makeIdleCompactionWorkflow = (): Effect.Effect<
     const workflowCreation = createKeyedSingleflight<string>();
     const workflows = new Map<string, SessionIdleCompactionWorkflow>();
 
-    const getWorkflow = (sessionId: string) =>
-      Effect.sync(() => workflows.get(sessionId) ?? null);
+    const getWorkflow = (sessionId: string) => Effect.sync(() => workflows.get(sessionId) ?? null);
 
     const deleteWorkflow = (sessionId: string, workflow?: SessionIdleCompactionWorkflow) =>
       Effect.sync(() => {

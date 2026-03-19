@@ -76,10 +76,12 @@ const makeClient = (overrides: TestClientOverrides = {}) =>
     }),
   });
 
-const makeRuntime = (input: {
-  createClient?: () => SessionHandle["client"];
-  launchServer?: () => Promise<{ url: string; backend: "unsafe-dev"; close: () => void }>;
-} = {}) => ({
+const makeRuntime = (
+  input: {
+    createClient?: () => SessionHandle["client"];
+    launchServer?: () => Promise<{ url: string; backend: "unsafe-dev"; close: () => void }>;
+  } = {},
+) => ({
   createClient: input.createClient ?? (() => makeClient()),
   launchServer:
     input.launchServer ??

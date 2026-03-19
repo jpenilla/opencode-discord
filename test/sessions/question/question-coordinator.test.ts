@@ -195,9 +195,7 @@ const makeHarness = async (options?: {
     effect: Effect.Effect<A, unknown>,
   ) =>
     effect.pipe(
-      Effect.tap((result) =>
-        result ? applySignalsAndTyping(result.signals) : Effect.void,
-      ),
+      Effect.tap((result) => (result ? applySignalsAndTyping(result.signals) : Effect.void)),
     );
 
   const runtime = {
@@ -370,7 +368,9 @@ describe("makeQuestionRuntime", () => {
         request: harness.request,
       }),
     );
-    await Effect.runPromise(harness.runtime.terminateForSession(harness.session.opencode.sessionId));
+    await Effect.runPromise(
+      harness.runtime.terminateForSession(harness.session.opencode.sessionId),
+    );
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
@@ -437,9 +437,9 @@ describe("makeQuestionRuntime", () => {
     );
 
     expect(await getRef(harness.replyCalls)).toEqual([]);
-    expect(await Effect.runPromise(harness.runtime.rawRuntime.hasPendingQuestions("session-1"))).toBe(
-      false,
-    );
+    expect(
+      await Effect.runPromise(harness.runtime.rawRuntime.hasPendingQuestions("session-1")),
+    ).toBe(false);
   });
 
   test("renders shutdown-expired questions immediately when shutdown begins", async () => {
@@ -550,7 +550,9 @@ describe("makeQuestionRuntime", () => {
     );
     expect(await getRef(harness.postedPayloads)).toHaveLength(1);
     expect(await getRef(harness.editedPayloads)).toHaveLength(1);
-    expect(JSON.stringify((await getRef(harness.editedPayloads))[0])).toContain("Questions expired");
+    expect(JSON.stringify((await getRef(harness.editedPayloads))[0])).toContain(
+      "Questions expired",
+    );
 
     const lateResult = await Effect.runPromise(
       harness.runtime.routeEvent({

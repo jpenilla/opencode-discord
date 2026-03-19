@@ -5,7 +5,10 @@ import { getEventSessionId } from "@/opencode/events.ts";
 import type { OpencodeServiceShape } from "@/opencode/service.ts";
 import { routeCompactionEvent } from "@/sessions/compaction/compaction-event-router.ts";
 import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
-import { routeQuestionEvent, type QuestionWorkflowEvent } from "@/sessions/question/question-runtime.ts";
+import {
+  routeQuestionEvent,
+  type QuestionWorkflowEvent,
+} from "@/sessions/question/question-runtime.ts";
 import { routeRunEvent } from "@/sessions/run/run-event-router.ts";
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";

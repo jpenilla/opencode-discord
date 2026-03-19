@@ -22,12 +22,7 @@ import {
   makeToolEvent,
   makeUserMessageUpdatedEvent,
 } from "../support/opencode-events.ts";
-import {
-  getRef,
-  makeMessage,
-  makeSessionHandle,
-  makeSilentLogger,
-} from "../support/fixtures.ts";
+import { getRef, makeMessage, makeSessionHandle, makeSilentLogger } from "../support/fixtures.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const makeSession = async (withActiveRun: boolean, showCompactionSummaries = true) => {
@@ -191,7 +186,8 @@ describe("createEventHandler", () => {
       session,
       idleCompactionWorkflow: {
         ...noopIdleCompactionWorkflow,
-        handleCompacted: (sessionId) => Ref.update(idleUpdates, (current) => [...current, sessionId]),
+        handleCompacted: (sessionId) =>
+          Ref.update(idleUpdates, (current) => [...current, sessionId]),
       },
     });
 
