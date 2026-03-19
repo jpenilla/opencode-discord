@@ -536,13 +536,18 @@ const makeHarness = async (options?: HarnessOptions) => {
   };
 };
 
+const runInteraction = async (
+  harness: Awaited<ReturnType<typeof makeHarness>>,
+  commandName: string,
+) => {
+  harness.interaction.commandName = commandName;
+  await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+  return harness;
+};
+
 describe("createCommandHandler", () => {
   test("rejects unhealthy compact requests after deferring", async () => {
-    const harness = await makeHarness({
-      sessionHealthy: false,
-    });
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    const harness = await runInteraction(await makeHarness({ sessionHealthy: false }), "compact");
     expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([
@@ -552,10 +557,7 @@ describe("createCommandHandler", () => {
   });
 
   test("starts compaction, posts the idle card, and clears it after completion", async () => {
-    const harness = await makeHarness();
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-
+    const harness = await runInteraction(await makeHarness(), "compact");
     await Effect.runPromise(Deferred.await(harness.compactStarted));
     expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.upsertedInfoCards)).toEqual([
@@ -580,72 +582,61 @@ describe("createCommandHandler", () => {
     expect(await getRef(harness.idleCardRef)).toBeNull();
   });
 
-  test("rolls back interruptRequested when interrupting fails", async () => {
-    const harness = await makeHarness({
-      interruptResult: "failure",
-      hasActiveRun: true,
+  for (const scenario of [
+    {
+      name: "rolls back interruptRequested when interrupting fails",
+      options: { interruptResult: "failure" as const, hasActiveRun: true },
+      expectActiveRunInterrupted: false,
+      expectedEdit: formatErrorResponse("## ❌ Failed to interrupt run", "interrupt failed"),
+    },
+    {
+      name: "requests interruption of the active run without claiming success yet",
+      options: { hasActiveRun: true },
+      expectActiveRunInterrupted: true,
+      expectedEdit: "Requested interruption of the active OpenCode run.",
+    },
+  ]) {
+    test(scenario.name, async () => {
+      const harness = await runInteraction(await makeHarness(scenario.options), "interrupt");
+      expect(harness.activeRun.interruptRequested).toBe(scenario.expectActiveRunInterrupted);
+      expect(await getRef(harness.typingStopCount)).toBe(0);
+      expect(await getRef(harness.replies)).toEqual([]);
+      expect(await getRef(harness.edits)).toEqual([scenario.expectedEdit]);
     });
-    harness.interaction.commandName = "interrupt";
+  }
 
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-    expect(harness.activeRun.interruptRequested).toBe(false);
-    expect(await getRef(harness.replies)).toEqual([]);
-    expect(await getRef(harness.edits)).toEqual([
-      formatErrorResponse("## ❌ Failed to interrupt run", "interrupt failed"),
-    ]);
-  });
-
-  test("requests interruption of the active run without claiming success yet", async () => {
-    const harness = await makeHarness({
-      hasActiveRun: true,
+  for (const scenario of [
+    {
+      name: "rejects interrupt while a question prompt is pending",
+      options: { hasActiveRun: true, hasPendingQuestions: true },
+      expectActiveRunInterrupted: false,
+    },
+    {
+      name: "rejects interrupt while a question prompt is pending without an active run",
+      options: { hasPendingQuestions: true },
+      expectActiveRunInterrupted: undefined,
+    },
+  ]) {
+    test(scenario.name, async () => {
+      const harness = await runInteraction(await makeHarness(scenario.options), "interrupt");
+      if (scenario.expectActiveRunInterrupted !== undefined) {
+        expect(harness.activeRun.interruptRequested).toBe(scenario.expectActiveRunInterrupted);
+      }
+      expect(await getRef(harness.defers)).toBe(0);
+      expect(await getRef(harness.replies)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
+      expect(await getRef(harness.edits)).toEqual([]);
+      expect(await getRef(harness.typingStopCount)).toBe(0);
     });
-    harness.interaction.commandName = "interrupt";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-    expect(harness.activeRun.interruptRequested).toBe(true);
-    expect(await getRef(harness.typingStopCount)).toBe(0);
-    expect(await getRef(harness.replies)).toEqual([]);
-    expect(await getRef(harness.edits)).toEqual([
-      "Requested interruption of the active OpenCode run.",
-    ]);
-  });
-
-  test("rejects interrupt while a question prompt is pending", async () => {
-    const harness = await makeHarness({
-      hasActiveRun: true,
-      hasPendingQuestions: true,
-    });
-    harness.interaction.commandName = "interrupt";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-    expect(harness.activeRun.interruptRequested).toBe(false);
-    expect(await getRef(harness.defers)).toBe(0);
-    expect(await getRef(harness.replies)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
-    expect(await getRef(harness.edits)).toEqual([]);
-    expect(await getRef(harness.typingStopCount)).toBe(0);
-  });
-
-  test("rejects interrupt while a question prompt is pending without an active run", async () => {
-    const harness = await makeHarness({
-      hasPendingQuestions: true,
-    });
-    harness.interaction.commandName = "interrupt";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-    expect(await getRef(harness.defers)).toBe(0);
-    expect(await getRef(harness.replies)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
-    expect(await getRef(harness.edits)).toEqual([]);
-    expect(await getRef(harness.typingStopCount)).toBe(0);
-  });
+  }
 
   test("reports a lost interrupt when questions become pending right after the interrupt request succeeds", async () => {
-    const harness = await makeHarness({
-      hasActiveRun: true,
-      hasPendingQuestionsSequence: [false, true],
-    });
-    harness.interaction.commandName = "interrupt";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    const harness = await runInteraction(
+      await makeHarness({
+        hasActiveRun: true,
+        hasPendingQuestionsSequence: [false, true],
+      }),
+      "interrupt",
+    );
     expect(harness.activeRun.interruptRequested).toBe(false);
     expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
@@ -653,13 +644,12 @@ describe("createCommandHandler", () => {
 
   test("interrupts an active compaction card without posting a run card", async () => {
     const harness = await makeHarness();
-    harness.interaction.commandName = "interrupt";
     await Effect.runPromise(
       Ref.set(harness.idleCardRef, unsafeStub<Message>({ id: "compaction-card" })),
     );
     await Effect.runPromise(Ref.set(harness.idleCompactionActive, true));
 
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    await runInteraction(harness, "interrupt");
     expect(await getRef(harness.typingStopCount)).toBe(0);
     expect(await getRef(harness.compactionUpdates)).toEqual([
       {
@@ -678,13 +668,12 @@ describe("createCommandHandler", () => {
     const harness = await makeHarness({
       interruptResult: "failure",
     });
-    harness.interaction.commandName = "interrupt";
     await Effect.runPromise(
       Ref.set(harness.idleCardRef, unsafeStub<Message>({ id: "compaction-card" })),
     );
     await Effect.runPromise(Ref.set(harness.idleCompactionActive, true));
 
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    await runInteraction(harness, "interrupt");
     expect(await getRef(harness.idleInterruptRequested)).toBe(false);
     expect(await getRef(harness.compactionUpdates)).toEqual([
       {
@@ -704,12 +693,7 @@ describe("createCommandHandler", () => {
   });
 
   test("clears the channel session for the next triggered message", async () => {
-    const harness = await makeHarness({
-      hasSession: false,
-    });
-    harness.interaction.commandName = "new-session";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    const harness = await runInteraction(await makeHarness({ hasSession: false }), "new-session");
     expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.invalidatedSessions)).toEqual([
       {
@@ -730,13 +714,13 @@ describe("createCommandHandler", () => {
   });
 
   test("logs and still replies when the fresh session info card cannot be posted", async () => {
-    const harness = await makeHarness({
-      hasSession: false,
-      failInfoCardUpsert: true,
-    });
-    harness.interaction.commandName = "new-session";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    const harness = await runInteraction(
+      await makeHarness({
+        hasSession: false,
+        failInfoCardUpsert: true,
+      }),
+      "new-session",
+    );
     expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.edits)).toEqual([
       "Cleared this channel's current OpenCode session. The next triggered message here will start a new session with fresh chat history. Workspace files were left in place.",
@@ -749,11 +733,11 @@ describe("createCommandHandler", () => {
       hasSession: false,
       invalidateResult: "failure",
     });
-    harness.interaction.commandName = "new-session";
 
-    await expect(
-      Effect.runPromise(harness.runtime.handleInteraction(harness.interaction)),
-    ).rejects.toThrow("invalidate failed");
+    harness.interaction.commandName = "new-session";
+    await expect(Effect.runPromise(harness.runtime.handleInteraction(harness.interaction))).rejects.toThrow(
+      "invalidate failed",
+    );
 
     expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.replies)).toEqual([]);
@@ -762,80 +746,52 @@ describe("createCommandHandler", () => {
     ]);
   });
 
-  test("rejects /new-session while a run is active", async () => {
-    const harness = await makeHarness({
-      hasActiveRun: true,
+  for (const scenario of [
+    {
+      name: "rejects /new-session while a run is active",
+      options: { hasActiveRun: true },
+      expectedReply:
+        "OpenCode is busy in this channel right now. Wait for the current run to finish or use /interrupt before starting a fresh session.",
+    },
+    {
+      name: "rejects /new-session while a question prompt is pending",
+      options: { hasPendingQuestions: true },
+      expectedReply: QUESTION_PENDING_NEW_SESSION_MESSAGE,
+    },
+    {
+      name: "rejects /new-session while compaction is active",
+      options: { hasIdleCompaction: true },
+      expectedReply:
+        "OpenCode is compacting this channel right now. Wait for compaction to finish or use /interrupt before starting a fresh session.",
+    },
+    {
+      name: "rejects /new-session while queued work is still pending",
+      options: { hasQueuedWork: true },
+      expectedReply:
+        "OpenCode still has queued work for this channel. Wait for it to finish before starting a fresh session.",
+    },
+    {
+      name: "rejects /new-session on other busy states",
+      options: { hasOtherBusyState: true },
+      expectedReply: NEW_SESSION_BUSY_MESSAGE,
+    },
+  ]) {
+    test(scenario.name, async () => {
+      const harness = await runInteraction(await makeHarness(scenario.options), "new-session");
+      expect(await getRef(harness.defers)).toBe(0);
+      expect(await getRef(harness.replies)).toEqual([scenario.expectedReply]);
+      expect(await getRef(harness.invalidatedSessions)).toEqual([]);
     });
-    harness.interaction.commandName = "new-session";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-    expect(await getRef(harness.defers)).toBe(0);
-    expect(await getRef(harness.replies)).toEqual([
-      "OpenCode is busy in this channel right now. Wait for the current run to finish or use /interrupt before starting a fresh session.",
-    ]);
-    expect(await getRef(harness.invalidatedSessions)).toEqual([]);
-  });
-
-  test("rejects /new-session while a question prompt is pending", async () => {
-    const harness = await makeHarness({
-      hasPendingQuestions: true,
-    });
-    harness.interaction.commandName = "new-session";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-    expect(await getRef(harness.defers)).toBe(0);
-    expect(await getRef(harness.replies)).toEqual([QUESTION_PENDING_NEW_SESSION_MESSAGE]);
-    expect(await getRef(harness.invalidatedSessions)).toEqual([]);
-  });
-
-  test("rejects /new-session while compaction is active", async () => {
-    const harness = await makeHarness({
-      hasIdleCompaction: true,
-    });
-    harness.interaction.commandName = "new-session";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-    expect(await getRef(harness.defers)).toBe(0);
-    expect(await getRef(harness.replies)).toEqual([
-      "OpenCode is compacting this channel right now. Wait for compaction to finish or use /interrupt before starting a fresh session.",
-    ]);
-    expect(await getRef(harness.invalidatedSessions)).toEqual([]);
-  });
-
-  test("rejects /new-session while queued work is still pending", async () => {
-    const harness = await makeHarness({
-      hasQueuedWork: true,
-    });
-    harness.interaction.commandName = "new-session";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-    expect(await getRef(harness.defers)).toBe(0);
-    expect(await getRef(harness.replies)).toEqual([
-      "OpenCode still has queued work for this channel. Wait for it to finish before starting a fresh session.",
-    ]);
-    expect(await getRef(harness.invalidatedSessions)).toEqual([]);
-  });
-
-  test("rejects /new-session on other busy states", async () => {
-    const harness = await makeHarness({
-      hasOtherBusyState: true,
-    });
-    harness.interaction.commandName = "new-session";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
-    expect(await getRef(harness.defers)).toBe(0);
-    expect(await getRef(harness.replies)).toEqual([NEW_SESSION_BUSY_MESSAGE]);
-    expect(await getRef(harness.invalidatedSessions)).toEqual([]);
-  });
+  }
 
   test("rechecks busy state when /new-session loses the invalidate race", async () => {
-    const harness = await makeHarness({
-      invalidateResult: "busy",
-      hasPendingQuestionsSequence: [false, true],
-    });
-    harness.interaction.commandName = "new-session";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    const harness = await runInteraction(
+      await makeHarness({
+        invalidateResult: "busy",
+        hasPendingQuestionsSequence: [false, true],
+      }),
+      "new-session",
+    );
     expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.replies)).toEqual([]);
     expect(await getRef(harness.edits)).toEqual([QUESTION_PENDING_NEW_SESSION_MESSAGE]);
@@ -843,12 +799,7 @@ describe("createCommandHandler", () => {
   });
 
   test("toggles thinking visibility for a channel without requiring a session", async () => {
-    const harness = await makeHarness({
-      hasSession: false,
-    });
-    harness.interaction.commandName = "toggle-thinking";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    const harness = await runInteraction(await makeHarness({ hasSession: false }), "toggle-thinking");
     expect(await getRef(harness.replies)).toEqual([
       "Thinking messages are now disabled in this channel.",
     ]);
@@ -867,10 +818,7 @@ describe("createCommandHandler", () => {
   });
 
   test("toggles compaction summary visibility and updates the loaded session", async () => {
-    const harness = await makeHarness();
-    harness.interaction.commandName = "toggle-compaction-summaries";
-
-    await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+    const harness = await runInteraction(await makeHarness(), "toggle-compaction-summaries");
     expect(await getRef(harness.replies)).toEqual([
       "Compaction summaries are now disabled in this channel.",
     ]);

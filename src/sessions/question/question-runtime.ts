@@ -1,45 +1,70 @@
-import { Deferred, Effect, Ref } from "effect";
+import type { Event, QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
+import { Effect, Ref } from "effect";
 import { type Interaction, type Message } from "discord.js";
 
-import { parseQuestionActionId, questionInteractionReply } from "@/discord/question-card.ts";
 import {
-  createQuestionWorkflow,
-  type QuestionWorkflow,
-  type QuestionWorkflowEvent,
-  type QuestionWorkflowSignal,
-} from "@/sessions/question/question-coordinator.ts";
-import type { SessionContext } from "@/sessions/session-runtime.ts";
+  buildQuestionAnswers,
+  buildQuestionModal,
+  clearQuestionDraft,
+  createQuestionMessageCreate,
+  createQuestionMessageEdit,
+  parseQuestionActionId,
+  QUESTION_OPTIONS_PER_PAGE,
+  questionDrafts,
+  questionInteractionReply,
+  questionOptionPageCount,
+  readQuestionModalValue,
+  setQuestionCustomAnswer,
+  setQuestionOptionSelection,
+} from "@/discord/question-card.ts";
+import { getEventByType } from "@/opencode/events.ts";
 import type { OpencodeServiceShape } from "@/opencode/service.ts";
+import {
+  activateQuestionBatch,
+  attachQuestionMessage,
+  createQuestionWorkflowBatch,
+  isPendingQuestionBatch,
+  isTerminalQuestionBatch,
+  persistQuestionBatchUpdate,
+  questionBatchView,
+  setQuestionBatchStatus,
+  terminateQuestionBatch,
+  type QuestionWorkflowBatch,
+} from "@/sessions/question/question-workflow-state.ts";
+import type { QuestionWorkflowSignal } from "@/sessions/question/question-run-state.ts";
+import type { SessionContext } from "@/sessions/session-runtime.ts";
+import {
+  currentPromptReplyTargetMessage,
+  questionUiFailureOutcome,
+  type ActiveRun,
+  type ChannelSession,
+} from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
-type WorkflowGate<A> = Deferred.Deferred<A, unknown>;
-type QuestionRuntimeState = {
-  workflows: Map<string, QuestionWorkflow>;
-  requestRoutes: Map<string, string>;
-  gates: Map<string, WorkflowGate<QuestionWorkflow>>;
-};
-type QuestionWorkflowGate = WorkflowGate<QuestionWorkflow>;
-type QuestionWorkflowGateDecision =
-  | { type: "existing"; workflow: QuestionWorkflow }
-  | { type: "await"; gate: QuestionWorkflowGate }
-  | { type: "create"; gate: QuestionWorkflowGate };
+export type QuestionWorkflowEvent =
+  | { type: "asked"; sessionId: string; request: QuestionRequest }
+  | {
+      type: "replied";
+      sessionId: string;
+      requestId: string;
+      answers: ReadonlyArray<QuestionAnswer>;
+    }
+  | { type: "rejected"; sessionId: string; requestId: string };
 
 export type RoutedQuestionSignals = {
   sessionId: string;
   signals: ReadonlyArray<QuestionWorkflowSignal>;
 };
 
-const SHUTDOWN_QUESTION_RPC_TIMEOUT = "1 second";
-
 export type QuestionRuntime = {
   handleEvent: (
-    event: { sessionId: string } & QuestionWorkflowEvent,
+    event: QuestionWorkflowEvent,
   ) => Effect.Effect<RoutedQuestionSignals | null, unknown>;
   routeInteraction: (
     interaction: Interaction,
   ) => Effect.Effect<RoutedQuestionSignals | null, unknown>;
-  hasPendingQuestions: (sessionId: string) => Effect.Effect<boolean, unknown>;
-  hasPendingQuestionsAnywhere: () => Effect.Effect<boolean, unknown>;
+  hasPendingQuestions: (sessionId: string) => Effect.Effect<boolean>;
+  hasPendingQuestionsAnywhere: () => Effect.Effect<boolean>;
   terminateSession: (
     sessionId: string,
   ) => Effect.Effect<ReadonlyArray<QuestionWorkflowSignal>, unknown>;
@@ -56,240 +81,885 @@ type QuestionRuntimeDeps = {
   formatError: (error: unknown) => string;
 };
 
+type QuestionSessionState = {
+  stopped: boolean;
+  batches: Map<string, QuestionWorkflowBatch>;
+};
+
+type QuestionRuntimeState = {
+  sessions: Map<string, QuestionSessionState>;
+  requestRoutes: Map<string, string>;
+};
+
+type PersistQuestionBatchResult =
+  | { type: "updated"; batch: QuestionWorkflowBatch }
+  | { type: "missing" }
+  | { type: "conflict"; batch: QuestionWorkflowBatch };
+
+type RoutedQuestionBatch =
+  | { sessionId: string; batch: QuestionWorkflowBatch | null }
+  | null;
+
+type RemoteQuestionAction = {
+  sessionId: string;
+  interaction: Interaction;
+  requestId: string;
+  expectedVersion: number;
+  actorId: string;
+  invoke: (
+    session: ChannelSession["opencode"],
+    requestId: string,
+  ) => Effect.Effect<void, unknown>;
+  followUpFailure: (error: unknown) => string;
+  onSuccess: (batch: QuestionWorkflowBatch) => Effect.Effect<ReadonlyArray<QuestionWorkflowSignal>>;
+};
+
+const SHUTDOWN_QUESTION_RPC_TIMEOUT = "1 second";
+
+const noSignals: ReadonlyArray<QuestionWorkflowSignal> = [];
+const signal = <A extends QuestionWorkflowSignal>(value: A): ReadonlyArray<A> => [value];
+const appendSignals = (
+  left: ReadonlyArray<QuestionWorkflowSignal>,
+  right: ReadonlyArray<QuestionWorkflowSignal>,
+): ReadonlyArray<QuestionWorkflowSignal> => (left.length === 0 ? right : [...left, ...right]);
+
 const createQuestionRuntimeState = (): QuestionRuntimeState => ({
-  workflows: new Map(),
+  sessions: new Map(),
   requestRoutes: new Map(),
-  gates: new Map(),
 });
 
-const QuestionRuntimeState = {
-  getWorkflow: (state: QuestionRuntimeState, sessionId: string) =>
-    state.workflows.get(sessionId) ?? null,
-  lookupRequest: (state: QuestionRuntimeState, requestId: string) => {
-    const sessionId = state.requestRoutes.get(requestId) ?? null;
-    if (!sessionId) {
-      return null;
-    }
+const emptyQuestionSessionState = (): QuestionSessionState => ({
+  stopped: false,
+  batches: new Map(),
+});
 
-    return {
-      sessionId,
-      workflow: state.workflows.get(sessionId) ?? null,
-    } as const;
-  },
-  trackRequest: (state: QuestionRuntimeState, sessionId: string, requestId: string) => {
-    const requestRoutes = new Map(state.requestRoutes);
-    requestRoutes.set(requestId, sessionId);
-    return {
-      ...state,
-      requestRoutes,
-    };
-  },
-  releaseRequest: (state: QuestionRuntimeState, requestId: string) => {
-    if (!state.requestRoutes.has(requestId)) {
-      return state;
-    }
+const writeSessionState = (
+  state: QuestionRuntimeState,
+  sessionId: string,
+  session: QuestionSessionState,
+): QuestionRuntimeState => {
+  const sessions = new Map(state.sessions);
+  if (session.stopped || session.batches.size > 0) {
+    sessions.set(sessionId, session);
+  } else {
+    sessions.delete(sessionId);
+  }
+  return {
+    ...state,
+    sessions,
+  };
+};
 
-    const requestRoutes = new Map(state.requestRoutes);
-    requestRoutes.delete(requestId);
-    return {
-      ...state,
-      requestRoutes,
-    };
-  },
-  beginWorkflowCreate: (
-    state: QuestionRuntimeState,
-    sessionId: string,
-    gate: QuestionWorkflowGate,
-  ): readonly [QuestionWorkflowGateDecision, QuestionRuntimeState] => {
-    const existing = state.workflows.get(sessionId);
-    if (existing) {
-      return [{ type: "existing", workflow: existing }, state];
-    }
+const dropRequestRoute = (state: QuestionRuntimeState, requestId: string): QuestionRuntimeState => {
+  if (!state.requestRoutes.has(requestId)) {
+    return state;
+  }
 
-    const currentGate = state.gates.get(sessionId);
-    if (currentGate) {
-      return [{ type: "await", gate: currentGate }, state];
-    }
+  const requestRoutes = new Map(state.requestRoutes);
+  requestRoutes.delete(requestId);
+  return {
+    ...state,
+    requestRoutes,
+  };
+};
 
-    const gates = new Map(state.gates);
-    gates.set(sessionId, gate);
-    return [
-      { type: "create", gate },
-      {
-        ...state,
-        gates,
-      },
-    ];
+export const routeQuestionEvent = (
+  event: Event,
+  deps: {
+    sessionId: string;
+    handleQuestionEvent: (event: QuestionWorkflowEvent) => Effect.Effect<void, unknown>;
   },
-  storeWorkflow: (
-    state: QuestionRuntimeState,
-    sessionId: string,
-    gate: QuestionWorkflowGate,
-    workflow: QuestionWorkflow,
-  ) => {
-    if (state.gates.get(sessionId) !== gate) {
-      return state;
-    }
+): Effect.Effect<void, unknown> =>
+  Effect.gen(function* () {
+    const questionAsked = getEventByType(event, "question.asked")?.properties ?? null;
+    const questionReplied = getEventByType(event, "question.replied")?.properties ?? null;
+    const questionRejected = getEventByType(event, "question.rejected")?.properties ?? null;
 
-    const workflows = new Map(state.workflows);
-    workflows.set(sessionId, workflow);
-    const gates = new Map(state.gates);
-    gates.delete(sessionId);
-    return {
-      ...state,
-      workflows,
-      gates,
-    };
-  },
-  clearWorkflowCreate: (
-    state: QuestionRuntimeState,
-    sessionId: string,
-    gate: QuestionWorkflowGate,
-  ) => {
-    if (state.gates.get(sessionId) !== gate) {
-      return state;
+    if (questionAsked) {
+      yield* deps.handleQuestionEvent({
+        type: "asked",
+        sessionId: deps.sessionId,
+        request: questionAsked,
+      });
     }
-
-    const gates = new Map(state.gates);
-    gates.delete(sessionId);
-    return {
-      ...state,
-      gates,
-    };
-  },
-  deleteWorkflow: (state: QuestionRuntimeState, sessionId: string, workflow?: QuestionWorkflow) => {
-    const existing = state.workflows.get(sessionId);
-    if (!existing || (workflow && existing !== workflow)) {
-      return state;
+    if (questionReplied) {
+      yield* deps.handleQuestionEvent({
+        type: "replied",
+        sessionId: deps.sessionId,
+        requestId: questionReplied.requestID,
+        answers: questionReplied.answers,
+      });
     }
-
-    const workflows = new Map(state.workflows);
-    workflows.delete(sessionId);
-    return {
-      ...state,
-      workflows,
-    };
-  },
-} as const;
+    if (questionRejected) {
+      yield* deps.handleQuestionEvent({
+        type: "rejected",
+        sessionId: deps.sessionId,
+        requestId: questionRejected.requestID,
+      });
+    }
+  });
 
 export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<QuestionRuntime> =>
   Effect.gen(function* () {
-    const runtimeStateRef = yield* Ref.make(createQuestionRuntimeState());
-    const stoppedSessionEventIdsRef = yield* Ref.make(new Set<string>());
-    const readState = () => Ref.get(runtimeStateRef);
-    const updateState = (f: (state: QuestionRuntimeState) => QuestionRuntimeState) =>
-      Ref.update(runtimeStateRef, f);
-    const readStoppedSessionEventIds = () => Ref.get(stoppedSessionEventIdsRef);
-    const stopHandlingSessionEvents = (sessionId: string) =>
-      Ref.update(stoppedSessionEventIdsRef, (current) => {
-        if (current.has(sessionId)) {
-          return current;
+    const stateRef = yield* Ref.make(createQuestionRuntimeState());
+
+    const readState = () => Ref.get(stateRef);
+    const getSessionState = (sessionId: string) =>
+      readState().pipe(Effect.map((state) => state.sessions.get(sessionId) ?? null));
+    const getQuestionBatch = (requestId: string) =>
+      readState().pipe(
+        Effect.map((state): RoutedQuestionBatch => {
+          const sessionId = state.requestRoutes.get(requestId);
+          if (!sessionId) {
+            return null;
+          }
+          return {
+            sessionId,
+            batch: state.sessions.get(sessionId)?.batches.get(requestId) ?? null,
+          };
+        }),
+      );
+
+    const deleteQuestionBatch = (sessionId: string, requestId: string) =>
+      Ref.modify(stateRef, (current): readonly [QuestionWorkflowBatch | null, QuestionRuntimeState] => {
+        const session = current.sessions.get(sessionId);
+        const batch = session?.batches.get(requestId) ?? null;
+        if (!batch || !session) {
+          return [null, current];
         }
 
-        const next = new Set(current);
-        next.add(sessionId);
-        return next;
+        const batches = new Map(session.batches);
+        batches.delete(requestId);
+        return [
+          batch,
+          writeSessionState(dropRequestRoute(current, requestId), sessionId, {
+            ...session,
+            batches,
+          }),
+        ];
       });
-    const getQuestionWorkflow = (sessionId: string) =>
-      readState().pipe(Effect.map((state) => QuestionRuntimeState.getWorkflow(state, sessionId)));
-    const getQuestionWorkflowGate = (sessionId: string) =>
-      readState().pipe(Effect.map((state) => state.gates.get(sessionId) ?? null));
-    const getQuestionWorkflowByRequestId = (requestId: string) =>
-      readState().pipe(Effect.map((state) => QuestionRuntimeState.lookupRequest(state, requestId)));
 
-    const getOrCreateQuestionWorkflow = (sessionId: string) =>
-      Effect.gen(function* () {
-        const gate = yield* Deferred.make<QuestionWorkflow, unknown>();
-        const decision = yield* Ref.modify(
-          runtimeStateRef,
-          (current): readonly [QuestionWorkflowGateDecision, QuestionRuntimeState] =>
-            QuestionRuntimeState.beginWorkflowCreate(current, sessionId, gate),
-        );
-
-        switch (decision.type) {
-          case "existing":
-            return decision.workflow;
-          case "await":
-            return yield* Deferred.await(decision.gate);
-          case "create":
-            break;
+    const updateQuestionBatch = (
+      sessionId: string,
+      requestId: string,
+      update: (batch: QuestionWorkflowBatch) => QuestionWorkflowBatch | null,
+    ) =>
+      Ref.modify(stateRef, (current): readonly [QuestionWorkflowBatch | null, QuestionRuntimeState] => {
+        const session = current.sessions.get(sessionId);
+        const existing = session?.batches.get(requestId);
+        if (!existing || !session) {
+          return [null, current];
         }
 
-        let workflow: QuestionWorkflow | null = null;
-        const exit = yield* createQuestionWorkflow({
-          getSessionContext: () => deps.getSessionContext(sessionId),
-          replyToQuestion: deps.replyToQuestion,
-          rejectQuestion: deps.rejectQuestion,
-          sendQuestionUiFailure: deps.sendQuestionUiFailure,
-          trackRequestId: (requestId: string) =>
-            updateState((state) => QuestionRuntimeState.trackRequest(state, sessionId, requestId)),
-          releaseRequestId: (requestId: string) =>
-            updateState((state) => QuestionRuntimeState.releaseRequest(state, requestId)),
-          onDrained: () =>
-            workflow
-              ? updateState((state) =>
-                  QuestionRuntimeState.deleteWorkflow(state, sessionId, workflow ?? undefined),
-                )
-              : Effect.void,
-          logger: deps.logger,
-          formatError: deps.formatError,
-        }).pipe(
-          Effect.tap((created) =>
-            Effect.sync(() => {
-              workflow = created;
-            }).pipe(
-              Effect.andThen(
-                updateState((state) =>
-                  QuestionRuntimeState.storeWorkflow(state, sessionId, decision.gate, created),
-                ),
-              ),
+        const nextBatch = update(existing);
+        const batches = new Map(session.batches);
+        let nextState = current;
+        if (nextBatch) {
+          batches.set(requestId, nextBatch);
+        } else {
+          batches.delete(requestId);
+          nextState = dropRequestRoute(nextState, requestId);
+        }
+
+        return [
+          nextBatch,
+          writeSessionState(nextState, sessionId, {
+            ...session,
+            batches,
+          }),
+        ];
+      });
+
+    const tryPersistQuestionBatch = (
+      sessionId: string,
+      requestId: string,
+      expectedVersion: number,
+      actorId: string,
+      update: (batch: QuestionWorkflowBatch) => QuestionWorkflowBatch,
+    ) =>
+      Ref.modify(
+        stateRef,
+        (current): readonly [PersistQuestionBatchResult, QuestionRuntimeState] => {
+          const session = current.sessions.get(sessionId);
+          const existing = session?.batches.get(requestId);
+          if (!existing || !session) {
+            return [{ type: "missing" }, current];
+          }
+          if (existing.domain.version !== expectedVersion) {
+            return [{ type: "conflict", batch: existing }, current];
+          }
+
+          const batches = new Map(session.batches);
+          const batch = persistQuestionBatchUpdate(existing, actorId, update);
+          batches.set(requestId, batch);
+          return [
+            { type: "updated", batch },
+            writeSessionState(current, sessionId, {
+              ...session,
+              batches,
+            }),
+          ];
+        },
+      );
+
+    const expirePendingBatches = (sessionId: string, includeRequestIds = false) =>
+      Ref.modify(
+        stateRef,
+        (
+          current,
+        ): readonly [
+          { terminated: QuestionWorkflowBatch[]; requestIds: string[] },
+          QuestionRuntimeState,
+        ] => {
+          const session = current.sessions.get(sessionId);
+          if (!session) {
+            return [{ terminated: [], requestIds: [] }, current];
+          }
+
+          const batches = new Map(session.batches);
+          const requestRoutes = new Map(current.requestRoutes);
+          const terminated: QuestionWorkflowBatch[] = [];
+          const requestIds: string[] = [];
+
+          for (const [requestId, batch] of session.batches) {
+            if (!isPendingQuestionBatch(batch)) {
+              continue;
+            }
+            terminated.push(terminateQuestionBatch(batch));
+            if (includeRequestIds) {
+              requestIds.push(requestId);
+            }
+            batches.delete(requestId);
+            requestRoutes.delete(requestId);
+          }
+
+          return [
+            { terminated, requestIds },
+            writeSessionState(
+              {
+                ...current,
+                requestRoutes,
+              },
+              sessionId,
+              {
+                ...session,
+                batches,
+              },
             ),
-          ),
-          Effect.exit,
-        );
+          ];
+        },
+      );
 
-        yield* Deferred.done(decision.gate, exit).pipe(Effect.ignore);
-        if (exit._tag === "Failure") {
-          yield* updateState((state) =>
-            QuestionRuntimeState.clearWorkflowCreate(state, sessionId, decision.gate),
-          );
-          return yield* Effect.failCause(exit.cause);
-        }
-        return exit.value;
-      });
+    const markSessionStopped = (sessionId: string) =>
+      Ref.update(stateRef, (current) =>
+        writeSessionState(current, sessionId, {
+          batches: new Map((current.sessions.get(sessionId) ?? emptyQuestionSessionState()).batches),
+          stopped: true,
+        }),
+      );
 
     const hasPendingQuestions = (sessionId: string) =>
-      getQuestionWorkflow(sessionId).pipe(
-        Effect.flatMap((workflow) =>
-          workflow ? workflow.hasPendingQuestions() : Effect.succeed(false),
+      getSessionState(sessionId).pipe(
+        Effect.map(
+          (session) => !!session && [...session.batches.values()].some(isPendingQuestionBatch),
         ),
       );
 
     const hasPendingQuestionsAnywhere = () =>
       readState().pipe(
-        Effect.flatMap((state) =>
-          Effect.forEach(state.workflows.values(), (workflow) => workflow.hasPendingQuestions(), {
-            concurrency: "unbounded",
-            discard: false,
-          }),
+        Effect.map((state) =>
+          [...state.sessions.values()].some((session) =>
+            [...session.batches.values()].some(isPendingQuestionBatch),
+          ),
         ),
-        Effect.map((pending) => pending.some(Boolean)),
       );
 
-    const getShutdownTargetWorkflow = (sessionId: string) =>
-      getQuestionWorkflow(sessionId).pipe(
-        Effect.flatMap((workflow) =>
-          workflow
-            ? Effect.succeed(workflow)
-            : getQuestionWorkflowGate(sessionId).pipe(
-                Effect.flatMap((gate) =>
-                  !gate
-                    ? Effect.succeed(null)
-                    : Deferred.await(gate).pipe(Effect.catch(() => Effect.succeed(null))),
-                ),
-              ),
+    const editQuestionMessage = (batch: QuestionWorkflowBatch) => {
+      const attachment = batch.runtime.attachment;
+      return attachment._tag !== "attached"
+        ? Effect.void
+        : Effect.promise(() =>
+            attachment.message.edit(createQuestionMessageEdit(questionBatchView(batch))),
+          ).pipe(Effect.asVoid);
+    };
+
+    const replyToQuestionInteraction = (interaction: Interaction, message: string) =>
+      !interaction.isButton() && !interaction.isStringSelectMenu() && !interaction.isModalSubmit()
+        ? Effect.void
+        : interaction.replied || interaction.deferred
+          ? Effect.void
+          : Effect.promise(() => interaction.reply(questionInteractionReply(message))).pipe(
+              Effect.ignore,
+            );
+
+    const replyToQuestionConflict = (interaction: Interaction, batch: QuestionWorkflowBatch) =>
+      replyToQuestionInteraction(
+        interaction,
+        batch.runtime.lastModifiedBy && batch.runtime.lastModifiedBy !== interaction.user.id
+          ? "Another user updated this question prompt before your action was applied. Review the latest card and try again."
+          : "This question prompt changed before your action was applied. Review the latest card and try again.",
+      );
+
+    const finalizeBatchIfAttached = (batch: QuestionWorkflowBatch) =>
+      !isTerminalQuestionBatch(batch) || batch.runtime.attachment._tag !== "attached"
+        ? Effect.void
+        : editQuestionMessage(batch).pipe(
+            Effect.catch((error) =>
+              deps.logger.warn("failed to edit finalized question batch", {
+                channelId: batch.runtime.channelId,
+                requestId: batch.domain.request.id,
+                error: deps.formatError(error),
+              }),
+            ),
+          );
+
+    const attachPostedQuestionMessage = (sessionId: string, requestId: string, message: Message) =>
+      updateQuestionBatch(sessionId, requestId, (current) =>
+        attachQuestionMessage(
+          current.domain.lifecycle === "posting" ? activateQuestionBatch(current) : current,
+          message,
         ),
       );
+
+    const finalizeQuestionBatch = (
+      sessionId: string,
+      requestId: string,
+      lifecycle: "answered" | "rejected",
+      resolvedAnswers?: ReadonlyArray<QuestionAnswer>,
+    ) =>
+      Effect.gen(function* () {
+        const batch = yield* updateQuestionBatch(sessionId, requestId, (current) =>
+          setQuestionBatchStatus(current, lifecycle, resolvedAnswers),
+        );
+        if (!batch) {
+          return noSignals;
+        }
+
+        yield* finalizeBatchIfAttached(batch);
+        yield* deleteQuestionBatch(sessionId, requestId).pipe(Effect.asVoid);
+        return noSignals;
+      });
+
+    const updateInteraction = (interaction: Interaction, batch: QuestionWorkflowBatch) =>
+      !interaction.isButton()
+        ? Effect.void
+        : Effect.promise(() =>
+            interaction.update(createQuestionMessageEdit(questionBatchView(batch))),
+          );
+
+    const getQuestionSession = (sessionId: string) =>
+      deps.getSessionContext(sessionId).pipe(Effect.map((context) => context?.session ?? null));
+
+    const expireQuestionBatch = (sessionId: string, requestId: string) =>
+      updateQuestionBatch(sessionId, requestId, (current) => terminateQuestionBatch(current));
+
+    const finalizeRemoteQuestionBatch = (input: RemoteQuestionAction) =>
+      Effect.gen(function* () {
+        const pending = yield* tryPersistQuestionBatch(
+          input.sessionId,
+          input.requestId,
+          input.expectedVersion,
+          input.actorId,
+          (current) => setQuestionBatchStatus(current, "submitting"),
+        );
+        if (pending.type === "missing") {
+          yield* replyToQuestionInteraction(input.interaction, "This question prompt has expired.");
+          return noSignals;
+        }
+        if (pending.type === "conflict") {
+          yield* replyToQuestionConflict(input.interaction, pending.batch);
+          return noSignals;
+        }
+
+        const session = yield* getQuestionSession(input.sessionId);
+        if (!session) {
+          const expired = yield* expireQuestionBatch(input.sessionId, input.requestId);
+          if (!expired) {
+            yield* replyToQuestionInteraction(input.interaction, "This question prompt has expired.");
+            return noSignals;
+          }
+          yield* updateInteraction(input.interaction, expired);
+          yield* deleteQuestionBatch(input.sessionId, input.requestId).pipe(Effect.asVoid);
+          return noSignals;
+        }
+
+        yield* updateInteraction(input.interaction, pending.batch);
+
+        const result = yield* input
+          .invoke(session.opencode, pending.batch.domain.request.id)
+          .pipe(Effect.result);
+        if (result._tag === "Failure") {
+          const restored = yield* updateQuestionBatch(input.sessionId, input.requestId, (current) =>
+            setQuestionBatchStatus(current, "active"),
+          );
+          if (restored) {
+            yield* editQuestionMessage(restored).pipe(Effect.ignore);
+          }
+          const interaction = input.interaction;
+          if (interaction.isButton()) {
+            yield* Effect.promise(() =>
+              interaction.followUp(questionInteractionReply(input.followUpFailure(result.failure))),
+            ).pipe(Effect.ignore);
+          }
+          return noSignals;
+        }
+
+        return yield* input.onSuccess(pending.batch);
+      });
+
+    const currentQuestionDraft = (batch: QuestionWorkflowBatch, questionIndex: number) =>
+      batch.domain.drafts[questionIndex] ?? clearQuestionDraft();
+
+    const applyQuestionUpdate = (
+      sessionId: string,
+      interaction: Interaction,
+      requestId: string,
+      expectedVersion: number,
+      update: (batch: QuestionWorkflowBatch) => QuestionWorkflowBatch,
+    ) =>
+      Effect.gen(function* () {
+        if (!interaction.isButton() && !interaction.isStringSelectMenu()) {
+          return;
+        }
+
+        const persisted = yield* tryPersistQuestionBatch(
+          sessionId,
+          requestId,
+          expectedVersion,
+          interaction.user.id,
+          update,
+        );
+        if (persisted.type === "missing") {
+          yield* replyToQuestionInteraction(interaction, "This question prompt is no longer active.");
+          return;
+        }
+        if (persisted.type === "conflict") {
+          yield* replyToQuestionConflict(interaction, persisted.batch);
+          return;
+        }
+
+        yield* Effect.promise(() =>
+          interaction.update(createQuestionMessageEdit(questionBatchView(persisted.batch))),
+        );
+      });
+
+    const handleQuestionAsked = (
+      sessionId: string,
+      session: ChannelSession,
+      activeRun: ActiveRun,
+      request: QuestionRequest,
+    ) =>
+      Effect.gen(function* () {
+        const batch = yield* Ref.modify(
+          stateRef,
+          (current): readonly [QuestionWorkflowBatch | null, QuestionRuntimeState] => {
+            const sessionState = current.sessions.get(sessionId) ?? emptyQuestionSessionState();
+            if (sessionState.stopped || sessionState.batches.has(request.id)) {
+              return [null, current];
+            }
+
+            const created = createQuestionWorkflowBatch({
+              request,
+              channelId: session.channelId,
+              replyTargetMessage: currentPromptReplyTargetMessage(activeRun),
+              drafts: questionDrafts(request),
+            });
+            const batches = new Map(sessionState.batches);
+            batches.set(request.id, created);
+            const requestRoutes = new Map(current.requestRoutes);
+            requestRoutes.set(request.id, sessionId);
+            return [
+              created,
+              writeSessionState(
+                {
+                  ...current,
+                  requestRoutes,
+                },
+                sessionId,
+                {
+                  ...sessionState,
+                  batches,
+                },
+              ),
+            ];
+          },
+        );
+        if (!batch) {
+          return noSignals;
+        }
+
+        let signals = noSignals;
+        if (activeRun.interruptRequested) {
+          yield* deps.logger.info("question prompt superseded interrupt request", {
+            channelId: session.channelId,
+            sessionId: session.opencode.sessionId,
+            requestId: request.id,
+          });
+          signals = signal({ type: "clear-run-interrupt" });
+        }
+
+        const questionMessage = yield* Effect.tryPromise({
+          try: () =>
+            batch.runtime.replyTargetMessage.reply({
+              ...createQuestionMessageCreate(questionBatchView(activateQuestionBatch(batch))),
+              allowedMentions: { repliedUser: true, parse: ["users", "roles", "everyone"] },
+            }),
+          catch: (error) => error,
+        }).pipe(
+          Effect.timeoutOrElse({
+            duration: "5 seconds",
+            onTimeout: () => Effect.fail(new Error("Timed out sending question batch to Discord")),
+          }),
+          Effect.result,
+        );
+
+        if (questionMessage._tag === "Success") {
+          yield* attachPostedQuestionMessage(sessionId, request.id, questionMessage.success);
+          return signals;
+        }
+
+        yield* deleteQuestionBatch(sessionId, request.id);
+        const questionUiFailure = deps.formatError(questionMessage.failure);
+
+        yield* deps.logger.error("failed to post question batch", {
+          channelId: session.channelId,
+          sessionId: session.opencode.sessionId,
+          requestId: request.id,
+          error: questionUiFailure,
+        });
+
+        const rejectResult = yield* deps
+          .rejectQuestion(session.opencode, request.id)
+          .pipe(Effect.result);
+        if (rejectResult._tag === "Failure") {
+          yield* deps.logger.error("failed to reject question batch after UI failure", {
+            channelId: session.channelId,
+            sessionId: session.opencode.sessionId,
+            requestId: request.id,
+            error: deps.formatError(rejectResult.failure),
+          });
+
+          const failureReply = yield* deps
+            .sendQuestionUiFailure(batch.runtime.replyTargetMessage, questionUiFailure)
+            .pipe(Effect.result);
+          if (failureReply._tag === "Failure") {
+            yield* deps.logger.error("failed to send question UI failure message", {
+              channelId: session.channelId,
+              sessionId: session.opencode.sessionId,
+              requestId: request.id,
+              error: deps.formatError(failureReply.failure),
+            });
+          }
+
+          return appendSignals(
+            signals,
+            signal({
+              type: "set-run-question-outcome",
+              outcome: questionUiFailureOutcome(questionUiFailure, failureReply._tag === "Success"),
+            }),
+          );
+        }
+
+        return appendSignals(
+          signals,
+          signal({
+            type: "set-run-question-outcome",
+            outcome: questionUiFailureOutcome(questionUiFailure),
+          }),
+        );
+      });
+
+    const handleInteraction = (interaction: Interaction) =>
+      Effect.gen(function* () {
+        if (
+          !interaction.isButton() &&
+          !interaction.isStringSelectMenu() &&
+          !interaction.isModalSubmit()
+        ) {
+          return null;
+        }
+
+        const action = parseQuestionActionId(interaction.customId);
+        if (!action) {
+          return null;
+        }
+
+        const routed = yield* getQuestionBatch(action.requestID);
+        if (!routed || !routed.batch) {
+          if (routed) {
+            yield* Ref.update(stateRef, (state) => dropRequestRoute(state, action.requestID));
+          }
+          yield* replyToQuestionInteraction(interaction, "This question prompt has expired.");
+          return null;
+        }
+
+        const { batch, sessionId } = routed;
+        if (
+          (interaction.isButton() || interaction.isStringSelectMenu()) &&
+          batch.runtime.attachment._tag === "attached" &&
+          interaction.message.id !== batch.runtime.attachment.message.id
+        ) {
+          yield* replyToQuestionInteraction(interaction, "This question prompt has been replaced.");
+          return null;
+        }
+
+        if (batch.domain.lifecycle !== "active") {
+          yield* replyToQuestionInteraction(
+            interaction,
+            "This question prompt is already being finalized.",
+          );
+          return null;
+        }
+
+        if (batch.domain.version !== action.version) {
+          yield* replyToQuestionConflict(interaction, batch);
+          return null;
+        }
+
+        switch (action.kind) {
+          case "question-prev":
+            yield* applyQuestionUpdate(sessionId, interaction, action.requestID, action.version, (current) => ({
+              ...current,
+              domain: {
+                ...current.domain,
+                page: Math.max(0, current.domain.page - 1),
+              },
+            }));
+            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+          case "question-next":
+            yield* applyQuestionUpdate(sessionId, interaction, action.requestID, action.version, (current) => ({
+              ...current,
+              domain: {
+                ...current.domain,
+                page: Math.min(current.domain.request.questions.length - 1, current.domain.page + 1),
+              },
+            }));
+            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+          case "option-prev":
+            yield* applyQuestionUpdate(sessionId, interaction, action.requestID, action.version, (current) => {
+              const optionPages = [...current.domain.optionPages];
+              optionPages[action.questionIndex] = Math.max(0, (optionPages[action.questionIndex] ?? 0) - 1);
+              return {
+                ...current,
+                domain: {
+                  ...current.domain,
+                  page: action.questionIndex,
+                  optionPages,
+                },
+              };
+            });
+            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+          case "option-next":
+            yield* applyQuestionUpdate(sessionId, interaction, action.requestID, action.version, (current) => {
+              const question = current.domain.request.questions[action.questionIndex];
+              if (!question) {
+                return current;
+              }
+              const optionPages = [...current.domain.optionPages];
+              optionPages[action.questionIndex] = Math.min(
+                Math.max(0, questionOptionPageCount(question) - 1),
+                (optionPages[action.questionIndex] ?? 0) + 1,
+              );
+              return {
+                ...current,
+                domain: {
+                  ...current.domain,
+                  page: action.questionIndex,
+                  optionPages,
+                },
+              };
+            });
+            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+          case "clear":
+            yield* applyQuestionUpdate(sessionId, interaction, action.requestID, action.version, (current) => {
+              const drafts = [...current.domain.drafts];
+              drafts[action.questionIndex] = clearQuestionDraft();
+              return {
+                ...current,
+                domain: {
+                  ...current.domain,
+                  page: action.questionIndex,
+                  drafts,
+                },
+              };
+            });
+            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+          case "select":
+            if (!interaction.isStringSelectMenu()) {
+              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+            }
+            yield* applyQuestionUpdate(sessionId, interaction, action.requestID, action.version, (current) => {
+              const question = current.domain.request.questions[action.questionIndex];
+              if (!question) {
+                return current;
+              }
+
+              const page = current.domain.optionPages[action.questionIndex] ?? 0;
+              const visibleOptions = question.options
+                .slice(
+                  page * QUESTION_OPTIONS_PER_PAGE,
+                  page * QUESTION_OPTIONS_PER_PAGE + QUESTION_OPTIONS_PER_PAGE,
+                )
+                .map((option) => option.label);
+              const drafts = [...current.domain.drafts];
+              drafts[action.questionIndex] = setQuestionOptionSelection({
+                question,
+                draft: currentQuestionDraft(current, action.questionIndex),
+                visibleOptions,
+                selectedOptions: interaction.values,
+              });
+              return {
+                ...current,
+                domain: {
+                  ...current.domain,
+                  page: action.questionIndex,
+                  drafts,
+                },
+              };
+            });
+            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+          case "custom": {
+            if (!interaction.isButton()) {
+              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+            }
+            const question = batch.domain.request.questions[action.questionIndex];
+            if (!question || question.custom === false) {
+              yield* replyToQuestionInteraction(interaction, "This question does not allow a custom answer.");
+              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+            }
+
+            yield* Effect.promise(() =>
+              interaction.showModal(
+                buildQuestionModal({
+                  requestID: action.requestID,
+                  version: action.version,
+                  questionIndex: action.questionIndex,
+                  question,
+                  draft: currentQuestionDraft(batch, action.questionIndex),
+                }),
+              ),
+            );
+            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+          }
+          case "modal": {
+            if (!interaction.isModalSubmit()) {
+              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+            }
+            const question = batch.domain.request.questions[action.questionIndex];
+            if (!question || question.custom === false) {
+              yield* replyToQuestionInteraction(interaction, "This question does not allow a custom answer.");
+              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+            }
+
+            const customAnswer = readQuestionModalValue(interaction);
+            if (!customAnswer) {
+              yield* Effect.promise(() =>
+                interaction.reply(questionInteractionReply("Custom answer cannot be empty.")),
+              ).pipe(Effect.ignore);
+              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+            }
+
+            const updated = yield* tryPersistQuestionBatch(
+              sessionId,
+              action.requestID,
+              action.version,
+              interaction.user.id,
+              (current) => {
+                const drafts = [...current.domain.drafts];
+                drafts[action.questionIndex] = setQuestionCustomAnswer(
+                  question,
+                  currentQuestionDraft(current, action.questionIndex),
+                  customAnswer,
+                );
+                return {
+                  ...current,
+                  domain: {
+                    ...current.domain,
+                    page: action.questionIndex,
+                    drafts,
+                  },
+                };
+              },
+            );
+            if (updated.type === "missing") {
+              yield* replyToQuestionInteraction(interaction, "This question prompt has expired.");
+              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+            }
+            if (updated.type === "conflict") {
+              yield* replyToQuestionConflict(interaction, updated.batch);
+              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+            }
+
+            yield* editQuestionMessage(updated.batch).pipe(
+              Effect.catch((error) =>
+                deps.logger.warn("failed to edit question batch after modal submit", {
+                  channelId: updated.batch.runtime.channelId,
+                  requestId: updated.batch.domain.request.id,
+                  error: deps.formatError(error),
+                }),
+              ),
+            );
+            yield* Effect.promise(() => interaction.deferUpdate()).pipe(Effect.ignore);
+            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+          }
+          case "submit":
+            if (!interaction.isButton()) {
+              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+            }
+            return {
+              sessionId,
+              signals: yield* finalizeRemoteQuestionBatch({
+                sessionId,
+                interaction,
+                requestId: action.requestID,
+                expectedVersion: action.version,
+                actorId: interaction.user.id,
+                invoke: (session, requestId) =>
+                  deps.replyToQuestion(
+                    session,
+                    requestId,
+                    buildQuestionAnswers(batch.domain.request, batch.domain.drafts),
+                  ),
+                followUpFailure: (error) => `Failed to submit answers: ${deps.formatError(error)}`,
+                onSuccess: () =>
+                  finalizeQuestionBatch(
+                    sessionId,
+                    action.requestID,
+                    "answered",
+                    buildQuestionAnswers(batch.domain.request, batch.domain.drafts),
+                  ),
+              }),
+            } satisfies RoutedQuestionSignals;
+          case "reject":
+            if (!interaction.isButton()) {
+              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+            }
+            return {
+              sessionId,
+              signals: yield* finalizeRemoteQuestionBatch({
+                sessionId,
+                interaction,
+                requestId: action.requestID,
+                expectedVersion: action.version,
+                actorId: interaction.user.id,
+                invoke: deps.rejectQuestion,
+                followUpFailure: (error) => `Failed to reject questions: ${deps.formatError(error)}`,
+                onSuccess: () =>
+                  finalizeQuestionBatch(sessionId, action.requestID, "rejected").pipe(
+                    Effect.map((signals) =>
+                      appendSignals(
+                        signals,
+                        signal({
+                          type: "set-run-question-outcome",
+                          outcome: { _tag: "user-rejected" },
+                        }),
+                      ),
+                    ),
+                  ),
+              }),
+            } satisfies RoutedQuestionSignals;
+        }
+      });
 
     const rejectQuestionIdsForShutdown = (sessionId: string, requestIds: ReadonlyArray<string>) =>
       deps.getSessionContext(sessionId).pipe(
@@ -341,115 +1011,105 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         ),
       );
 
-    const handleEvent = (event: { sessionId: string } & QuestionWorkflowEvent) =>
-      Effect.gen(function* () {
-        if ((yield* readStoppedSessionEventIds()).has(event.sessionId)) {
-          return null;
-        }
-
-        const workflow =
-          event.type === "asked"
-            ? yield* getOrCreateQuestionWorkflow(event.sessionId)
-            : yield* getQuestionWorkflow(event.sessionId);
-        if (!workflow) {
-          return null;
-        }
-
-        const signals = yield* workflow.handleEvent(
-          event.type === "asked"
-            ? { type: "asked", request: event.request }
-            : event.type === "replied"
-              ? {
-                  type: "replied",
-                  requestId: event.requestId,
-                  answers: event.answers,
-                }
-              : { type: "rejected", requestId: event.requestId },
-        );
-        return {
-          sessionId: event.sessionId,
-          signals,
-        } satisfies RoutedQuestionSignals;
-      });
-
-    const routeInteraction = (interaction: Interaction) =>
-      Effect.gen(function* () {
-        if (
-          !interaction.isButton() &&
-          !interaction.isStringSelectMenu() &&
-          !interaction.isModalSubmit()
-        ) {
-          return null;
-        }
-
-        const action = parseQuestionActionId(interaction.customId);
-        if (!action) {
-          return null;
-        }
-
-        const routed = yield* getQuestionWorkflowByRequestId(action.requestID);
-        if (!routed || !routed.workflow) {
-          if (routed && !routed.workflow) {
-            yield* updateState((state) =>
-              QuestionRuntimeState.releaseRequest(state, action.requestID),
-            );
-          }
-          if (!interaction.replied && !interaction.deferred) {
-            yield* Effect.promise(() =>
-              interaction.reply(questionInteractionReply("This question prompt has expired.")),
-            ).pipe(Effect.ignore);
-          }
-          return null;
-        }
-
-        const signals = yield* routed.workflow.handleInteraction(interaction);
-        return {
-          sessionId: routed.sessionId,
-          signals,
-        } satisfies RoutedQuestionSignals;
-      });
-
     const terminateSession = (sessionId: string) =>
-      getQuestionWorkflow(sessionId).pipe(
-        Effect.flatMap((workflow) => (!workflow ? Effect.succeed([]) : workflow.terminate())),
-      );
-
-    const cleanupShutdownSession = (sessionId: string) =>
-      stopHandlingSessionEvents(sessionId).pipe(
-        Effect.andThen(getShutdownTargetWorkflow(sessionId)),
-        Effect.flatMap((workflow) =>
-          !workflow
-            ? Effect.void
-            : workflow
-                .shutdown()
-                .pipe(
-                  Effect.flatMap((requestIds) =>
-                    rejectQuestionIdsForShutdown(sessionId, requestIds),
-                  ),
-                ),
+      expirePendingBatches(sessionId).pipe(
+        Effect.flatMap(({ terminated }) =>
+          Effect.forEach(
+            terminated,
+            (batch) =>
+              batch.runtime.attachment._tag === "attached"
+                ? editQuestionMessage(batch).pipe(
+                    Effect.catch((error) =>
+                      deps.logger.warn("failed to terminate question batch message", {
+                        channelId: batch.runtime.channelId,
+                        requestId: batch.domain.request.id,
+                        error: deps.formatError(error),
+                      }),
+                    ),
+                  )
+                : Effect.void,
+            { concurrency: "unbounded", discard: true },
+          ),
         ),
+        Effect.as(noSignals),
       );
 
-    const shutdownSession = (sessionId: string) => cleanupShutdownSession(sessionId);
+    const shutdownSession = (sessionId: string) =>
+      markSessionStopped(sessionId).pipe(
+        Effect.andThen(expirePendingBatches(sessionId, true)),
+        Effect.tap(({ terminated }) =>
+          Effect.forEach(
+            terminated,
+            (batch) =>
+              batch.runtime.attachment._tag === "attached"
+                ? editQuestionMessage(batch).pipe(
+                    Effect.catch((error) =>
+                      deps.logger.warn("failed to terminate question batch message", {
+                        channelId: batch.runtime.channelId,
+                        requestId: batch.domain.request.id,
+                        error: deps.formatError(error),
+                      }),
+                    ),
+                  )
+                : Effect.void,
+            { concurrency: "unbounded", discard: true },
+          ),
+        ),
+        Effect.flatMap(({ requestIds }) => rejectQuestionIdsForShutdown(sessionId, requestIds)),
+      );
 
     const cleanupShutdownQuestions = () =>
       readState().pipe(
         Effect.flatMap((state) =>
-          Effect.forEach(
-            new Set([...state.workflows.keys(), ...state.gates.keys()]),
-            cleanupShutdownSession,
-            {
-              concurrency: "unbounded",
-              discard: true,
-            },
-          ),
+          Effect.forEach(state.sessions.keys(), shutdownSession, {
+            concurrency: "unbounded",
+            discard: true,
+          }),
         ),
-        Effect.asVoid,
       );
 
     return {
-      handleEvent,
-      routeInteraction,
+      handleEvent: (event) =>
+        getSessionState(event.sessionId).pipe(
+          Effect.flatMap((sessionState) => {
+            if (sessionState?.stopped) {
+              return Effect.succeed(null);
+            }
+
+            switch (event.type) {
+              case "asked":
+                return deps.getSessionContext(event.sessionId).pipe(
+                  Effect.flatMap((context) =>
+                    !context?.activeRun
+                      ? Effect.succeed(null)
+                      : handleQuestionAsked(
+                          event.sessionId,
+                          context.session,
+                          context.activeRun,
+                          event.request,
+                        ).pipe(
+                          Effect.map((signals) => ({
+                            sessionId: event.sessionId,
+                            signals,
+                          })),
+                        ),
+                  ),
+                );
+              case "replied":
+                return finalizeQuestionBatch(
+                  event.sessionId,
+                  event.requestId,
+                  "answered",
+                  event.answers,
+                ).pipe(Effect.map((signals) => ({ sessionId: event.sessionId, signals })));
+              case "rejected":
+                return finalizeQuestionBatch(event.sessionId, event.requestId, "rejected").pipe(
+                  Effect.map((signals) => ({ sessionId: event.sessionId, signals })),
+                );
+            }
+          }),
+        ),
+      routeInteraction: handleInteraction,
       hasPendingQuestions,
       hasPendingQuestionsAnywhere,
       terminateSession,

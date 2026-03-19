@@ -1,11 +1,11 @@
-import type { Event, QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
+import type { Event } from "@opencode-ai/sdk/v2";
 import { Effect } from "effect";
 
 import { getEventSessionId } from "@/opencode/events.ts";
 import type { OpencodeServiceShape } from "@/opencode/service.ts";
 import { routeCompactionEvent } from "@/sessions/compaction/compaction-event-router.ts";
 import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
-import { routeQuestionEvent } from "@/sessions/question/question-event-router.ts";
+import { routeQuestionEvent, type QuestionWorkflowEvent } from "@/sessions/question/question-runtime.ts";
 import { routeRunEvent } from "@/sessions/run/run-event-router.ts";
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
@@ -18,17 +18,7 @@ type EventHandlerDeps = {
   getSessionContext: (
     sessionId: string,
   ) => Effect.Effect<{ session: ChannelSession; activeRun: ActiveRun | null } | null, unknown>;
-  handleQuestionEvent: (
-    event:
-      | { type: "asked"; sessionId: string; request: QuestionRequest }
-      | {
-          type: "replied";
-          sessionId: string;
-          requestId: string;
-          answers: ReadonlyArray<QuestionAnswer>;
-        }
-      | { type: "rejected"; sessionId: string; requestId: string },
-  ) => Effect.Effect<void, unknown>;
+  handleQuestionEvent: (event: QuestionWorkflowEvent) => Effect.Effect<void, unknown>;
   idleCompactionWorkflow: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">;
   readPromptResult: OpencodeServiceShape["readPromptResult"];
   logger: LoggerShape;

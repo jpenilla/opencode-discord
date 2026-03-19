@@ -1,15 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import type { Interaction, Message, MessageCreateOptions, MessageEditOptions } from "discord.js";
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
+import type { Interaction, Message, MessageCreateOptions, MessageEditOptions } from "discord.js";
 import { Deferred, Effect, Ref } from "effect";
 
 import {
-  createQuestionWorkflow,
+  applyQuestionSignals,
+  questionTypingAction,
+  runQuestionTypingAction,
   type QuestionWorkflowSignal,
-} from "@/sessions/question/question-coordinator.ts";
+} from "@/sessions/question/question-run-state.ts";
+import { makeQuestionRuntime } from "@/sessions/question/question-runtime.ts";
 import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
 import { unsafeStub } from "../../support/stub.ts";
+
+const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
 
 const makeRequest = (id = "req-1") =>
   unsafeStub<QuestionRequest>({
@@ -22,8 +27,6 @@ const makeRequest = (id = "req-1") =>
       },
     ],
   });
-
-const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
 
 const makeHarness = async (options?: {
   postQuestionResult?: "success" | "failure";
@@ -44,7 +47,7 @@ const makeHarness = async (options?: {
   const typingPauseCount = await Effect.runPromise(Ref.make(0));
   const typingResumeCount = await Effect.runPromise(Ref.make(0));
   const typingStopCount = await Effect.runPromise(Ref.make(0));
-  const questionTypingPaused = await Effect.runPromise(Ref.make(false));
+  const typingPausedRef = await Effect.runPromise(Ref.make(false));
   const promptState = await Effect.runPromise(createPromptState());
   const questionPostStarted = await Effect.runPromise(Deferred.make<void>());
   const allowQuestionPost = await Effect.runPromise(Deferred.make<void>());
@@ -143,15 +146,14 @@ const makeHarness = async (options?: {
     queue: {} as ChannelSession["queue"],
     activeRun,
   };
-  session.activeRun = activeRun;
   const sessionContextRef = await Effect.runPromise(
     Ref.make<{ session: ChannelSession; activeRun: ActiveRun } | null>({ session, activeRun }),
   );
 
   const rawRuntime = await Effect.runPromise(
-    createQuestionWorkflow({
+    makeQuestionRuntime({
       getSessionContext: () => Ref.get(sessionContextRef),
-      replyToQuestion: (_opencode, requestId, _answers) =>
+      replyToQuestion: (_opencode, requestId) =>
         Ref.update(replyCalls, (current) => [...current, requestId]),
       rejectQuestion: (_opencode, requestId) =>
         Ref.update(rejectCalls, (current) => [...current, requestId]).pipe(
@@ -167,9 +169,6 @@ const makeHarness = async (options?: {
             Ref.update(sentQuestionUiFailures, (current) => [...current, String(error)]),
           ),
         ),
-      trackRequestId: () => Effect.void,
-      releaseRequestId: () => Effect.void,
-      onDrained: () => Effect.void,
       logger: {
         info: () => Effect.void,
         warn: () => Effect.void,
@@ -179,113 +178,56 @@ const makeHarness = async (options?: {
     }),
   );
 
-  const applySignals = (signals: ReadonlyArray<QuestionWorkflowSignal>) =>
-    Effect.forEach(
-      signals,
-      (item) => {
-        switch (item.type) {
-          case "clear-run-interrupt":
-            return Effect.sync(() => {
-              activeRun.interruptRequested = false;
-              activeRun.interruptSource = null;
-            });
-          case "set-run-question-outcome":
-            return Effect.sync(() => {
-              activeRun.questionOutcome = item.outcome;
-            });
-        }
-      },
-      { discard: true },
-    );
-
   const reconcileTyping = () =>
-    rawRuntime.hasPendingQuestions().pipe(
-      Effect.flatMap((hasPendingQuestions) =>
-        Ref.modify(questionTypingPaused, (paused) =>
-          paused === hasPendingQuestions
-            ? [{ hasPendingQuestions, paused } as const, paused]
-            : [{ hasPendingQuestions, paused } as const, hasPendingQuestions],
-        ).pipe(
-          Effect.flatMap(({ hasPendingQuestions, paused }) =>
-            hasPendingQuestions
-              ? paused
-                ? Effect.void
-                : Effect.promise(() => activeRun.typing.pause()).pipe(Effect.ignore)
-              : paused
-                ? activeRun.questionOutcome._tag !== "none" || activeRun.interruptRequested
-                  ? Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
-                  : Effect.sync(() => {
-                      activeRun.typing.resume();
-                    })
-                : activeRun.questionOutcome._tag !== "none" || activeRun.interruptRequested
-                  ? Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
-                  : Effect.void,
+    rawRuntime.hasPendingQuestions(session.opencode.sessionId).pipe(
+      Effect.flatMap((pending) =>
+        Ref.modify(typingPausedRef, (paused) => [{ paused, pending } as const, pending]).pipe(
+          Effect.flatMap(({ paused }) =>
+            runQuestionTypingAction({
+              sessionId: session.opencode.sessionId,
+              activeRun,
+              action: questionTypingAction(activeRun, pending, paused),
+              logger: { warn: () => Effect.void },
+            }),
           ),
         ),
       ),
     );
 
-  const applyWorkflowSignals = (signals: ReadonlyArray<QuestionWorkflowSignal>) =>
-    applySignals(signals).pipe(Effect.andThen(reconcileTyping()));
+  const applySignalsAndTyping = (signals: ReadonlyArray<QuestionWorkflowSignal>) =>
+    applyQuestionSignals(activeRun, signals).pipe(Effect.andThen(reconcileTyping()));
+
+  const handleRouted = <A extends { signals: ReadonlyArray<QuestionWorkflowSignal> } | null>(
+    effect: Effect.Effect<A, unknown>,
+  ) =>
+    effect.pipe(
+      Effect.tap((result) =>
+        result ? applySignalsAndTyping(result.signals) : Effect.void,
+      ),
+    );
 
   const runtime = {
     rawRuntime,
-    handleEvent: (event: {
-      type: "asked" | "replied" | "rejected";
-      sessionId: string;
-      request?: QuestionRequest;
-      requestId?: string;
-      answers?: ReadonlyArray<QuestionAnswer>;
-    }) =>
-      rawRuntime
-        .handleEvent(
-          event.type === "asked"
-            ? { type: "asked", request: event.request! }
-            : event.type === "replied"
-              ? {
-                  type: "replied",
-                  requestId: event.requestId!,
-                  answers: event.answers!,
-                }
-              : { type: "rejected", requestId: event.requestId! },
-        )
-        .pipe(Effect.tap(applyWorkflowSignals)),
+    handleEvent: rawRuntime.handleEvent,
+    routeEvent: (event: Parameters<typeof rawRuntime.handleEvent>[0]) =>
+      handleRouted(rawRuntime.handleEvent(event)),
     handleInteraction: (interaction: Interaction) =>
-      rawRuntime.handleInteraction(interaction).pipe(Effect.tap(applyWorkflowSignals)),
-    terminateForSession: (_sessionId: string) =>
-      rawRuntime.terminate().pipe(Effect.tap(applyWorkflowSignals)),
-    shutdown: () => rawRuntime.shutdown().pipe(Effect.asVoid),
+      handleRouted(rawRuntime.routeInteraction(interaction)),
+    terminateForSession: (sessionId: string) =>
+      rawRuntime.terminateSession(sessionId).pipe(Effect.tap(applySignalsAndTyping)),
+    shutdown: () => rawRuntime.shutdownSession(session.opencode.sessionId),
   };
 
-  const makeButtonInteraction = (input: {
-    customId: string;
-    userId?: string;
-    messageId?: string;
-  }) =>
-    unsafeStub<Interaction>({
-      customId: input.customId,
-      user: { id: input.userId ?? "owner" },
-      message: { id: input.messageId ?? questionMessage.id },
-      replied: false,
-      deferred: false,
-      isButton: () => true,
-      isStringSelectMenu: () => false,
-      isModalSubmit: () => false,
-      isChatInputCommand: () => false,
-      reply: (payload: { content?: string | null }) =>
-        Effect.runPromise(Ref.update(interactionReplies, (current) => [...current, payload])),
-      update: (_payload: MessageEditOptions) => Promise.resolve(questionMessage),
-      followUp: (_payload: unknown) => Promise.resolve(questionMessage),
-      showModal: (_modal: unknown) => Promise.resolve(),
-      deferUpdate: () => Promise.resolve(),
-    });
-
-  const makeSelectInteraction = (input: {
-    customId: string;
-    values: string[];
-    userId?: string;
-    messageId?: string;
-  }) =>
+  const makeInteraction = (
+    kind: "button" | "select" | "modal",
+    input: {
+      customId: string;
+      userId?: string;
+      messageId?: string;
+      values?: string[];
+      value?: string;
+    },
+  ) =>
     unsafeStub<Interaction>({
       customId: input.customId,
       values: input.values,
@@ -293,36 +235,18 @@ const makeHarness = async (options?: {
       message: { id: input.messageId ?? questionMessage.id },
       replied: false,
       deferred: false,
-      isButton: () => false,
-      isStringSelectMenu: () => true,
-      isModalSubmit: () => false,
+      isButton: () => kind === "button",
+      isStringSelectMenu: () => kind === "select",
+      isModalSubmit: () => kind === "modal",
       isChatInputCommand: () => false,
       reply: (payload: { content?: string | null }) =>
         Effect.runPromise(Ref.update(interactionReplies, (current) => [...current, payload])),
-      update: (_payload: MessageEditOptions) => Promise.resolve(questionMessage),
-      followUp: (_payload: unknown) => Promise.resolve(questionMessage),
-      showModal: (_modal: unknown) => Promise.resolve(),
-      deferUpdate: () => Promise.resolve(),
-    });
-
-  const makeModalInteraction = (input: { customId: string; value: string; userId?: string }) =>
-    unsafeStub<Interaction>({
-      customId: input.customId,
-      user: { id: input.userId ?? "owner" },
-      replied: false,
-      deferred: false,
-      isButton: () => false,
-      isStringSelectMenu: () => false,
-      isModalSubmit: () => true,
-      isChatInputCommand: () => false,
-      reply: (payload: { content?: string | null }) =>
-        Effect.runPromise(Ref.update(interactionReplies, (current) => [...current, payload])),
-      update: (_payload: MessageEditOptions) => Promise.resolve(questionMessage),
-      followUp: (_payload: unknown) => Promise.resolve(questionMessage),
-      showModal: (_modal: unknown) => Promise.resolve(),
+      update: () => Promise.resolve(questionMessage),
+      followUp: () => Promise.resolve(questionMessage),
+      showModal: () => Promise.resolve(),
       deferUpdate: () => Promise.resolve(),
       fields: {
-        getTextInputValue: () => input.value,
+        getTextInputValue: () => input.value ?? "",
       },
     });
 
@@ -331,7 +255,6 @@ const makeHarness = async (options?: {
     session,
     sessionContextRef,
     activeRun,
-    questionMessage,
     request: makeRequest(),
     postedPayloads,
     editedPayloads,
@@ -344,27 +267,32 @@ const makeHarness = async (options?: {
     typingPauseCount,
     typingResumeCount,
     typingStopCount,
-    questionPostStarted,
-    allowQuestionPost,
-    makeButtonInteraction,
-    makeSelectInteraction,
-    makeModalInteraction,
+    makeButtonInteraction: (input: { customId: string; userId?: string; messageId?: string }) =>
+      makeInteraction("button", input),
+    makeSelectInteraction: (input: {
+      customId: string;
+      values: string[];
+      userId?: string;
+      messageId?: string;
+    }) => makeInteraction("select", input),
+    makeModalInteraction: (input: { customId: string; value: string; userId?: string }) =>
+      makeInteraction("modal", input),
   };
 };
 
-describe("createQuestionWorkflow", () => {
+describe("makeQuestionRuntime", () => {
   test("posts a question batch once and resumes typing after a reply event", async () => {
     const harness = await makeHarness();
 
     await Effect.runPromise(
-      harness.runtime.handleEvent({
+      harness.runtime.routeEvent({
         type: "asked",
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
       }),
     );
     await Effect.runPromise(
-      harness.runtime.handleEvent({
+      harness.runtime.routeEvent({
         type: "asked",
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
@@ -376,7 +304,7 @@ describe("createQuestionWorkflow", () => {
     expect(await getRef(harness.typingPauseCount)).toBe(1);
 
     await Effect.runPromise(
-      harness.runtime.handleEvent({
+      harness.runtime.routeEvent({
         type: "replied",
         sessionId: harness.session.opencode.sessionId,
         requestId: harness.request.id,
@@ -396,7 +324,7 @@ describe("createQuestionWorkflow", () => {
     });
 
     await Effect.runPromise(
-      harness.runtime.handleEvent({
+      harness.runtime.routeEvent({
         type: "asked",
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
@@ -418,7 +346,7 @@ describe("createQuestionWorkflow", () => {
     const harness = await makeHarness();
 
     await Effect.runPromise(
-      harness.runtime.handleEvent({
+      harness.runtime.routeEvent({
         type: "asked",
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
@@ -442,17 +370,13 @@ describe("createQuestionWorkflow", () => {
     const harness = await makeHarness();
 
     await Effect.runPromise(
-      harness.runtime.handleEvent({
+      harness.runtime.routeEvent({
         type: "asked",
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
       }),
     );
-
-    await Effect.runPromise(
-      harness.runtime.terminateForSession(harness.session.opencode.sessionId),
-    );
-
+    await Effect.runPromise(harness.runtime.terminateForSession(harness.session.opencode.sessionId));
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
@@ -472,7 +396,7 @@ describe("createQuestionWorkflow", () => {
     harness.activeRun.interruptRequested = true;
 
     await Effect.runPromise(
-      harness.runtime.handleEvent({
+      harness.runtime.routeEvent({
         type: "asked",
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
@@ -486,12 +410,10 @@ describe("createQuestionWorkflow", () => {
   });
 
   test("anchors question cards to the current prompt reply target", async () => {
-    const harness = await makeHarness({
-      replyTargetId: "follow-up-message",
-    });
+    const harness = await makeHarness({ replyTargetId: "follow-up-message" });
 
     await Effect.runPromise(
-      harness.runtime.handleEvent({
+      harness.runtime.routeEvent({
         type: "asked",
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
@@ -505,14 +427,13 @@ describe("createQuestionWorkflow", () => {
     const harness = await makeHarness();
 
     await Effect.runPromise(
-      harness.runtime.handleEvent({
+      harness.runtime.routeEvent({
         type: "asked",
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
       }),
     );
     await Effect.runPromise(Ref.set(harness.sessionContextRef, null));
-
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
@@ -522,14 +443,16 @@ describe("createQuestionWorkflow", () => {
     );
 
     expect(await getRef(harness.replyCalls)).toEqual([]);
-    expect(await Effect.runPromise(harness.runtime.rawRuntime.hasPendingQuestions())).toBe(false);
+    expect(await Effect.runPromise(harness.runtime.rawRuntime.hasPendingQuestions("session-1"))).toBe(
+      false,
+    );
   });
 
   test("renders shutdown-expired questions immediately when shutdown begins", async () => {
     const harness = await makeHarness();
 
     await Effect.runPromise(
-      harness.runtime.handleEvent({
+      harness.runtime.routeEvent({
         type: "asked",
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
@@ -549,13 +472,12 @@ describe("createQuestionWorkflow", () => {
     const harness = await makeHarness();
 
     await Effect.runPromise(
-      harness.runtime.handleEvent({
+      harness.runtime.routeEvent({
         type: "asked",
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
       }),
     );
-
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
@@ -563,7 +485,6 @@ describe("createQuestionWorkflow", () => {
         }),
       ),
     );
-
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
@@ -582,13 +503,12 @@ describe("createQuestionWorkflow", () => {
     const harness = await makeHarness();
 
     await Effect.runPromise(
-      harness.runtime.handleEvent({
+      harness.runtime.routeEvent({
         type: "asked",
         sessionId: harness.session.opencode.sessionId,
         request: harness.request,
       }),
     );
-
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeSelectInteraction({
@@ -597,7 +517,6 @@ describe("createQuestionWorkflow", () => {
         }),
       ),
     );
-
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeModalInteraction({
@@ -611,5 +530,43 @@ describe("createQuestionWorkflow", () => {
     expect((await getRef(harness.interactionReplies)).at(-1)?.content).toBe(
       "Another user updated this question prompt before your action was applied. Review the latest card and try again.",
     );
+  });
+
+  test("shuts down open questions per session and ignores later question events", async () => {
+    const harness = await makeHarness();
+
+    const firstResult = await Effect.runPromise(
+      harness.runtime.routeEvent({
+        type: "asked",
+        sessionId: harness.session.opencode.sessionId,
+        request: harness.request,
+      }),
+    );
+
+    expect(firstResult).not.toBeNull();
+    expect(await Effect.runPromise(harness.runtime.rawRuntime.hasPendingQuestionsAnywhere())).toBe(
+      true,
+    );
+
+    await Effect.runPromise(harness.runtime.shutdown());
+
+    expect(await getRef(harness.rejectCalls)).toEqual([harness.request.id]);
+    expect(await Effect.runPromise(harness.runtime.rawRuntime.hasPendingQuestionsAnywhere())).toBe(
+      false,
+    );
+    expect(await getRef(harness.postedPayloads)).toHaveLength(1);
+    expect(await getRef(harness.editedPayloads)).toHaveLength(1);
+    expect(JSON.stringify((await getRef(harness.editedPayloads))[0])).toContain("Questions expired");
+
+    const lateResult = await Effect.runPromise(
+      harness.runtime.routeEvent({
+        type: "asked",
+        sessionId: harness.session.opencode.sessionId,
+        request: makeRequest("req-2"),
+      }),
+    );
+
+    expect(lateResult).toBeNull();
+    expect(await getRef(harness.rejectCalls)).toEqual([harness.request.id]);
   });
 });

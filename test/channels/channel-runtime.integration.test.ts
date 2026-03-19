@@ -23,7 +23,7 @@ import {
   buildQueuedFollowUpPrompt,
   promptMessageContext,
 } from "@/discord/messages.ts";
-import type { GlobalEvent } from "@opencode-ai/sdk/v2";
+import type { Event, GlobalEvent } from "@opencode-ai/sdk/v2";
 import { OpencodeEventQueue } from "@/opencode/events.ts";
 import {
   type OpencodeServiceShape,
@@ -41,6 +41,14 @@ import {
 } from "@/state/persistence.ts";
 import { SessionRunAccess, SessionRuntimeLayer } from "@/sessions/session-runtime.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
+import {
+  makeAssistantMessageUpdatedEvent,
+  makeQuestionAskedEvent,
+  makeQuestionRepliedEvent,
+  makeSessionCompactedEvent,
+  makeUserMessageUpdatedEvent,
+  toGlobalEvent,
+} from "../support/opencode-events.ts";
 import { unsafeEffect, unsafeStub } from "../support/stub.ts";
 
 const TEST_STATE_DIR = join(tmpdir(), `.opencode-discord-test-storage-${process.pid}`);
@@ -118,115 +126,7 @@ const waitForReplyPayload = (
     }),
   );
 
-const makeQuestionAskedEvent = (): GlobalEvent =>
-  unsafeStub<GlobalEvent>({
-    payload: {
-      type: "question.asked",
-      properties: {
-        id: "req-1",
-        sessionID: "session-1",
-        questions: [
-          {
-            header: "Question",
-            question: "Question?",
-            options: [{ label: "Yes", description: "desc" }],
-          },
-        ],
-        tool: {
-          messageID: "assistant-1",
-          callID: "call-1",
-        },
-      },
-    },
-  });
-
-const makeQuestionRepliedEvent = (): GlobalEvent =>
-  unsafeStub<GlobalEvent>({
-    payload: {
-      type: "question.replied",
-      properties: {
-        sessionID: "session-1",
-        requestID: "req-1",
-        answers: [["Yes"]],
-      },
-    },
-  });
-
-const makeSessionCompactedEvent = (): GlobalEvent =>
-  unsafeStub<GlobalEvent>({
-    payload: {
-      type: "session.compacted",
-      properties: {
-        sessionID: "session-1",
-      },
-    },
-  });
-
-const makeAssistantMessageUpdatedEvent = (input: {
-  id: string;
-  sessionId?: string;
-  parentId: string;
-  summary?: boolean;
-  mode?: string;
-}): GlobalEvent =>
-  unsafeStub<GlobalEvent>({
-    payload: {
-      type: "message.updated",
-      properties: {
-        info: {
-          id: input.id,
-          sessionID: input.sessionId ?? "session-1",
-          role: "assistant",
-          parentID: input.parentId,
-          mode: input.mode ?? "chat",
-          summary: input.summary,
-          providerID: "provider-1",
-          modelID: "model-1",
-          agent: input.summary ? "compaction" : "main",
-          path: {
-            cwd: "/home/opencode/workspace",
-            root: "/home/opencode/workspace",
-          },
-          cost: 0,
-          tokens: {
-            input: 0,
-            output: 0,
-            reasoning: 0,
-            cache: {
-              read: 0,
-              write: 0,
-            },
-          },
-          time: {
-            created: 1,
-            completed: 2,
-          },
-        },
-      },
-    },
-  });
-
-const makeUserMessageUpdatedEvent = (input: { id: string; sessionId?: string }): GlobalEvent =>
-  unsafeStub<GlobalEvent>({
-    payload: {
-      type: "message.updated",
-      properties: {
-        info: {
-          id: input.id,
-          sessionID: input.sessionId ?? "session-1",
-          role: "user",
-          agent: "main",
-          model: {
-            providerID: "provider-1",
-            modelID: "model-1",
-          },
-          time: {
-            created: 1,
-          },
-        },
-      },
-    },
-  });
+const globalEvent = (event: Event): GlobalEvent => toGlobalEvent(event);
 
 const makeToolUpdatedEvent = (input: {
   sessionId?: string;
@@ -292,7 +192,7 @@ const makeHarness = async (options: {
     callIndex: number;
     messageId: string;
     sessionId: string;
-    publishEvent: (event: GlobalEvent) => Effect.Effect<void, never>;
+    publishEvent: (event: Event | GlobalEvent) => Effect.Effect<void, never>;
     storePromptResult: (result: PromptResult) => Effect.Effect<void>;
     completePrompt: (result: PromptResult) => Effect.Effect<void>;
   }) => Effect.Effect<void, unknown>;
@@ -362,7 +262,8 @@ const makeHarness = async (options: {
     send: sendOnChannel,
   });
 
-  const publishEvent = (event: GlobalEvent) => Queue.offer(eventQueue, event).pipe(Effect.asVoid);
+  const publishEvent = (event: Event | GlobalEvent) =>
+    Queue.offer(eventQueue, "payload" in event ? event : globalEvent(event)).pipe(Effect.asVoid);
 
   const storePromptResult = (result: PromptResult) =>
     Ref.update(promptResults, (current) => {
@@ -663,8 +564,8 @@ const makeHarness = async (options: {
     makeQuestionButtonInteraction,
     storePromptResult: (result: PromptResult) =>
       Effect.runPromise(storePromptResult(result)).then(() => undefined),
-    publishEvent: (event: GlobalEvent) =>
-      Effect.runPromise(Queue.offer(eventQueue, event)).then(() => undefined),
+    publishEvent: (event: Event | GlobalEvent) =>
+      Effect.runPromise(publishEvent(event)).then(() => undefined),
   };
 };
 

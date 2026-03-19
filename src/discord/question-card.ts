@@ -56,6 +56,33 @@ type QuestionAction =
   | { kind: "reject"; requestID: string; version: number }
   | { kind: "modal"; requestID: string; version: number; questionIndex: number };
 
+const STATUS_TITLES: Record<PendingQuestionBatchView["status"], string> = {
+  active: "❓ Questions need answers",
+  submitting: "⏳ Submitting answers",
+  answered: "✅ Questions answered",
+  rejected: "⛔ Questions rejected",
+  expired: "⏱️ Questions expired",
+};
+
+const text = (content: string) => new TextDisplayBuilder().setContent(content);
+const addText = (container: ContainerBuilder, content: string | null) =>
+  content ? container.addTextDisplayComponents(text(content)) : container;
+const button = (
+  action: QuestionAction,
+  label: string,
+  style: ButtonStyle,
+  disabled = false,
+) =>
+  new ButtonBuilder()
+    .setCustomId(setQuestionActionId(action))
+    .setLabel(label)
+    .setStyle(style)
+    .setDisabled(disabled);
+const addButtons = (
+  container: ContainerBuilder,
+  ...buttons: ReadonlyArray<ButtonBuilder>
+) => container.addActionRowComponents((row) => row.addComponents(...buttons));
+
 const compact = (value: string, maxLength: number) => {
   if (value.length <= maxLength) {
     return value;
@@ -71,37 +98,19 @@ const questionAllowsCustom = (question: QuestionInfo) => question.custom !== fal
 const questionCountLabel = (questionCount: number) =>
   `${questionCount} question${questionCount === 1 ? "" : "s"}`;
 
-const statusTitle = (status: PendingQuestionBatchView["status"]) => {
-  switch (status) {
-    case "active":
-      return "❓ Questions need answers";
-    case "submitting":
-      return "⏳ Submitting answers";
-    case "answered":
-      return "✅ Questions answered";
-    case "rejected":
-      return "⛔ Questions rejected";
-    case "expired":
-      return "⏱️ Questions expired";
-  }
-};
-
 const terminalStatusSummary = (input: PendingQuestionBatchView) => {
   const count = input.request.questions.length;
-  switch (input.status) {
-    case "answered":
-      return questionCountLabel(count);
-    case "rejected":
-      return count === 1
+  return input.status === "answered"
+    ? questionCountLabel(count)
+    : input.status === "rejected"
+      ? count === 1
         ? "This question prompt was rejected without submitting answers."
-        : "These question prompts were rejected without submitting answers.";
-    case "expired":
-      return count === 1
-        ? "This question prompt expired before it was answered."
-        : "These question prompts expired before they were answered.";
-    default:
-      return null;
-  }
+        : "These question prompts were rejected without submitting answers."
+      : input.status === "expired"
+        ? count === 1
+          ? "This question prompt expired before it was answered."
+          : "These question prompts expired before they were answered."
+        : null;
 };
 
 const questionModeLabel = (question: QuestionInfo) =>
@@ -156,28 +165,16 @@ const emptyQuestionDraft = (): QuestionDraft => ({
   customAnswer: null,
 });
 
-const setQuestionActionId = (action: QuestionAction) => {
-  switch (action.kind) {
-    case "question-prev":
-    case "question-next":
-    case "submit":
-    case "reject":
-      return [CUSTOM_ID_PREFIX, action.requestID, String(action.version), action.kind].join(":");
-    case "clear":
-    case "select":
-    case "custom":
-    case "option-prev":
-    case "option-next":
-    case "modal":
-      return [
-        CUSTOM_ID_PREFIX,
-        action.requestID,
-        String(action.version),
-        action.kind,
-        String(action.questionIndex),
-      ].join(":");
-  }
-};
+const setQuestionActionId = (action: QuestionAction) =>
+  [
+    CUSTOM_ID_PREFIX,
+    action.requestID,
+    String(action.version),
+    action.kind,
+    "questionIndex" in action ? String(action.questionIndex) : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(":");
 
 export const parseQuestionActionId = (customId: string): QuestionAction | null => {
   const parts = customId.split(":");
@@ -305,14 +302,13 @@ const renderResolvedQuestionSections = (input: PendingQuestionBatchView) => {
 const renderQuestionContainer = (input: PendingQuestionBatchView) => {
   const container = new ContainerBuilder().setAccentColor(QUESTION_STATUS_COLORS[input.status]);
 
-  container.addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(
-      lines(
-        `**${statusTitle(input.status)}**`,
-        input.status === "active" || input.status === "submitting"
-          ? renderQuestionMeta(input)
-          : terminalStatusSummary(input),
-      ),
+  addText(
+    container,
+    lines(
+      `**${STATUS_TITLES[input.status]}**`,
+      input.status === "active" || input.status === "submitting"
+        ? renderQuestionMeta(input)
+        : terminalStatusSummary(input),
     ),
   );
 
@@ -322,7 +318,7 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
       if (index > 0) {
         container.addSeparatorComponents(new SeparatorBuilder());
       }
-      container.addTextDisplayComponents(new TextDisplayBuilder().setContent(section));
+      addText(container, section);
     }
     return container;
   }
@@ -342,18 +338,10 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
       : null;
 
   container.addSeparatorComponents(new SeparatorBuilder());
-  container.addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(renderActiveQuestionText(input)),
-  );
-  container.addTextDisplayComponents(new TextDisplayBuilder().setContent(renderAnswerText(input)));
-  if (optionPageLabel) {
-    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(optionPageLabel));
-  }
-
-  const hints = renderQuestionHints(input);
-  if (hints) {
-    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(hints));
-  }
+  addText(container, renderActiveQuestionText(input));
+  addText(container, renderAnswerText(input));
+  addText(container, optionPageLabel);
+  addText(container, renderQuestionHints(input));
 
   if (question.options.length > 0) {
     const select = new StringSelectMenuBuilder()
@@ -389,117 +377,89 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
     container.addActionRowComponents((row) => row.addComponents(select));
   }
 
-  const questionButtons = [
-    new ButtonBuilder()
-      .setCustomId(
-        setQuestionActionId({
-          kind: "question-prev",
-          requestID: input.request.id,
-          version: input.version,
-        }),
-      )
-      .setLabel("Prev")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(input.page === 0),
-    new ButtonBuilder()
-      .setCustomId(
-        setQuestionActionId({
-          kind: "question-next",
-          requestID: input.request.id,
-          version: input.version,
-        }),
-      )
-      .setLabel("Next")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(input.page === input.request.questions.length - 1),
-    new ButtonBuilder()
-      .setCustomId(
-        setQuestionActionId({
-          kind: "clear",
-          requestID: input.request.id,
-          version: input.version,
-          questionIndex: input.page,
-        }),
-      )
-      .setLabel("Clear")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(questionAnswer(question, draft).length === 0),
+  const questionButtons: ButtonBuilder[] = [
+    button(
+      { kind: "question-prev", requestID: input.request.id, version: input.version },
+      "Prev",
+      ButtonStyle.Secondary,
+      input.page === 0,
+    ),
+    button(
+      { kind: "question-next", requestID: input.request.id, version: input.version },
+      "Next",
+      ButtonStyle.Secondary,
+      input.page === input.request.questions.length - 1,
+    ),
+    button(
+      {
+        kind: "clear",
+        requestID: input.request.id,
+        version: input.version,
+        questionIndex: input.page,
+      },
+      "Clear",
+      ButtonStyle.Secondary,
+      questionAnswer(question, draft).length === 0,
+    ),
   ];
 
   if (questionAllowsCustom(question)) {
     questionButtons.push(
-      new ButtonBuilder()
-        .setCustomId(
-          setQuestionActionId({
-            kind: "custom",
-            requestID: input.request.id,
-            version: input.version,
-            questionIndex: input.page,
-          }),
-        )
-        .setLabel(draft.customAnswer ? "Edit other..." : "Other...")
-        .setStyle(ButtonStyle.Primary),
-    );
-  }
-
-  container.addActionRowComponents((row) => row.addComponents(...questionButtons));
-
-  if (options.totalPages > 1) {
-    container.addActionRowComponents((row) =>
-      row.addComponents(
-        new ButtonBuilder()
-          .setCustomId(
-            setQuestionActionId({
-              kind: "option-prev",
-              requestID: input.request.id,
-              version: input.version,
-              questionIndex: input.page,
-            }),
-          )
-          .setLabel("Prev choices")
-          .setStyle(ButtonStyle.Secondary)
-          .setDisabled(options.page === 0),
-        new ButtonBuilder()
-          .setCustomId(
-            setQuestionActionId({
-              kind: "option-next",
-              requestID: input.request.id,
-              version: input.version,
-              questionIndex: input.page,
-            }),
-          )
-          .setLabel("Next choices")
-          .setStyle(ButtonStyle.Secondary)
-          .setDisabled(options.page === options.totalPages - 1),
+      button(
+        {
+          kind: "custom",
+          requestID: input.request.id,
+          version: input.version,
+          questionIndex: input.page,
+        },
+        draft.customAnswer ? "Edit other..." : "Other...",
+        ButtonStyle.Primary,
       ),
     );
   }
 
-  container.addActionRowComponents((row) =>
-    row.addComponents(
-      new ButtonBuilder()
-        .setCustomId(
-          setQuestionActionId({
-            kind: "submit",
-            requestID: input.request.id,
-            version: input.version,
-          }),
-        )
-        .setLabel(
-          `Submit ${answerCount(input.request, input.drafts)}/${input.request.questions.length}`,
-        )
-        .setStyle(ButtonStyle.Success)
-        .setDisabled(!allAnswered),
-      new ButtonBuilder()
-        .setCustomId(
-          setQuestionActionId({
-            kind: "reject",
-            requestID: input.request.id,
-            version: input.version,
-          }),
-        )
-        .setLabel("Reject")
-        .setStyle(ButtonStyle.Danger),
+  addButtons(container, ...questionButtons);
+
+  if (options.totalPages > 1) {
+    addButtons(
+      container,
+      button(
+        {
+          kind: "option-prev",
+          requestID: input.request.id,
+          version: input.version,
+          questionIndex: input.page,
+        },
+        "Prev choices",
+        ButtonStyle.Secondary,
+        options.page === 0,
+      ),
+      button(
+        {
+          kind: "option-next",
+          requestID: input.request.id,
+          version: input.version,
+          questionIndex: input.page,
+        },
+        "Next choices",
+        ButtonStyle.Secondary,
+        options.page === options.totalPages - 1,
+      ),
+    );
+  }
+
+  addButtons(
+    container,
+    button(
+      { kind: "submit", requestID: input.request.id, version: input.version },
+      `Submit ${answerCount(input.request, input.drafts)}/${input.request.questions.length}`,
+      ButtonStyle.Success,
+      !allAnswered,
+    ),
+    button(
+      { kind: "reject", requestID: input.request.id, version: input.version },
+      "Reject",
+      ButtonStyle.Danger,
     ),
   );
 

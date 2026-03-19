@@ -2,7 +2,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import type { Interaction, Message, SendableChannels } from "discord.js";
-import { Deferred, Effect, FiberSet, Layer, Option, Queue, Ref, ServiceMap } from "effect";
+import { Deferred, Effect, FiberSet, Layer, Queue, Ref, ServiceMap } from "effect";
 
 import { AppConfig } from "@/config.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
@@ -22,10 +22,16 @@ import { createEventHandler } from "@/sessions/event-handler.ts";
 import { coordinateActiveRunPrompts } from "@/sessions/run/prompt-coordinator.ts";
 import { runProgressWorker } from "@/sessions/run/progress.ts";
 import {
-  type QuestionWorkflowEvent,
+  applyQuestionSignals,
+  questionTypingAction,
+  runQuestionTypingAction,
   type QuestionWorkflowSignal,
-} from "@/sessions/question/question-coordinator.ts";
-import { makeQuestionRuntime, type QuestionRuntime } from "@/sessions/question/question-runtime.ts";
+} from "@/sessions/question/question-run-state.ts";
+import {
+  makeQuestionRuntime,
+  type QuestionRuntime,
+  type QuestionWorkflowEvent,
+} from "@/sessions/question/question-runtime.ts";
 import { enqueueRunRequest, type RunRequestDestination } from "@/sessions/request-routing.ts";
 import { executeRunBatch } from "@/sessions/run/run-executor.ts";
 import { takeQueuedRunBatch } from "@/sessions/run/run-batch.ts";
@@ -253,80 +259,77 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
     lastActivityAt: session.lastActivityAt,
   });
 
-  const putSession = (session: ChannelSession) =>
-    Ref.update(deps.stateRef, (current) => {
-      const sessionsByChannelId = new Map(current.sessionsByChannelId);
-      sessionsByChannelId.set(session.channelId, session);
-      const sessionsBySessionId = new Map(current.sessionsBySessionId);
-      sessionsBySessionId.set(session.opencode.sessionId, session);
-      return {
-        ...current,
-        sessionsByChannelId,
-        sessionsBySessionId,
-      };
-    });
+  const writeSession = (
+    current: State,
+    session: ChannelSession,
+    options?: {
+      previousSessionId?: string;
+      activeRun?: ActiveRun | null;
+    },
+  ): State => {
+    const previousSessionId = options?.previousSessionId ?? session.opencode.sessionId;
+    const activeRun = options && "activeRun" in options ? options.activeRun : session.activeRun;
+    const sessionsByChannelId = new Map(current.sessionsByChannelId);
+    sessionsByChannelId.set(session.channelId, session);
+
+    const sessionsBySessionId = new Map(current.sessionsBySessionId);
+    sessionsBySessionId.delete(previousSessionId);
+    sessionsBySessionId.set(session.opencode.sessionId, session);
+
+    const activeRunsBySessionId = new Map(current.activeRunsBySessionId);
+    activeRunsBySessionId.delete(previousSessionId);
+    if (activeRun) {
+      activeRunsBySessionId.set(session.opencode.sessionId, activeRun);
+    }
+
+    return {
+      ...current,
+      sessionsByChannelId,
+      sessionsBySessionId,
+      activeRunsBySessionId,
+    };
+  };
+
+  const removeSession = (current: State, session: ChannelSession): State => {
+    const sessionsByChannelId = new Map(current.sessionsByChannelId);
+    sessionsByChannelId.delete(session.channelId);
+    const sessionsBySessionId = new Map(current.sessionsBySessionId);
+    sessionsBySessionId.delete(session.opencode.sessionId);
+    const activeRunsBySessionId = new Map(current.activeRunsBySessionId);
+    activeRunsBySessionId.delete(session.opencode.sessionId);
+    return {
+      ...current,
+      sessionsByChannelId,
+      sessionsBySessionId,
+      activeRunsBySessionId,
+    };
+  };
+
+  const putSession = (session: ChannelSession) => Ref.update(deps.stateRef, (current) => writeSession(current, session));
 
   const deleteSession = (session: ChannelSession) =>
-    Ref.update(deps.stateRef, (current) => {
-      const sessionsByChannelId = new Map(current.sessionsByChannelId);
-      sessionsByChannelId.delete(session.channelId);
-      const sessionsBySessionId = new Map(current.sessionsBySessionId);
-      sessionsBySessionId.delete(session.opencode.sessionId);
-      const activeRunsBySessionId = new Map(current.activeRunsBySessionId);
-      activeRunsBySessionId.delete(session.opencode.sessionId);
-      return {
-        ...current,
-        sessionsByChannelId,
-        sessionsBySessionId,
-        activeRunsBySessionId,
-      };
-    });
+    Ref.update(deps.stateRef, (current) => removeSession(current, session));
 
   const setActiveRun = (session: ChannelSession, activeRun: ActiveRun | null) =>
-    Ref.update(deps.stateRef, (current) => {
+    Effect.sync(() => {
       session.activeRun = activeRun;
+    }).pipe(Effect.andThen(Ref.update(deps.stateRef, (current) => writeSession(current, session))));
 
-      const sessionsByChannelId = new Map(current.sessionsByChannelId);
-      sessionsByChannelId.set(session.channelId, session);
-      const sessionsBySessionId = new Map(current.sessionsBySessionId);
-      sessionsBySessionId.set(session.opencode.sessionId, session);
-
-      const activeRunsBySessionId = new Map(current.activeRunsBySessionId);
-      if (activeRun) {
-        activeRunsBySessionId.set(session.opencode.sessionId, activeRun);
-      } else {
-        activeRunsBySessionId.delete(session.opencode.sessionId);
-      }
-
-      return {
-        ...current,
-        sessionsByChannelId,
-        sessionsBySessionId,
-        activeRunsBySessionId,
-      };
-    });
-
-  const replaceSessionHandle = (session: ChannelSession, replacement: ChannelSession["opencode"]) =>
-    Ref.update(deps.stateRef, (current) => {
-      const previousSessionId = session.opencode.sessionId;
+  const replaceSessionHandle = (session: ChannelSession, replacement: ChannelSession["opencode"]) => {
+    const previousSessionId = session.opencode.sessionId;
+    return Effect.sync(() => {
       session.opencode = replacement;
-
-      const sessionsByChannelId = new Map(current.sessionsByChannelId);
-      sessionsByChannelId.set(session.channelId, session);
-      const sessionsBySessionId = new Map(current.sessionsBySessionId);
-      sessionsBySessionId.delete(previousSessionId);
-      sessionsBySessionId.set(replacement.sessionId, session);
-
-      const activeRunsBySessionId = new Map(current.activeRunsBySessionId);
-      activeRunsBySessionId.delete(previousSessionId);
-
-      return {
-        ...current,
-        sessionsByChannelId,
-        sessionsBySessionId,
-        activeRunsBySessionId,
-      };
-    });
+    }).pipe(
+      Effect.andThen(
+        Ref.update(deps.stateRef, (current) =>
+          writeSession(current, session, {
+            previousSessionId,
+            activeRun: null,
+          }),
+        ),
+      ),
+    );
+  };
 
   const clearSessionGate = (channelId: string, gate: SessionGate) =>
     Ref.update(deps.stateRef, (current) => {
@@ -388,6 +391,9 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
       yield* deps.touchPersistedSession(session.channelId, at);
     });
 
+  const touchAndReturnSession = (session: ChannelSession) =>
+    touchSessionActivity(session).pipe(Effect.as(session));
+
   const isSessionBusy = (session: ChannelSession) =>
     session.activeRun
       ? Effect.succeed(true)
@@ -418,6 +424,37 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
       ),
     );
 
+  const buildSession = (input: {
+    channelId: string;
+    opencode: SessionHandle;
+    rootDir: string;
+    workdir: string;
+    systemPromptAppend?: string;
+    channelSettings: ChannelSettings;
+    createdAt: number;
+    lastActivityAt: number;
+  }): Effect.Effect<ChannelSession> =>
+    Queue.unbounded<RunRequest>().pipe(
+      Effect.map(
+        (queue) =>
+          ({
+            channelId: input.channelId,
+            opencode: input.opencode,
+            systemPromptAppend: input.systemPromptAppend,
+            rootDir: input.rootDir,
+            workdir: input.workdir,
+            createdAt: input.createdAt,
+            lastActivityAt: input.lastActivityAt,
+            channelSettings: input.channelSettings,
+            progressChannel: null,
+            progressMentionContext: null,
+            emittedCompactionSummaryMessageIds: new Set<string>(),
+            queue,
+            activeRun: null,
+          }) satisfies ChannelSession,
+      ),
+    );
+
   const createSessionAt = (input: {
     channelId: string;
     rootDir: string;
@@ -442,23 +479,16 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
         sessionCreateSpec.title,
         sessionCreateSpec.systemPromptAppend,
       );
-      const queue = yield* Queue.unbounded<RunRequest>();
-
-      const session: ChannelSession = {
+      const session = yield* buildSession({
         channelId: input.channelId,
         opencode: opencodeSession,
-        systemPromptAppend: input.systemPromptAppend,
         rootDir: input.rootDir,
         workdir: input.workdir,
+        systemPromptAppend: input.systemPromptAppend,
+        channelSettings: input.channelSettings,
         createdAt: input.createdAt,
         lastActivityAt: input.lastActivityAt,
-        channelSettings: input.channelSettings,
-        progressChannel: null,
-        progressMentionContext: null,
-        emittedCompactionSummaryMessageIds: new Set<string>(),
-        queue,
-        activeRun: null,
-      };
+      });
 
       yield* activateSession(session, {
         removePersistedOnFailure: input.removePersistedOnActivationFailure,
@@ -519,22 +549,16 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
         persisted.opencodeSessionId,
         persisted.systemPromptAppend,
       );
-      const queue = yield* Queue.unbounded<RunRequest>();
-      const session: ChannelSession = {
+      const session = yield* buildSession({
         channelId,
         opencode: opencodeSession,
-        systemPromptAppend: persisted.systemPromptAppend,
         rootDir: persisted.rootDir,
         workdir,
+        systemPromptAppend: persisted.systemPromptAppend,
+        channelSettings,
         createdAt: persisted.createdAt,
         lastActivityAt,
-        channelSettings,
-        progressChannel: null,
-        progressMentionContext: null,
-        emittedCompactionSummaryMessageIds: new Set<string>(),
-        queue,
-        activeRun: null,
-      };
+      });
 
       yield* activateSession(session);
       yield* deps.logger.info("attached channel session", {
@@ -545,6 +569,34 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
       });
       return session;
     });
+
+  const withExistingOrGatedSession = <A>(
+    channelId: string,
+    onMissing: () => Effect.Effect<A, unknown>,
+  ): Effect.Effect<ChannelSession | A, unknown> =>
+    Effect.gen(function* () {
+      const existing = yield* getSession(channelId);
+      if (existing) {
+        return yield* touchAndReturnSession(existing);
+      }
+
+      return yield* withSessionGate(
+        channelId,
+        Effect.gen(function* () {
+          const current = yield* getSession(channelId);
+          return current ? yield* touchAndReturnSession(current) : yield* onMissing();
+        }),
+      );
+    });
+
+  const closeSessionResources = (session: ChannelSession) =>
+    Queue.shutdown(session.queue).pipe(
+      Effect.ignore,
+      Effect.andThen(session.opencode.close().pipe(Effect.ignore)),
+    );
+
+  const unloadSession = (session: ChannelSession) =>
+    deleteSession(session).pipe(Effect.andThen(closeSessionResources(session)));
 
   const restoreOrCreateSession = (message: Message): Effect.Effect<ChannelSession, unknown> =>
     Effect.gen(function* () {
@@ -584,51 +636,18 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
     });
 
   const createOrGetSession = (message: Message): Effect.Effect<ChannelSession, unknown> =>
-    Effect.gen(function* () {
-      const existing = yield* getSession(message.channelId);
-      if (existing) {
-        yield* touchSessionActivity(existing);
-        return existing;
-      }
-
-      return yield* withSessionGate(
-        message.channelId,
-        Effect.gen(function* () {
-          const current = yield* getSession(message.channelId);
-          if (current) {
-            yield* touchSessionActivity(current);
-            return current;
-          }
-          return yield* restoreOrCreateSession(message);
-        }),
-      );
-    });
+    withExistingOrGatedSession(message.channelId, () => restoreOrCreateSession(message)).pipe(
+      Effect.map((session) => session as ChannelSession),
+    );
 
   const getOrRestoreSession = (channelId: string): Effect.Effect<ChannelSession | null, unknown> =>
-    Effect.gen(function* () {
-      const existing = yield* getSession(channelId);
-      if (existing) {
-        yield* touchSessionActivity(existing);
-        return existing;
-      }
-
-      const persisted = yield* deps.getPersistedSession(channelId);
-      if (!persisted) {
-        return null;
-      }
-
-      return yield* withSessionGate(
-        channelId,
-        Effect.gen(function* () {
-          const current = yield* getSession(channelId);
-          if (current) {
-            yield* touchSessionActivity(current);
-            return current;
-          }
-          return yield* attachPersistedSession(channelId, persisted);
-        }),
-      );
-    });
+    withExistingOrGatedSession(channelId, () =>
+      deps.getPersistedSession(channelId).pipe(
+        Effect.flatMap((persisted) =>
+          persisted ? attachPersistedSession(channelId, persisted) : Effect.succeed(null),
+        ),
+      ),
+    ).pipe(Effect.map((session) => session as ChannelSession | null));
 
   const recreateSession = (
     session: ChannelSession,
@@ -708,9 +727,7 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
                 return;
               }
 
-              yield* deleteSession(session);
-              yield* Queue.shutdown(session.queue).pipe(Effect.ignore);
-              yield* session.opencode.close().pipe(Effect.ignore);
+              yield* unloadSession(session);
               yield* deps.logger.info("closed idle channel session", {
                 channelId: session.channelId,
                 sessionId: session.opencode.sessionId,
@@ -735,9 +752,7 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
         }
 
         if (loadedSession) {
-          yield* deleteSession(loadedSession);
-          yield* Queue.shutdown(loadedSession.queue).pipe(Effect.ignore);
-          yield* loadedSession.opencode.close().pipe(Effect.ignore);
+          yield* unloadSession(loadedSession);
         }
 
         yield* deps.deletePersistedSession(channelId).pipe(Effect.ignore);
@@ -770,11 +785,7 @@ export const createSessionRegistry = <State extends SessionRegistryState>(
       Effect.flatMap((state) =>
         Effect.forEach(
           state.sessionsByChannelId.values(),
-          (session) =>
-            deleteSession(session).pipe(
-              Effect.andThen(Queue.shutdown(session.queue).pipe(Effect.ignore)),
-              Effect.andThen(session.opencode.close().pipe(Effect.ignore)),
-            ),
+          unloadSession,
           { concurrency: "unbounded", discard: true },
         ),
       ),
@@ -914,10 +925,6 @@ export const SessionRuntimeLayer = Layer.unwrap(
             Effect.flatMap((pending) =>
               Ref.modify(questionTypingPausedRef, (current) => {
                 const wasPaused = current.has(sessionId);
-                if (pending === wasPaused) {
-                  return [{ pending, wasPaused }, current] as const;
-                }
-
                 const next = new Set(current);
                 if (pending) {
                   next.add(sessionId);
@@ -927,32 +934,12 @@ export const SessionRuntimeLayer = Layer.unwrap(
                 return [{ pending, wasPaused }, next] as const;
               }).pipe(
                 Effect.flatMap(({ pending, wasPaused }) =>
-                  pending
-                    ? wasPaused
-                      ? Effect.void
-                      : Effect.promise(() => activeRun.typing.pause()).pipe(
-                          Effect.timeoutOption("1 second"),
-                          Effect.flatMap((result) =>
-                            Option.isSome(result)
-                              ? Effect.void
-                              : logger.warn(
-                                  "typing pause timed out while question prompt was active",
-                                  {
-                                    channelId: activeRun.originMessage.channelId,
-                                    sessionId,
-                                  },
-                                ),
-                          ),
-                        )
-                    : wasPaused
-                      ? activeRun.questionOutcome._tag !== "none" || activeRun.interruptRequested
-                        ? Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
-                        : Effect.sync(() => {
-                            activeRun.typing.resume();
-                          })
-                      : activeRun.questionOutcome._tag !== "none" || activeRun.interruptRequested
-                        ? Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore)
-                        : Effect.void,
+                  runQuestionTypingAction({
+                    sessionId,
+                    activeRun,
+                    action: questionTypingAction(activeRun, pending, wasPaused),
+                    logger,
+                  }),
                 ),
               ),
             ),
@@ -960,41 +947,12 @@ export const SessionRuntimeLayer = Layer.unwrap(
         }),
       );
 
-    const applyQuestionSignals = (
-      sessionId: string,
-      signals: ReadonlyArray<QuestionWorkflowSignal>,
-    ) =>
-      Effect.forEach(
-        signals,
-        (item) =>
-          getSessionContext(sessionId).pipe(
-            Effect.flatMap((context) => {
-              const activeRun = context?.activeRun ?? null;
-              switch (item.type) {
-                case "clear-run-interrupt":
-                  return !activeRun
-                    ? Effect.void
-                    : Effect.sync(() => {
-                        activeRun.interruptRequested = false;
-                        activeRun.interruptSource = null;
-                      });
-                case "set-run-question-outcome":
-                  return !activeRun
-                    ? Effect.void
-                    : Effect.sync(() => {
-                        activeRun.questionOutcome = item.outcome;
-                      });
-              }
-            }),
-          ),
-        { concurrency: "unbounded", discard: true },
-      );
-
     const applyQuestionWorkflowSignals = (
       sessionId: string,
       signals: ReadonlyArray<QuestionWorkflowSignal>,
     ) =>
-      applyQuestionSignals(sessionId, signals).pipe(
+      getSessionContext(sessionId).pipe(
+        Effect.flatMap((context) => applyQuestionSignals(context?.activeRun ?? null, signals)),
         Effect.andThen(reconcileQuestionTypingForSession(sessionId)),
       );
 
