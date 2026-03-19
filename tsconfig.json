@@ -1,5 +1,5 @@
 {
-  "$schema": "https://json.schemastore.org/tsconfig",
+  "$schema": "https://raw.githubusercontent.com/Effect-TS/tsgo/refs/heads/main/schema.json",
   "compilerOptions": {
     "target": "ESNext",
     "module": "ESNext",
@@ -12,7 +12,12 @@
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
     "types": ["bun"],
-    "lib": ["ESNext", "DOM"]
+    "lib": ["ESNext", "DOM"],
+"plugins": [
+	{
+		"name": "@effect/language-service"
+	}
+]
   },
   "include": ["src", "test"]
 }

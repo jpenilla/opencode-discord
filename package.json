@@ -16,7 +16,8 @@
     "fmt": "oxfmt src test opencode/tools opencode/plugins opencode/test",
     "fmt:check": "oxfmt src test opencode/tools opencode/plugins opencode/test --check",
     "typecheck:root": "tsgo -p tsconfig.json",
-    "typecheck": "bun run typecheck:root && bun run --cwd opencode typecheck"
+    "typecheck": "bun run typecheck:root && bun run --cwd opencode typecheck",
+    "prepare": "effect-tsgo patch"
   },
   "dependencies": {
     "@discordjs/builders": "^1.13.1",
@@ -31,6 +32,7 @@
     "@typescript/native-preview": "^7.0.0-dev.20260318.1",
     "oxfmt": "^0.41.0",
     "oxlint": "^1.56.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "@effect/tsgo": "0.0.15"
   }
 }
