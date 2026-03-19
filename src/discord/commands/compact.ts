@@ -2,7 +2,7 @@ import { Effect } from "effect";
 
 import { CommandContext } from "@/discord/commands/command-context.ts";
 import { decideCompactEntry, GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/channels/command-policy.ts";
-import { SessionRuntime } from "@/sessions/session-runtime.ts";
+import { SessionChannelBridge } from "@/sessions/session-runtime.ts";
 import { defineGuildCommand } from "./definition.ts";
 
 export const compactCommand = defineGuildCommand({
@@ -10,14 +10,14 @@ export const compactCommand = defineGuildCommand({
   description: "Compact the current OpenCode session in this channel",
   execute: Effect.gen(function* () {
     const context = yield* CommandContext;
-    const sessionRuntime = yield* SessionRuntime;
+    const sessionBridge = yield* SessionChannelBridge;
 
     if (!context.inGuildTextChannel || !context.guildTextChannel) {
       yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
       return;
     }
 
-    const channelActivity = yield* sessionRuntime.readRestoredChannelActivity(context.channelId);
+    const channelActivity = yield* sessionBridge.readRestoredChannelActivity(context.channelId);
     const entry = decideCompactEntry({
       channelActivity,
     });
@@ -27,7 +27,7 @@ export const compactCommand = defineGuildCommand({
     }
 
     yield* context.ack();
-    const result = yield* sessionRuntime.startCompaction(
+    const result = yield* sessionBridge.startCompaction(
       context.channelId,
       context.guildTextChannel!,
     );

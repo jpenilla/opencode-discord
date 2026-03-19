@@ -114,6 +114,31 @@ export type SessionRuntimeShape = {
   shutdown: () => Effect.Effect<void, unknown>;
 };
 
+export type SessionChannelBridgeShape = Pick<
+  SessionRuntimeShape,
+  | "readLoadedChannelActivity"
+  | "readRestoredChannelActivity"
+  | "queueMessageRunRequest"
+  | "routeQuestionInteraction"
+  | "invalidate"
+  | "updateLoadedChannelSettings"
+  | "requestRunInterrupt"
+  | "startCompaction"
+  | "requestCompactionInterrupt"
+  | "shutdown"
+>;
+
+export class SessionChannelBridge extends ServiceMap.Service<
+  SessionChannelBridge,
+  SessionChannelBridgeShape
+>()("SessionChannelBridge") {}
+
+export type SessionRunAccessShape = Pick<SessionRuntimeShape, "getActiveRunBySessionId">;
+
+export class SessionRunAccess extends ServiceMap.Service<SessionRunAccess, SessionRunAccessShape>()(
+  "SessionRunAccess",
+) {}
+
 export class SessionRuntime extends ServiceMap.Service<SessionRuntime, SessionRuntimeShape>()(
   "SessionRuntime",
 ) {}
@@ -1315,6 +1340,27 @@ export const SessionRuntimeLayer = Layer.unwrap(
       shutdown,
     });
 
-    return Layer.succeed(SessionRuntime, sessionRuntime);
+    const sessionChannelBridge: SessionChannelBridgeShape = {
+      readLoadedChannelActivity: sessionRuntime.readLoadedChannelActivity,
+      readRestoredChannelActivity: sessionRuntime.readRestoredChannelActivity,
+      queueMessageRunRequest: sessionRuntime.queueMessageRunRequest,
+      routeQuestionInteraction: sessionRuntime.routeQuestionInteraction,
+      invalidate: sessionRuntime.invalidate,
+      updateLoadedChannelSettings: sessionRuntime.updateLoadedChannelSettings,
+      requestRunInterrupt: sessionRuntime.requestRunInterrupt,
+      startCompaction: sessionRuntime.startCompaction,
+      requestCompactionInterrupt: sessionRuntime.requestCompactionInterrupt,
+      shutdown: sessionRuntime.shutdown,
+    };
+
+    const sessionRunAccess: SessionRunAccessShape = {
+      getActiveRunBySessionId: sessionRuntime.getActiveRunBySessionId,
+    };
+
+    return Layer.mergeAll(
+      Layer.succeed(SessionRuntime, sessionRuntime),
+      Layer.succeed(SessionChannelBridge, sessionChannelBridge),
+      Layer.succeed(SessionRunAccess, sessionRunAccess),
+    );
   }),
 );

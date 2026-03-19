@@ -28,8 +28,8 @@ import {
 } from "@/sessions/idle-compaction-workflow.ts";
 import {
   makeSessionRuntime,
-  SessionRuntime,
-  type SessionRuntimeShape,
+  SessionChannelBridge,
+  type SessionChannelBridgeShape,
 } from "@/sessions/session-runtime.ts";
 import {
   noQuestionOutcome,
@@ -59,14 +59,14 @@ type HarnessOptions = {
 };
 
 const makeCommandsLayer = (deps: {
-  sessionRuntime: SessionRuntimeShape;
+  sessionBridge: SessionChannelBridgeShape;
   channelSettingsRuntime: ChannelSettingsRuntimeShape;
   infoCards: InfoCardsShape;
   logger: LoggerShape;
 }) =>
   Layer.mergeAll(
     Layer.succeed(ChannelSettingsRuntime, deps.channelSettingsRuntime),
-    Layer.succeed(SessionRuntime, deps.sessionRuntime),
+    Layer.succeed(SessionChannelBridge, deps.sessionBridge),
     Layer.succeed(InfoCards, deps.infoCards),
     Layer.succeed(Logger, deps.logger),
   );
@@ -400,7 +400,7 @@ const makeHarness = async (options?: HarnessOptions) => {
   };
 
   const commandsLayer = makeCommandsLayer({
-    sessionRuntime,
+    sessionBridge: sessionRuntime,
     channelSettingsRuntime,
     infoCards,
     logger,
