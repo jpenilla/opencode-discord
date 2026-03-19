@@ -33,9 +33,11 @@ import {
 } from "@/opencode/service.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import {
-  SessionStore,
+  ChannelSettingsPersistence,
   type PersistedChannelSession,
-  type SessionStoreShape,
+  SessionPersistence,
+  type ChannelSettingsPersistenceShape,
+  type SessionPersistenceShape,
 } from "@/state/store.ts";
 import { SessionRunAccess, SessionRuntimeLayer } from "@/sessions/session-runtime.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
@@ -587,7 +589,7 @@ const makeHarness = async (options: {
     isHealthy: () => options.isHealthyImpl?.() ?? Effect.succeed(true),
   };
 
-  const sessionStore: SessionStoreShape = {
+  const sessionPersistence: SessionPersistenceShape = {
     getSession: (channelId) =>
       Ref.get(persistedSessions).pipe(Effect.map((sessions) => sessions.get(channelId) ?? null)),
     upsertSession: (session) =>
@@ -614,6 +616,9 @@ const makeHarness = async (options: {
         next.delete(channelId);
         return next;
       }),
+  };
+
+  const channelSettingsPersistence: ChannelSettingsPersistenceShape = {
     getChannelSettings: (channelId) =>
       Ref.get(persistedSettings).pipe(Effect.map((settings) => settings.get(channelId) ?? null)),
     upsertChannelSettings: (settings) =>
@@ -629,7 +634,8 @@ const makeHarness = async (options: {
     InfoCardsLayer,
     Layer.succeed(Logger, makeLogger()),
     Layer.succeed(OpencodeService, service),
-    Layer.succeed(SessionStore, sessionStore),
+    Layer.succeed(SessionPersistence, sessionPersistence),
+    Layer.succeed(ChannelSettingsPersistence, channelSettingsPersistence),
     Layer.succeed(OpencodeEventQueue, eventQueue),
   );
   const sessionRuntimeLayer = SessionRuntimeLayer.pipe(Layer.provide(deps));

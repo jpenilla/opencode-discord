@@ -44,7 +44,11 @@ import {
 } from "@/state/channel-settings.ts";
 import { sessionRootDir, sessionWorkdirFromRoot } from "@/state/paths.ts";
 import { resolveStatePaths } from "@/state/paths.ts";
-import { SessionStore, type PersistedChannelSession } from "@/state/store.ts";
+import {
+  ChannelSettingsPersistence,
+  SessionPersistence,
+  type PersistedChannelSession,
+} from "@/state/store.ts";
 import { formatError } from "@/util/errors.ts";
 import { Logger } from "@/util/logging.ts";
 import type { LoggerShape } from "@/util/logging.ts";
@@ -923,7 +927,8 @@ export const SessionRuntimeLayer = Layer.unwrap(
     const infoCards = yield* InfoCards;
     const opencode = yield* OpencodeService;
     const eventQueue = yield* OpencodeEventQueue;
-    const sessionStore = yield* SessionStore;
+    const sessionPersistence = yield* SessionPersistence;
+    const channelSettingsPersistence = yield* ChannelSettingsPersistence;
     const stateRef = yield* Ref.make(createSessionRuntimeState());
     const shutdownStartedRef = yield* Ref.make(false);
     const questionTypingPausedRef = yield* Ref.make(new Set<string>());
@@ -966,11 +971,11 @@ export const SessionRuntimeLayer = Layer.unwrap(
       stateRef,
       createOpencodeSession: opencode.createSession,
       attachOpencodeSession: opencode.attachSession,
-      getPersistedSession: sessionStore.getSession,
-      upsertPersistedSession: sessionStore.upsertSession,
-      getPersistedChannelSettings: sessionStore.getChannelSettings,
-      touchPersistedSession: sessionStore.touchSession,
-      deletePersistedSession: sessionStore.deleteSession,
+      getPersistedSession: sessionPersistence.getSession,
+      upsertPersistedSession: sessionPersistence.upsertSession,
+      getPersistedChannelSettings: channelSettingsPersistence.getChannelSettings,
+      touchPersistedSession: sessionPersistence.touchSession,
+      deletePersistedSession: sessionPersistence.deleteSession,
       isSessionHealthy: opencode.isHealthy,
       startWorker: (session) =>
         FiberSet.run(fiberSet, { startImmediately: true })(worker(session)).pipe(Effect.asVoid),

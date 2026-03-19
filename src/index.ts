@@ -9,7 +9,7 @@ import { OpencodeEventQueueLayer } from "@/opencode/events.ts";
 import { OpencodeServiceLayer } from "@/opencode/service.ts";
 import { SessionRuntimeLayer } from "@/sessions/session-runtime.ts";
 import { installShutdownSignalHandlers } from "@/shutdown/signals.ts";
-import { SessionStoreLayer } from "@/state/store.ts";
+import { StatePersistenceLayer } from "@/state/store.ts";
 import { ToolBridgeLayer } from "@/tools/bridge/server.ts";
 import { Logger, LoggerLayer } from "@/util/logging.ts";
 
@@ -17,19 +17,19 @@ const baseLayer = Layer.mergeAll(AppConfigLayer, LoggerLayer, OpencodeEventQueue
 const uiLayer = InfoCardsLayer;
 
 const opencodeLayer = OpencodeServiceLayer.pipe(Layer.provide(baseLayer));
-const sessionStoreLayer = SessionStoreLayer.pipe(Layer.provide(AppConfigLayer));
+const statePersistenceLayer = StatePersistenceLayer.pipe(Layer.provide(AppConfigLayer));
 const sessionDependenciesLayer = Layer.mergeAll(
   baseLayer,
   uiLayer,
   opencodeLayer,
-  sessionStoreLayer,
+  statePersistenceLayer,
 );
 const sessionRuntimeLayer = SessionRuntimeLayer.pipe(Layer.provide(sessionDependenciesLayer));
 const channelDependenciesLayer = Layer.mergeAll(
   baseLayer,
   uiLayer,
   opencodeLayer,
-  sessionStoreLayer,
+  statePersistenceLayer,
   sessionRuntimeLayer,
 );
 const channelRuntimeLayer = ChannelRuntimeLayer.pipe(Layer.provide(channelDependenciesLayer));
@@ -43,7 +43,7 @@ const appLayer = Layer.mergeAll(
   baseLayer,
   uiLayer,
   opencodeLayer,
-  sessionStoreLayer,
+  statePersistenceLayer,
   sessionRuntimeLayer,
   channelRuntimeLayer,
   toolBridgeLayer,
