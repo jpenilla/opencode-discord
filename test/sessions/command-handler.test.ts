@@ -5,9 +5,13 @@ import {
   type Message,
   type SendableChannels,
 } from "discord.js";
-import { Deferred, Effect, Layer, Queue, Redacted, Ref } from "effect";
+import { Deferred, Effect, Layer, Queue, Ref } from "effect";
 
-import { AppConfig, type AppConfigShape } from "@/config.ts";
+import {
+  ChannelSettingsRuntime,
+  makeChannelSettingsRuntime,
+  type ChannelSettingsRuntimeShape,
+} from "@/channels/channel-settings-runtime.ts";
 import {
   NEW_SESSION_BUSY_MESSAGE,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
@@ -33,39 +37,11 @@ import {
   type ChannelSession,
   type RunRequest,
 } from "@/sessions/session.ts";
-import {
-  SessionStore,
-  type PersistedChannelSession,
-  type SessionStoreShape,
-} from "@/state/store.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
-
-const makeConfig = (defaults: {
-  showThinking: boolean;
-  showCompactionSummaries: boolean;
-}): AppConfigShape => ({
-  discordToken: Redacted.make("discord-token"),
-  triggerPhrase: "hey opencode",
-  ignoreOtherBotTriggers: false,
-  sessionInstructions: "",
-  stateDir: "/tmp/opencode-discord-test-state",
-  defaultProviderId: undefined,
-  defaultModelId: undefined,
-  showThinkingByDefault: defaults.showThinking,
-  showCompactionSummariesByDefault: defaults.showCompactionSummaries,
-  sessionIdleTimeoutMs: 30 * 60 * 1_000,
-  toolBridgeSocketPath: "/tmp/bridge.sock",
-  toolBridgeToken: Redacted.make("bridge-token"),
-  sandboxBackend: "bwrap",
-  opencodeBin: "opencode",
-  bwrapBin: "bwrap",
-  sandboxReadOnlyPaths: [],
-  sandboxEnvPassthrough: [],
-});
 
 type HarnessOptions = {
   sessionHealthy?: boolean;
@@ -84,16 +60,14 @@ type HarnessOptions = {
 
 const makeCommandsLayer = (deps: {
   sessionRuntime: SessionRuntimeShape;
+  channelSettingsRuntime: ChannelSettingsRuntimeShape;
   infoCards: InfoCardsShape;
-  sessionStore: SessionStoreShape;
   logger: LoggerShape;
-  channelSettingsDefaults: { showThinking: boolean; showCompactionSummaries: boolean };
 }) =>
   Layer.mergeAll(
-    Layer.succeed(AppConfig, makeConfig(deps.channelSettingsDefaults)),
+    Layer.succeed(ChannelSettingsRuntime, deps.channelSettingsRuntime),
     Layer.succeed(SessionRuntime, deps.sessionRuntime),
     Layer.succeed(InfoCards, deps.infoCards),
-    Layer.succeed(SessionStore, deps.sessionStore),
     Layer.succeed(Logger, deps.logger),
   );
 
@@ -330,20 +304,18 @@ const makeHarness = async (options?: HarnessOptions) => {
     error: () => Effect.void,
   };
 
-  const sessionStore: SessionStoreShape = {
-    getSession: () => Effect.succeed<PersistedChannelSession | null>(null),
-    upsertSession: () => Effect.void,
-    touchSession: () => Effect.void,
-    deleteSession: () => Effect.void,
-    getChannelSettings: (channelId: string) =>
+  const channelSettingsRuntime = makeChannelSettingsRuntime({
+    defaults: channelSettingsDefaults,
+    getPersistedChannelSettings: (channelId: string) =>
       Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(channelId) ?? null)),
-    upsertChannelSettings: (settings: PersistedChannelSettings) =>
+    upsertPersistedChannelSettings: (settings: PersistedChannelSettings) =>
       Ref.update(persistedSettings, (current) => {
         const next = new Map(current);
         next.set(settings.channelId, settings);
         return next;
       }),
-  };
+    updateLoadedChannelSettings: sessionRuntime.updateLoadedChannelSettings,
+  });
 
   const idleCompactionWorkflow: IdleCompactionWorkflowShape = {
     hasActive: () => Ref.get(idleCompactionActive),
@@ -429,10 +401,9 @@ const makeHarness = async (options?: HarnessOptions) => {
 
   const commandsLayer = makeCommandsLayer({
     sessionRuntime,
+    channelSettingsRuntime,
     infoCards,
-    sessionStore,
     logger,
-    channelSettingsDefaults: channelSettingsDefaults,
   });
 
   const runtime = createCommandHandler({
