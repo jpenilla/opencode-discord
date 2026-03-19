@@ -9,7 +9,7 @@ import {
   takeProgressBatch,
 } from "@/sessions/run/progress.ts";
 import type { ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
-import { unsafeStub } from "../support/stub.ts";
+import { unsafeStub } from "../../support/stub.ts";
 
 const cardText = (payload: MessageCreateOptions | MessageEditOptions) =>
   String(

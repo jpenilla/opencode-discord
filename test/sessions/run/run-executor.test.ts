@@ -7,7 +7,7 @@ import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
 import { executeRunBatch } from "@/sessions/run/run-executor.ts";
 import type { NonEmptyRunRequestBatch } from "@/sessions/run/run-batch.ts";
 import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
-import { unsafeStub } from "../support/stub.ts";
+import { unsafeStub } from "../../support/stub.ts";
 
 const makeMessage = (id: string) =>
   unsafeStub<Message>({
