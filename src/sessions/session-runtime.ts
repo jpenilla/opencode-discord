@@ -88,7 +88,7 @@ export type RunInterruptRequestResult =
   | { type: "question-pending" }
   | { type: "failed"; error: unknown };
 
-export type SessionRuntimeShape = {
+type SessionRuntimeShape = {
   readLoadedChannelActivity: (channelId: string) => Effect.Effect<ChannelActivity, unknown>;
   readRestoredChannelActivity: (channelId: string) => Effect.Effect<ChannelActivity, unknown>;
   getActiveRunBySessionId: (sessionId: string) => Effect.Effect<ActiveRun | null, unknown>;
@@ -137,10 +137,6 @@ export type SessionRunAccessShape = Pick<SessionRuntimeShape, "getActiveRunBySes
 
 export class SessionRunAccess extends ServiceMap.Service<SessionRunAccess, SessionRunAccessShape>()(
   "SessionRunAccess",
-) {}
-
-export class SessionRuntime extends ServiceMap.Service<SessionRuntime, SessionRuntimeShape>()(
-  "SessionRuntime",
 ) {}
 
 type SessionGateDecision = {
@@ -1358,7 +1354,6 @@ export const SessionRuntimeLayer = Layer.unwrap(
     };
 
     return Layer.mergeAll(
-      Layer.succeed(SessionRuntime, sessionRuntime),
       Layer.succeed(SessionChannelBridge, sessionChannelBridge),
       Layer.succeed(SessionRunAccess, sessionRunAccess),
     );
