@@ -7,6 +7,6 @@
     "typecheck": "tsgo -p tsconfig.json"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "^1.2.26"
+    "@opencode-ai/plugin": "^1.2.27"
   }
 }
