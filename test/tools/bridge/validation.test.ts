@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Effect } from "effect";
-import * as v from "valibot";
+import { Effect, Schema } from "effect";
 
 import {
   nonEmptyString,
@@ -9,66 +8,72 @@ import {
 } from "@/tools/bridge/validation.ts";
 
 describe("parseSessionPayload", () => {
-  test("formats missing sessionID from the valibot result", async () => {
-    await expect(Effect.runPromise(parseSessionPayload({}))).rejects.toThrow(
-      'invalid request: sessionID: Invalid key: Expected "sessionID" but received undefined',
+  test("reports a missing sessionID", async () => {
+    return expect(Effect.runPromise(parseSessionPayload({}))).rejects.toThrow(
+      'invalid request\nMissing key\n  at ["sessionID"]',
     );
   });
 
-  test("formats blank sessionID from the valibot result", async () => {
-    await expect(Effect.runPromise(parseSessionPayload({ sessionID: "" }))).rejects.toThrow(
-      "invalid request: sessionID: Invalid length: Expected >=1 but received 0",
+  test("reports a blank sessionID", async () => {
+    return expect(Effect.runPromise(parseSessionPayload({ sessionID: "" }))).rejects.toThrow(
+      'invalid request\nExpected a value with a length of at least 1, got ""\n  at ["sessionID"]',
     );
   });
 
-  test("returns the payload when sessionID is present and preserves extras", async () => {
-    await expect(
+  test("rejects unexpected keys on session-only payloads", async () => {
+    return expect(
       Effect.runPromise(parseSessionPayload({ sessionID: "session-1", messageId: "m-1" })),
-    ).resolves.toEqual({
-      sessionID: "session-1",
-      messageId: "m-1",
-    });
+    ).rejects.toThrow('invalid request\nUnexpected key with value "m-1"\n  at ["messageId"]');
   });
 });
 
 describe("parseBridgePayload", () => {
-  test("formats validation failures from valibot issues", async () => {
-    const schema = v.object({
+  test("reports validation failures from Effect Schema", async () => {
+    const schema = Schema.Struct({
       sessionID: nonEmptyString,
       messageId: nonEmptyString,
     });
 
-    await expect(
+    return expect(
       Effect.runPromise(parseBridgePayload(schema, { sessionID: "session-1" })),
-    ).rejects.toThrow(
-      'invalid request: messageId: Invalid key: Expected "messageId" but received undefined',
-    );
+    ).rejects.toThrow('invalid request\nMissing key\n  at ["messageId"]');
   });
 
   test("includes multiple issue paths when validation fails in more than one place", async () => {
-    const schema = v.object({
+    const schema = Schema.Struct({
       sessionID: nonEmptyString,
       messageId: nonEmptyString,
     });
 
-    await expect(Effect.runPromise(parseBridgePayload(schema, { sessionID: "" }))).rejects.toThrow(
-      'invalid request: sessionID: Invalid length: Expected >=1 but received 0; messageId: Invalid key: Expected "messageId" but received undefined',
+    return expect(Effect.runPromise(parseBridgePayload(schema, { sessionID: "" }))).rejects.toThrow(
+      'invalid request\nExpected a value with a length of at least 1, got ""\n  at ["sessionID"]\nMissing key\n  at ["messageId"]',
     );
   });
 
   test("returns typed output when validation succeeds", async () => {
-    const schema = v.object({
+    const schema = Schema.Struct({
       sessionID: nonEmptyString,
       messageId: nonEmptyString,
     });
 
-    await expect(
-      Effect.runPromise(
-        parseBridgePayload(schema, { sessionID: "session-1", messageId: "m-1", extra: true }),
-      ),
+    return expect(
+      Effect.runPromise(parseBridgePayload(schema, { sessionID: "session-1", messageId: "m-1" })),
     ).resolves.toEqual({
       sessionID: "session-1",
       messageId: "m-1",
     });
+  });
+
+  test("rejects unexpected keys", async () => {
+    const schema = Schema.Struct({
+      sessionID: nonEmptyString,
+      messageId: nonEmptyString,
+    });
+
+    return expect(
+      Effect.runPromise(
+        parseBridgePayload(schema, { sessionID: "session-1", messageId: "m-1", extra: true }),
+      ),
+    ).rejects.toThrow('invalid request\nUnexpected key with value true\n  at ["extra"]');
   });
 });

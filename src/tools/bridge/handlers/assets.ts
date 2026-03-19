@@ -1,6 +1,5 @@
 import type { Message } from "discord.js";
-import { Effect } from "effect";
-import * as v from "valibot";
+import { Effect, Schema } from "effect";
 
 import { formatCustomEmoji, listUsableCustomEmojis, listUsableStickers } from "@/discord/assets.ts";
 import { ToolBridgeResponseError } from "@/tools/bridge/errors.ts";
@@ -12,12 +11,12 @@ import {
 import type { ToolBridgeHandlerContext } from "@/tools/bridge/routes.ts";
 import { nonEmptyString } from "@/tools/bridge/validation.ts";
 
-export const sendStickerPayloadSchema = v.object({
+export const sendStickerPayloadSchema = Schema.Struct({
   stickerID: nonEmptyString,
-  caption: v.optional(v.string()),
+  caption: Schema.optional(Schema.String),
 });
 
-export type SendStickerPayload = v.InferOutput<typeof sendStickerPayloadSchema>;
+export type SendStickerPayload = Schema.Schema.Type<typeof sendStickerPayloadSchema>;
 
 const formatEmojiList = (message: Message) => {
   const emojis = listUsableCustomEmojis(message);

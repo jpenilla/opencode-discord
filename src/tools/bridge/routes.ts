@@ -1,7 +1,6 @@
 import type { IncomingMessage } from "node:http";
 
-import { Effect } from "effect";
-import * as v from "valibot";
+import { Effect, Schema } from "effect";
 
 import type { ActiveRun } from "@/sessions/session.ts";
 import {
@@ -23,7 +22,7 @@ import {
   type UploadPayload,
 } from "@/tools/bridge/handlers/uploads.ts";
 import { readJsonBody } from "@/tools/bridge/transport.ts";
-import { parseBridgePayload, parseSessionPayload } from "@/tools/bridge/validation.ts";
+import { parseBridgePayload, sessionPayloadSchema } from "@/tools/bridge/validation.ts";
 
 type ParsedToolBridgeRequest<TPayload> = {
   sessionID: string;
@@ -75,32 +74,61 @@ const createRoute = <TPayload>(config: ToolBridgeRouteConfig<TPayload>): ToolBri
 
 const parseJsonRequest = <TPayload>(
   request: IncomingMessage,
-  parse: (body: unknown) => Effect.Effect<TPayload, unknown>,
+  parse: (body: unknown) => Effect.Effect<ParsedToolBridgeRequest<TPayload>, unknown>,
 ) =>
   Effect.gen(function* () {
     const body = yield* readJsonBody(request);
-    const session = yield* parseSessionPayload(body);
-    const payload = yield* parse(body);
-    return {
-      sessionID: session.sessionID,
-      payload,
-    };
+    return yield* parse(body);
   });
 
-const createSchemaRoute = <TSchema extends v.GenericSchema>(
-  config: Omit<ToolBridgeRouteConfig<v.InferOutput<TSchema>>, "parseRequest"> & { schema: TSchema },
+const withSessionPayloadSchema = <TSchema extends Schema.Struct<Schema.Struct.Fields>>(
+  schema: TSchema,
+) =>
+  Schema.Struct({
+    ...sessionPayloadSchema.fields,
+    ...schema.fields,
+  });
+
+const splitSessionRequest = <TPayload extends { sessionID: string }>(request: TPayload) => {
+  const { sessionID, ...payload } = request;
+  return {
+    sessionID,
+    payload: payload as Omit<TPayload, "sessionID">,
+  };
+};
+
+const createSchemaRoute = <TSchema extends Schema.Struct<Schema.Struct.Fields>>(
+  config: Omit<ToolBridgeRouteConfig<Schema.Schema.Type<TSchema>>, "parseRequest"> & {
+    schema: TSchema;
+  },
 ): ToolBridgeRoute => {
+  const requestSchema = withSessionPayloadSchema(config.schema);
   return createRoute({
     method: config.method,
     pathname: config.pathname,
     operation: config.operation,
     parseRequest: (request) =>
-      parseJsonRequest(request, (body) => parseBridgePayload(config.schema, body)),
+      parseJsonRequest(request, (body) =>
+        parseBridgePayload(requestSchema, body).pipe(
+          Effect.map(
+            (parsed) =>
+              splitSessionRequest(parsed) as ParsedToolBridgeRequest<Schema.Schema.Type<TSchema>>,
+          ),
+        ),
+      ),
     handle: config.handle,
   });
 };
 
-const noPayload = () => Effect.void;
+const parseSessionRequest = (
+  body: unknown,
+): Effect.Effect<ParsedToolBridgeRequest<void>, unknown> =>
+  parseBridgePayload(sessionPayloadSchema, body).pipe(
+    Effect.map(({ sessionID }) => ({
+      sessionID,
+      payload: undefined as void,
+    })),
+  );
 
 const parseUploadRequest = (
   request: IncomingMessage,
@@ -132,14 +160,14 @@ const toolBridgeRoutes = [
     method: "POST",
     pathname: "/tool/list-custom-emojis",
     operation: "custom emoji listing",
-    parseRequest: (request) => parseJsonRequest(request, noPayload),
+    parseRequest: (request) => parseJsonRequest(request, parseSessionRequest),
     handle: handleListCustomEmojis,
   }),
   createRoute({
     method: "POST",
     pathname: "/tool/list-stickers",
     operation: "sticker listing",
-    parseRequest: (request) => parseJsonRequest(request, noPayload),
+    parseRequest: (request) => parseJsonRequest(request, parseSessionRequest),
     handle: handleListStickers,
   }),
   createSchemaRoute({
@@ -149,12 +177,11 @@ const toolBridgeRoutes = [
     schema: sendStickerPayloadSchema,
     handle: handleSendSticker,
   }),
-  createRoute({
+  createSchemaRoute({
     method: "POST",
     pathname: "/tool/react",
     operation: "reaction",
-    parseRequest: (request) =>
-      parseJsonRequest(request, (body) => parseBridgePayload(reactPayloadSchema, body)),
+    schema: reactPayloadSchema,
     handle: handleReact,
   }),
   createSchemaRoute({

@@ -5,7 +5,7 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "paths": {
-      "@/*": ["./src/*"],
+      "@/*": ["./src/*"]
     },
     "strict": true,
     "noEmit": true,
@@ -15,10 +15,9 @@
     "lib": ["ESNext", "DOM"],
     "plugins": [
       {
-        "name": "@effect/language-service",
-        "ignoreEffectWarningsInTscExitCode": true,
-      },
-    ],
+        "name": "@effect/language-service"
+      }
+    ]
   },
-  "include": ["src", "test"],
+  "include": ["src", "test"]
 }

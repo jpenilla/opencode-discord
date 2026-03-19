@@ -1,5 +1,4 @@
-import { Effect } from "effect";
-import * as v from "valibot";
+import { Effect, Schema, SchemaGetter } from "effect";
 
 import { normalizeReactionEmoji } from "@/discord/assets.ts";
 import { ToolBridgeResponseError } from "@/tools/bridge/errors.ts";
@@ -8,18 +7,18 @@ import type { ToolBridgeHandlerContext } from "@/tools/bridge/routes.ts";
 import { getRunMessageById, resolveReactionTargetMessage } from "@/tools/bridge/run-message.ts";
 import { nonEmptyString } from "@/tools/bridge/validation.ts";
 
-export const messageRoutePayloadSchema = v.object({
+export const messageRoutePayloadSchema = Schema.Struct({
   messageId: nonEmptyString,
 });
 
-export type MessageRoutePayload = v.InferOutput<typeof messageRoutePayloadSchema>;
+export type MessageRoutePayload = Schema.Schema.Type<typeof messageRoutePayloadSchema>;
 
-export const reactPayloadSchema = v.object({
-  ...messageRoutePayloadSchema.entries,
+export const reactPayloadSchema = Schema.Struct({
+  ...messageRoutePayloadSchema.fields,
   emoji: nonEmptyString,
 });
 
-export type ReactPayload = v.InferOutput<typeof reactPayloadSchema>;
+export type ReactPayload = Schema.Schema.Type<typeof reactPayloadSchema>;
 
 export const listAttachmentsPayloadSchema = messageRoutePayloadSchema;
 
@@ -44,6 +43,13 @@ export const formatAttachmentList = (attachments: AttachmentSummary[]) => {
     };
   });
 };
+
+const prettyJsonStringSchema = Schema.String.pipe(
+  Schema.decodeTo(Schema.Json, {
+    decode: SchemaGetter.parseJson(),
+    encode: SchemaGetter.stringifyJson({ space: 2 }),
+  }),
+);
 
 export const handleReact = (context: ToolBridgeHandlerContext<ReactPayload>) => {
   return Effect.gen(function* () {
@@ -90,21 +96,17 @@ export const handleListAttachments = (
       });
     }
 
-    return JSON.stringify(
-      {
-        description: `Attachments on Discord message ${messageId}`,
-        list: formatAttachmentList(
-          attachments.map((attachment) => ({
-            attachmentId: attachment.id,
-            name: attachment.name ?? attachment.id,
-            contentType: attachment.contentType,
-            size: attachment.size,
-            url: attachment.url,
-          })),
-        ),
-      },
-      null,
-      2,
-    );
+    return yield* Schema.encodeUnknownEffect(prettyJsonStringSchema)({
+      description: `Attachments on Discord message ${messageId}`,
+      list: formatAttachmentList(
+        attachments.map((attachment) => ({
+          attachmentId: attachment.id,
+          name: attachment.name ?? attachment.id,
+          contentType: attachment.contentType,
+          size: attachment.size,
+          url: attachment.url,
+        })),
+      ),
+    });
   });
 };

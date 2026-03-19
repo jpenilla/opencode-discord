@@ -2,22 +2,21 @@ import type { IncomingHttpHeaders } from "node:http";
 import { PassThrough } from "node:stream";
 
 import { AttachmentBuilder } from "discord.js";
-import { Effect, Fiber } from "effect";
-import * as v from "valibot";
+import { Effect, Fiber, Schema } from "effect";
 
 import { requireSendableChannel, sendBridgeMessage } from "@/tools/bridge/handlers/shared.ts";
 import type { ToolBridgeHandlerContext } from "@/tools/bridge/routes.ts";
 import { endWritable, pipeAsyncIterableToWritable } from "@/tools/bridge/transport.ts";
 import { nonEmptyString, parseEncodedBridgePayload } from "@/tools/bridge/validation.ts";
 
-export const uploadPayloadSchema = v.object({
+export const uploadPayloadSchema = Schema.Struct({
   sessionID: nonEmptyString,
   filename: nonEmptyString,
-  caption: v.optional(v.string()),
-  displayPath: v.optional(v.string()),
+  caption: Schema.optional(Schema.String),
+  displayPath: Schema.optional(Schema.String),
 });
 
-export type UploadPayload = v.InferOutput<typeof uploadPayloadSchema>;
+export type UploadPayload = Schema.Schema.Type<typeof uploadPayloadSchema>;
 export const uploadMetadataHeader = "x-opencode-discord-upload";
 type UploadRequest = Partial<
   Pick<ToolBridgeHandlerContext<UploadPayload>["request"], "pause" | "resume" | "unpipe">

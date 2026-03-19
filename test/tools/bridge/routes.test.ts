@@ -63,7 +63,9 @@ describe("matchToolBridgeRoute", () => {
       },
     });
 
-    await expect(Effect.runPromise(route!.parseRequest(request))).resolves.toEqual({
+    const parsed = await Effect.runPromise(route!.parseRequest(request));
+
+    expect(parsed).toEqual({
       sessionID: "session-1",
       payload: {
         sessionID: "session-1",
@@ -88,7 +90,9 @@ describe("matchToolBridgeRoute", () => {
       },
     });
 
-    await expect(Effect.runPromise(route!.parseRequest(request))).resolves.toEqual({
+    const parsed = await Effect.runPromise(route!.parseRequest(request));
+
+    expect(parsed).toEqual({
       sessionID: "session-1",
       payload: {
         messageId: "message-1",

@@ -505,21 +505,21 @@ describe("runToolBridgeHttpRequest", () => {
       },
     });
 
-    await expect(
-      Effect.runPromise(
-        runToolBridgeHttpRequest({
-          request: makeUploadRequest({
-            bridgeToken,
-            uploadMetadata,
-          }),
-          response,
-          pathname: uploadPath,
-          config: makeConfig(bridgeToken),
-          sessions: makeSessions(null),
-          logger: makeLogger(loggedErrors),
+    const result = await Effect.runPromise(
+      runToolBridgeHttpRequest({
+        request: makeUploadRequest({
+          bridgeToken,
+          uploadMetadata,
         }),
-      ),
-    ).resolves.toBeUndefined();
+        response,
+        pathname: uploadPath,
+        config: makeConfig(bridgeToken),
+        sessions: makeSessions(null),
+        logger: makeLogger(loggedErrors),
+      }),
+    );
+
+    expect(result).toBeUndefined();
 
     expect(loggedErrors).toHaveLength(1);
     expect(loggedErrors[0]).toMatchObject({

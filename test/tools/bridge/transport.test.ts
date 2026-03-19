@@ -23,11 +23,11 @@ const makeRequest = (chunks: Array<string | Uint8Array>) =>
 
 describe("readJsonBody", () => {
   test("returns undefined for an empty body", async () => {
-    await expect(Effect.runPromise(readJsonBody(makeRequest([])))).resolves.toBeUndefined();
+    return expect(Effect.runPromise(readJsonBody(makeRequest([])))).resolves.toBeUndefined();
   });
 
   test("throws a response error for invalid json", async () => {
-    await expect(Effect.runPromise(readJsonBody(makeRequest(["{"])))).rejects.toThrow(
+    return expect(Effect.runPromise(readJsonBody(makeRequest(["{"])))).rejects.toThrow(
       "invalid json",
     );
   });
@@ -43,13 +43,13 @@ describe("pipeAsyncIterableToWritable", () => {
       },
     });
 
-    await expect(
-      Effect.runPromise(
-        pipeAsyncIterableToWritable(makeRequest(["hello ", Buffer.from("world")]), writable).pipe(
-          Effect.andThen(endWritable(writable)),
-        ),
+    const result = await Effect.runPromise(
+      pipeAsyncIterableToWritable(makeRequest(["hello ", Buffer.from("world")]), writable).pipe(
+        Effect.andThen(endWritable(writable)),
       ),
-    ).resolves.toBeUndefined();
+    );
+
+    expect(result).toBeUndefined();
     expect(Buffer.concat(chunks).toString("utf8")).toBe("hello world");
   });
 

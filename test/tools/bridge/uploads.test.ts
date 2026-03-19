@@ -14,7 +14,7 @@ const encodeUploadHeader = (value: unknown) => {
 
 describe("parseUploadHeaders", () => {
   test("decodes upload metadata from the bridge header", async () => {
-    await expect(
+    return expect(
       Effect.runPromise(
         parseUploadHeaders({
           [uploadMetadataHeader]: encodeUploadHeader({
@@ -34,13 +34,13 @@ describe("parseUploadHeaders", () => {
   });
 
   test("rejects requests with no upload metadata header", async () => {
-    await expect(Effect.runPromise(parseUploadHeaders({}))).rejects.toThrow(
+    return expect(Effect.runPromise(parseUploadHeaders({}))).rejects.toThrow(
       "missing upload metadata",
     );
   });
 
   test("rejects invalid encoded upload metadata", async () => {
-    await expect(
+    return expect(
       Effect.runPromise(
         parseUploadHeaders({
           [uploadMetadataHeader]: "not-valid-json",
@@ -67,16 +67,16 @@ describe("cleanupFailedUpload", () => {
       },
     };
 
-    await expect(
-      Effect.runPromise(
-        cleanupFailedUpload(request, {
-          destroyed: false,
-          destroy: () => {
-            uploadDestroyed = true;
-          },
-        }),
-      ),
-    ).resolves.toBeUndefined();
+    const result = await Effect.runPromise(
+      cleanupFailedUpload(request, {
+        destroyed: false,
+        destroy: () => {
+          uploadDestroyed = true;
+        },
+      }),
+    );
+
+    expect(result).toBeUndefined();
     expect(requestResumed).toBe(true);
     expect(requestUnpiped).toBe(true);
     expect(uploadDestroyed).toBe(true);
@@ -98,16 +98,16 @@ describe("cleanupFailedUpload", () => {
       },
     };
 
-    await expect(
-      Effect.runPromise(
-        cleanupFailedUpload(request, {
-          destroyed: false,
-          destroy: () => {
-            uploadDestroyed = true;
-          },
-        }),
-      ),
-    ).resolves.toBeUndefined();
+    const result = await Effect.runPromise(
+      cleanupFailedUpload(request, {
+        destroyed: false,
+        destroy: () => {
+          uploadDestroyed = true;
+        },
+      }),
+    );
+
+    expect(result).toBeUndefined();
     expect(requestPaused).toBe(true);
     expect(requestUnpiped).toBe(true);
     expect(uploadDestroyed).toBe(true);

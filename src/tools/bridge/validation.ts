@@ -1,44 +1,44 @@
-import { Effect } from "effect";
-import * as v from "valibot";
+import { Effect, Schema } from "effect";
 
 import { ToolBridgeResponseError } from "@/tools/bridge/errors.ts";
+import { ParseOptions } from "effect/SchemaAST";
 
-export const nonEmptyString = v.pipe(v.string(), v.minLength(1));
-type ValidationIssue = Parameters<typeof v.getDotPath>[0];
+export const nonEmptyString = Schema.NonEmptyString;
 
-export const sessionPayloadSchema = v.looseObject({
+export const sessionPayloadSchema = Schema.Struct({
   sessionID: nonEmptyString,
 });
 
-export type SessionPayload = v.InferOutput<typeof sessionPayloadSchema>;
+export type SessionPayload = Schema.Schema.Type<typeof sessionPayloadSchema>;
 
-const formatValidationIssues = (issues: readonly ValidationIssue[]) => {
-  const details = [
-    ...new Set(
-      issues.map((issue) => {
-        const path = v.getDotPath(issue);
-        return path ? `${path}: ${issue.message}` : issue.message;
-      }),
-    ),
-  ];
+const bridgeParseOptions = {
+  errors: "all",
+  onExcessProperty: "error",
+} as const satisfies ParseOptions;
 
-  return details.length > 0 ? `invalid request: ${details.join("; ")}` : "invalid request";
-};
-
-export const parseBridgePayload = <TSchema extends v.GenericSchema>(
+export const parseBridgePayload = <
+  TSchema extends Schema.Top & {
+    readonly DecodingServices: never;
+  },
+>(
   schema: TSchema,
   body: unknown,
-) => {
-  const result = v.safeParse(schema, body);
-  return result.success
-    ? Effect.succeed(result.output)
-    : Effect.fail(
-        new ToolBridgeResponseError({
+): Effect.Effect<TSchema["Type"], ToolBridgeResponseError> =>
+  Schema.decodeUnknownEffect(schema)(body, bridgeParseOptions).pipe(
+    Effect.mapError((error) => {
+      if (Schema.isSchemaError(error)) {
+        return new ToolBridgeResponseError({
           status: 400,
-          message: formatValidationIssues(result.issues),
-        }),
-      );
-};
+          message: `invalid request\n${error.message}`,
+        });
+      }
+
+      return new ToolBridgeResponseError({
+        status: 400,
+        message: "invalid request",
+      });
+    }),
+  );
 
 export const parseSessionPayload = (body: unknown) => {
   return parseBridgePayload(sessionPayloadSchema, body);
@@ -49,7 +49,7 @@ const parseJsonText = (
   error: string,
 ): Effect.Effect<unknown, ToolBridgeResponseError> =>
   Effect.try({
-    try: () => JSON.parse(raw),
+    try: () => Schema.decodeUnknownSync(Schema.UnknownFromJsonString)(raw),
     catch: () => new ToolBridgeResponseError({ status: 400, message: error }),
   });
 
@@ -64,14 +64,18 @@ const requireHeaderString = (
   return Effect.fail(new ToolBridgeResponseError({ status: 400, message: error }));
 };
 
-export const parseEncodedBridgePayload = <TSchema extends v.GenericSchema>(
+export const parseEncodedBridgePayload = <
+  TSchema extends Schema.Top & {
+    readonly DecodingServices: never;
+  },
+>(
   schema: TSchema,
   encoded: string | string[] | undefined,
   options: {
     missingError: string;
     invalidError: string;
   },
-): Effect.Effect<v.InferOutput<TSchema>, ToolBridgeResponseError> =>
+): Effect.Effect<TSchema["Type"], ToolBridgeResponseError> =>
   Effect.gen(function* () {
     const value = yield* requireHeaderString(encoded, options.missingError);
     const body = yield* parseJsonText(

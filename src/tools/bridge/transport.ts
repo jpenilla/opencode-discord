@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Writable } from "node:stream";
 
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 
 import {
   ToolBridgeResponseError,
@@ -33,7 +33,7 @@ export const readJsonBody = (request: IncomingMessage) => {
 
       const raw = Buffer.concat(chunks).toString("utf8");
       return Effect.try({
-        try: () => JSON.parse(raw),
+        try: () => Schema.decodeUnknownSync(Schema.UnknownFromJsonString)(raw),
         catch: () => new ToolBridgeResponseError({ status: 400, message: "invalid json" }),
       });
     }),
