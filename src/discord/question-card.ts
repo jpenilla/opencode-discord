@@ -44,17 +44,22 @@ export type PendingQuestionBatchView = {
   resolvedAnswers?: ReadonlyArray<QuestionAnswer>;
 };
 
+type QuestionActionMeta = { requestID: string; version: number };
+type IndexedQuestionActionKind =
+  | "option-prev"
+  | "option-next"
+  | "clear"
+  | "select"
+  | "custom"
+  | "modal";
+type IndexedQuestionAction = { kind: IndexedQuestionActionKind; questionIndex: number };
+
 type QuestionAction =
-  | { kind: "question-prev"; requestID: string; version: number }
-  | { kind: "question-next"; requestID: string; version: number }
-  | { kind: "option-prev"; requestID: string; version: number; questionIndex: number }
-  | { kind: "option-next"; requestID: string; version: number; questionIndex: number }
-  | { kind: "clear"; requestID: string; version: number; questionIndex: number }
-  | { kind: "select"; requestID: string; version: number; questionIndex: number }
-  | { kind: "custom"; requestID: string; version: number; questionIndex: number }
-  | { kind: "submit"; requestID: string; version: number }
-  | { kind: "reject"; requestID: string; version: number }
-  | { kind: "modal"; requestID: string; version: number; questionIndex: number };
+  | (QuestionActionMeta & { kind: "question-prev" | "question-next" | "submit" | "reject" })
+  | (QuestionActionMeta & IndexedQuestionAction);
+type QuestionActionInput =
+  | { kind: "question-prev" | "question-next" | "submit" | "reject" }
+  | IndexedQuestionAction;
 
 const STATUS_TITLES: Record<PendingQuestionBatchView["status"], string> = {
   active: "❓ Questions need answers",
@@ -168,6 +173,12 @@ const setQuestionActionId = (action: QuestionAction) =>
   ]
     .filter((part): part is string => part !== null)
     .join(":");
+
+const withQuestionActionMeta = (
+  requestID: string,
+  version: number,
+  action: QuestionActionInput,
+): QuestionAction => ({ ...action, requestID, version }) as QuestionAction;
 
 export const parseQuestionActionId = (customId: string): QuestionAction | null => {
   const parts = customId.split(":");
@@ -294,6 +305,14 @@ const renderResolvedQuestionSections = (input: PendingQuestionBatchView) => {
 
 const renderQuestionContainer = (input: PendingQuestionBatchView) => {
   const container = new ContainerBuilder().setAccentColor(QUESTION_STATUS_COLORS[input.status]);
+  const action = (value: QuestionActionInput) =>
+    withQuestionActionMeta(input.request.id, input.version, value);
+  const questionButton = (
+    value: QuestionActionInput,
+    label: string,
+    style: ButtonStyle,
+    disabled = false,
+  ) => button(action(value), label, style, disabled);
 
   addText(
     container,
@@ -338,14 +357,7 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
 
   if (question.options.length > 0) {
     const select = new StringSelectMenuBuilder()
-      .setCustomId(
-        setQuestionActionId({
-          kind: "select",
-          requestID: input.request.id,
-          version: input.version,
-          questionIndex: input.page,
-        }),
-      )
+      .setCustomId(setQuestionActionId(action({ kind: "select", questionIndex: input.page })))
       .setPlaceholder(
         options.totalPages === 1
           ? question.multiple
@@ -371,25 +383,15 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
   }
 
   const questionButtons: ButtonBuilder[] = [
-    button(
-      { kind: "question-prev", requestID: input.request.id, version: input.version },
-      "Prev",
-      ButtonStyle.Secondary,
-      input.page === 0,
-    ),
-    button(
-      { kind: "question-next", requestID: input.request.id, version: input.version },
+    questionButton({ kind: "question-prev" }, "Prev", ButtonStyle.Secondary, input.page === 0),
+    questionButton(
+      { kind: "question-next" },
       "Next",
       ButtonStyle.Secondary,
       input.page === input.request.questions.length - 1,
     ),
-    button(
-      {
-        kind: "clear",
-        requestID: input.request.id,
-        version: input.version,
-        questionIndex: input.page,
-      },
+    questionButton(
+      { kind: "clear", questionIndex: input.page },
       "Clear",
       ButtonStyle.Secondary,
       questionAnswer(question, draft).length === 0,
@@ -398,13 +400,8 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
 
   if (questionAllowsCustom(question)) {
     questionButtons.push(
-      button(
-        {
-          kind: "custom",
-          requestID: input.request.id,
-          version: input.version,
-          questionIndex: input.page,
-        },
+      questionButton(
+        { kind: "custom", questionIndex: input.page },
         draft.customAnswer ? "Edit other..." : "Other...",
         ButtonStyle.Primary,
       ),
@@ -416,24 +413,14 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
   if (options.totalPages > 1) {
     addButtons(
       container,
-      button(
-        {
-          kind: "option-prev",
-          requestID: input.request.id,
-          version: input.version,
-          questionIndex: input.page,
-        },
+      questionButton(
+        { kind: "option-prev", questionIndex: input.page },
         "Prev choices",
         ButtonStyle.Secondary,
         options.page === 0,
       ),
-      button(
-        {
-          kind: "option-next",
-          requestID: input.request.id,
-          version: input.version,
-          questionIndex: input.page,
-        },
+      questionButton(
+        { kind: "option-next", questionIndex: input.page },
         "Next choices",
         ButtonStyle.Secondary,
         options.page === options.totalPages - 1,
@@ -443,17 +430,13 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
 
   addButtons(
     container,
-    button(
-      { kind: "submit", requestID: input.request.id, version: input.version },
+    questionButton(
+      { kind: "submit" },
       `Submit ${answerCount(input.request, input.drafts)}/${input.request.questions.length}`,
       ButtonStyle.Success,
       !allAnswered,
     ),
-    button(
-      { kind: "reject", requestID: input.request.id, version: input.version },
-      "Reject",
-      ButtonStyle.Danger,
-    ),
+    questionButton({ kind: "reject" }, "Reject", ButtonStyle.Danger),
   );
 
   return container;
@@ -534,12 +517,12 @@ export const buildQuestionModal = (input: {
 }) =>
   new ModalBuilder()
     .setCustomId(
-      setQuestionActionId({
-        kind: "modal",
-        requestID: input.requestID,
-        version: input.version,
-        questionIndex: input.questionIndex,
-      }),
+      setQuestionActionId(
+        withQuestionActionMeta(input.requestID, input.version, {
+          kind: "modal",
+          questionIndex: input.questionIndex,
+        }),
+      ),
     )
     .setTitle(compact(input.question.header || "Custom answer", 45))
     .addComponents(

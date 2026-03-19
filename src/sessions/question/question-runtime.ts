@@ -117,6 +117,10 @@ const appendSignals = (
   left: ReadonlyArray<QuestionWorkflowSignal>,
   right: ReadonlyArray<QuestionWorkflowSignal>,
 ): ReadonlyArray<QuestionWorkflowSignal> => (left.length === 0 ? right : [...left, ...right]);
+const routedNoSignals = (sessionId: string): RoutedQuestionSignals => ({
+  sessionId,
+  signals: noSignals,
+});
 
 const createQuestionRuntimeState = (): QuestionRuntimeState => ({
   sessions: new Map(),
@@ -403,18 +407,21 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
           : "This question prompt changed before your action was applied. Review the latest card and try again.",
       );
 
+    const editQuestionMessageLogged = (batch: QuestionWorkflowBatch, failureMessage: string) =>
+      editQuestionMessage(batch).pipe(
+        Effect.catch((error) =>
+          deps.logger.warn(failureMessage, {
+            channelId: batch.runtime.channelId,
+            requestId: batch.domain.request.id,
+            error: deps.formatError(error),
+          }),
+        ),
+      );
+
     const finalizeBatchIfAttached = (batch: QuestionWorkflowBatch) =>
       !isTerminalQuestionBatch(batch) || batch.runtime.attachment._tag !== "attached"
         ? Effect.void
-        : editQuestionMessage(batch).pipe(
-            Effect.catch((error) =>
-              deps.logger.warn("failed to edit finalized question batch", {
-                channelId: batch.runtime.channelId,
-                requestId: batch.domain.request.id,
-                error: deps.formatError(error),
-              }),
-            ),
-          );
+        : editQuestionMessageLogged(batch, "failed to edit finalized question batch");
 
     const attachPostedQuestionMessage = (sessionId: string, requestId: string, message: Message) =>
       updateQuestionBatch(sessionId, requestId, (current) =>
@@ -449,6 +456,35 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         : Effect.promise(() =>
             interaction.update(createQuestionMessageEdit(questionBatchView(batch))),
           );
+
+    const routeQuestionReply = (sessionId: string, interaction: Interaction, message: string) =>
+      replyToQuestionInteraction(interaction, message).pipe(Effect.as(routedNoSignals(sessionId)));
+
+    const routeQuestionUpdate = <A extends { requestID: string; version: number }>(
+      sessionId: string,
+      interaction: Interaction,
+      action: A,
+      update: (batch: QuestionWorkflowBatch) => QuestionWorkflowBatch,
+    ) =>
+      applyQuestionUpdate(sessionId, interaction, action.requestID, action.version, update).pipe(
+        Effect.as(routedNoSignals(sessionId)),
+      );
+
+    const requireCustomQuestion = (
+      sessionId: string,
+      interaction: Interaction,
+      batch: QuestionWorkflowBatch,
+      questionIndex: number,
+    ): Effect.Effect<QuestionRequest["questions"][number] | null> => {
+      const question = batch.domain.request.questions[questionIndex];
+      return !question || question.custom === false
+        ? routeQuestionReply(
+            sessionId,
+            interaction,
+            "This question does not allow a custom answer.",
+          ).pipe(Effect.as(null))
+        : Effect.succeed(question);
+    };
 
     const getQuestionSession = (sessionId: string) =>
       deps.getSessionContext(sessionId).pipe(Effect.map((context) => context?.session ?? null));
@@ -491,26 +527,29 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
 
         yield* updateInteraction(input.interaction, pending.batch);
 
-        const result = yield* input
-          .invoke(session.opencode, pending.batch.domain.request.id)
-          .pipe(Effect.result);
-        if (result._tag === "Failure") {
-          const restored = yield* updateQuestionBatch(input.sessionId, input.requestId, (current) =>
-            setQuestionBatchStatus(current, "active"),
-          );
-          if (restored) {
-            yield* editQuestionMessage(restored).pipe(Effect.ignore);
-          }
-          const interaction = input.interaction;
-          if (interaction.isButton()) {
-            yield* Effect.promise(() =>
-              interaction.followUp(questionInteractionReply(input.followUpFailure(result.failure))),
-            ).pipe(Effect.ignore);
-          }
-          return noSignals;
-        }
-
-        return yield* input.onSuccess(pending.batch);
+        return yield* input.invoke(session.opencode, pending.batch.domain.request.id).pipe(
+          Effect.matchEffect({
+            onFailure: (error) =>
+              Effect.gen(function* () {
+                const restored = yield* updateQuestionBatch(
+                  input.sessionId,
+                  input.requestId,
+                  (current) => setQuestionBatchStatus(current, "active"),
+                );
+                if (restored) {
+                  yield* editQuestionMessage(restored).pipe(Effect.ignore);
+                }
+                const interaction = input.interaction;
+                if (interaction.isButton()) {
+                  yield* Effect.promise(() =>
+                    interaction.followUp(questionInteractionReply(input.followUpFailure(error))),
+                  ).pipe(Effect.ignore);
+                }
+                return noSignals;
+              }),
+            onSuccess: () => input.onSuccess(pending.batch),
+          }),
+        );
       });
 
     const currentQuestionDraft = (batch: QuestionWorkflowBatch, questionIndex: number) =>
@@ -727,159 +766,104 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
 
         switch (action.kind) {
           case "question-prev":
-            yield* applyQuestionUpdate(
-              sessionId,
-              interaction,
-              action.requestID,
-              action.version,
-              (current) => ({
-                ...current,
-                domain: {
-                  ...current.domain,
-                  page: Math.max(0, current.domain.page - 1),
-                },
-              }),
-            );
-            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
           case "question-next":
-            yield* applyQuestionUpdate(
-              sessionId,
-              interaction,
-              action.requestID,
-              action.version,
-              (current) => ({
+            return yield* routeQuestionUpdate(sessionId, interaction, action, (current) => ({
+              ...current,
+              domain: {
+                ...current.domain,
+                page:
+                  action.kind === "question-prev"
+                    ? Math.max(0, current.domain.page - 1)
+                    : Math.min(
+                        current.domain.request.questions.length - 1,
+                        current.domain.page + 1,
+                      ),
+              },
+            }));
+          case "option-prev":
+          case "option-next":
+            return yield* routeQuestionUpdate(sessionId, interaction, action, (current) => {
+              const question = current.domain.request.questions[action.questionIndex];
+              if (!question && action.kind === "option-next") {
+                return current;
+              }
+
+              const optionPages = [...current.domain.optionPages];
+              optionPages[action.questionIndex] =
+                action.kind === "option-prev"
+                  ? Math.max(0, (optionPages[action.questionIndex] ?? 0) - 1)
+                  : Math.min(
+                      Math.max(0, questionOptionPageCount(question!) - 1),
+                      (optionPages[action.questionIndex] ?? 0) + 1,
+                    );
+              return {
                 ...current,
                 domain: {
                   ...current.domain,
-                  page: Math.min(
-                    current.domain.request.questions.length - 1,
-                    current.domain.page + 1,
-                  ),
+                  page: action.questionIndex,
+                  optionPages,
                 },
-              }),
-            );
-            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
-          case "option-prev":
-            yield* applyQuestionUpdate(
-              sessionId,
-              interaction,
-              action.requestID,
-              action.version,
-              (current) => {
-                const optionPages = [...current.domain.optionPages];
-                optionPages[action.questionIndex] = Math.max(
-                  0,
-                  (optionPages[action.questionIndex] ?? 0) - 1,
-                );
-                return {
-                  ...current,
-                  domain: {
-                    ...current.domain,
-                    page: action.questionIndex,
-                    optionPages,
-                  },
-                };
-              },
-            );
-            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
-          case "option-next":
-            yield* applyQuestionUpdate(
-              sessionId,
-              interaction,
-              action.requestID,
-              action.version,
-              (current) => {
-                const question = current.domain.request.questions[action.questionIndex];
-                if (!question) {
-                  return current;
-                }
-                const optionPages = [...current.domain.optionPages];
-                optionPages[action.questionIndex] = Math.min(
-                  Math.max(0, questionOptionPageCount(question) - 1),
-                  (optionPages[action.questionIndex] ?? 0) + 1,
-                );
-                return {
-                  ...current,
-                  domain: {
-                    ...current.domain,
-                    page: action.questionIndex,
-                    optionPages,
-                  },
-                };
-              },
-            );
-            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+              };
+            });
           case "clear":
-            yield* applyQuestionUpdate(
-              sessionId,
-              interaction,
-              action.requestID,
-              action.version,
-              (current) => {
-                const drafts = [...current.domain.drafts];
-                drafts[action.questionIndex] = clearQuestionDraft();
-                return {
-                  ...current,
-                  domain: {
-                    ...current.domain,
-                    page: action.questionIndex,
-                    drafts,
-                  },
-                };
-              },
-            );
-            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+            return yield* routeQuestionUpdate(sessionId, interaction, action, (current) => {
+              const drafts = [...current.domain.drafts];
+              drafts[action.questionIndex] = clearQuestionDraft();
+              return {
+                ...current,
+                domain: {
+                  ...current.domain,
+                  page: action.questionIndex,
+                  drafts,
+                },
+              };
+            });
           case "select":
             if (!interaction.isStringSelectMenu()) {
-              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+              return routedNoSignals(sessionId);
             }
-            yield* applyQuestionUpdate(
-              sessionId,
-              interaction,
-              action.requestID,
-              action.version,
-              (current) => {
-                const question = current.domain.request.questions[action.questionIndex];
-                if (!question) {
-                  return current;
-                }
+            return yield* routeQuestionUpdate(sessionId, interaction, action, (current) => {
+              const question = current.domain.request.questions[action.questionIndex];
+              if (!question) {
+                return current;
+              }
 
-                const page = current.domain.optionPages[action.questionIndex] ?? 0;
-                const visibleOptions = question.options
-                  .slice(
-                    page * QUESTION_OPTIONS_PER_PAGE,
-                    page * QUESTION_OPTIONS_PER_PAGE + QUESTION_OPTIONS_PER_PAGE,
-                  )
-                  .map((option) => option.label);
-                const drafts = [...current.domain.drafts];
-                drafts[action.questionIndex] = setQuestionOptionSelection({
-                  question,
-                  draft: currentQuestionDraft(current, action.questionIndex),
-                  visibleOptions,
-                  selectedOptions: interaction.values,
-                });
-                return {
-                  ...current,
-                  domain: {
-                    ...current.domain,
-                    page: action.questionIndex,
-                    drafts,
-                  },
-                };
-              },
-            );
-            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+              const page = current.domain.optionPages[action.questionIndex] ?? 0;
+              const visibleOptions = question.options
+                .slice(
+                  page * QUESTION_OPTIONS_PER_PAGE,
+                  page * QUESTION_OPTIONS_PER_PAGE + QUESTION_OPTIONS_PER_PAGE,
+                )
+                .map((option) => option.label);
+              const drafts = [...current.domain.drafts];
+              drafts[action.questionIndex] = setQuestionOptionSelection({
+                question,
+                draft: currentQuestionDraft(current, action.questionIndex),
+                visibleOptions,
+                selectedOptions: interaction.values,
+              });
+              return {
+                ...current,
+                domain: {
+                  ...current.domain,
+                  page: action.questionIndex,
+                  drafts,
+                },
+              };
+            });
           case "custom": {
             if (!interaction.isButton()) {
-              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+              return routedNoSignals(sessionId);
             }
-            const question = batch.domain.request.questions[action.questionIndex];
-            if (!question || question.custom === false) {
-              yield* replyToQuestionInteraction(
-                interaction,
-                "This question does not allow a custom answer.",
-              );
-              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+
+            const question = yield* requireCustomQuestion(
+              sessionId,
+              interaction,
+              batch,
+              action.questionIndex,
+            );
+            if (!question) {
+              return routedNoSignals(sessionId);
             }
 
             yield* Effect.promise(() =>
@@ -893,19 +877,21 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                 }),
               ),
             );
-            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+            return routedNoSignals(sessionId);
           }
           case "modal": {
             if (!interaction.isModalSubmit()) {
-              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+              return routedNoSignals(sessionId);
             }
-            const question = batch.domain.request.questions[action.questionIndex];
-            if (!question || question.custom === false) {
-              yield* replyToQuestionInteraction(
-                interaction,
-                "This question does not allow a custom answer.",
-              );
-              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+
+            const question = yield* requireCustomQuestion(
+              sessionId,
+              interaction,
+              batch,
+              action.questionIndex,
+            );
+            if (!question) {
+              return routedNoSignals(sessionId);
             }
 
             const customAnswer = readQuestionModalValue(interaction);
@@ -913,7 +899,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
               yield* Effect.promise(() =>
                 interaction.reply(questionInteractionReply("Custom answer cannot be empty.")),
               ).pipe(Effect.ignore);
-              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+              return routedNoSignals(sessionId);
             }
 
             const updated = yield* tryPersistQuestionBatch(
@@ -940,81 +926,74 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
             );
             if (updated.type === "missing") {
               yield* replyToQuestionInteraction(interaction, "This question prompt has expired.");
-              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+              return routedNoSignals(sessionId);
             }
             if (updated.type === "conflict") {
               yield* replyToQuestionConflict(interaction, updated.batch);
-              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+              return routedNoSignals(sessionId);
             }
 
-            yield* editQuestionMessage(updated.batch).pipe(
-              Effect.catch((error) =>
-                deps.logger.warn("failed to edit question batch after modal submit", {
-                  channelId: updated.batch.runtime.channelId,
-                  requestId: updated.batch.domain.request.id,
-                  error: deps.formatError(error),
-                }),
-              ),
+            yield* editQuestionMessageLogged(
+              updated.batch,
+              "failed to edit question batch after modal submit",
             );
             yield* Effect.promise(() => interaction.deferUpdate()).pipe(Effect.ignore);
-            return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+            return routedNoSignals(sessionId);
           }
           case "submit":
-            if (!interaction.isButton()) {
-              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
-            }
-            return {
-              sessionId,
-              signals: yield* finalizeRemoteQuestionBatch({
-                sessionId,
-                interaction,
-                requestId: action.requestID,
-                expectedVersion: action.version,
-                actorId: interaction.user.id,
-                invoke: (session, requestId) =>
-                  deps.replyToQuestion(
-                    session,
-                    requestId,
-                    buildQuestionAnswers(batch.domain.request, batch.domain.drafts),
-                  ),
-                followUpFailure: (error) => `Failed to submit answers: ${deps.formatError(error)}`,
-                onSuccess: () =>
-                  finalizeQuestionBatch(
-                    sessionId,
-                    action.requestID,
-                    "answered",
-                    buildQuestionAnswers(batch.domain.request, batch.domain.drafts),
-                  ),
-              }),
-            } satisfies RoutedQuestionSignals;
           case "reject":
             if (!interaction.isButton()) {
-              return { sessionId, signals: noSignals } satisfies RoutedQuestionSignals;
+              return routedNoSignals(sessionId);
             }
             return {
               sessionId,
-              signals: yield* finalizeRemoteQuestionBatch({
-                sessionId,
-                interaction,
-                requestId: action.requestID,
-                expectedVersion: action.version,
-                actorId: interaction.user.id,
-                invoke: deps.rejectQuestion,
-                followUpFailure: (error) =>
-                  `Failed to reject questions: ${deps.formatError(error)}`,
-                onSuccess: () =>
-                  finalizeQuestionBatch(sessionId, action.requestID, "rejected").pipe(
-                    Effect.map((signals) =>
-                      appendSignals(
-                        signals,
-                        signal({
-                          type: "set-run-question-outcome",
-                          outcome: { _tag: "user-rejected" },
-                        }),
-                      ),
-                    ),
-                  ),
-              }),
+              signals: yield* finalizeRemoteQuestionBatch(
+                action.kind === "submit"
+                  ? {
+                      sessionId,
+                      interaction,
+                      requestId: action.requestID,
+                      expectedVersion: action.version,
+                      actorId: interaction.user.id,
+                      invoke: (session, requestId) =>
+                        deps.replyToQuestion(
+                          session,
+                          requestId,
+                          buildQuestionAnswers(batch.domain.request, batch.domain.drafts),
+                        ),
+                      followUpFailure: (error) =>
+                        `Failed to submit answers: ${deps.formatError(error)}`,
+                      onSuccess: () =>
+                        finalizeQuestionBatch(
+                          sessionId,
+                          action.requestID,
+                          "answered",
+                          buildQuestionAnswers(batch.domain.request, batch.domain.drafts),
+                        ),
+                    }
+                  : {
+                      sessionId,
+                      interaction,
+                      requestId: action.requestID,
+                      expectedVersion: action.version,
+                      actorId: interaction.user.id,
+                      invoke: deps.rejectQuestion,
+                      followUpFailure: (error) =>
+                        `Failed to reject questions: ${deps.formatError(error)}`,
+                      onSuccess: () =>
+                        finalizeQuestionBatch(sessionId, action.requestID, "rejected").pipe(
+                          Effect.map((signals) =>
+                            appendSignals(
+                              signals,
+                              signal({
+                                type: "set-run-question-outcome",
+                                outcome: { _tag: "user-rejected" },
+                              }),
+                            ),
+                          ),
+                        ),
+                    },
+              ),
             } satisfies RoutedQuestionSignals;
         }
       });
@@ -1069,50 +1048,31 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         ),
       );
 
+    const editAttachedQuestionBatches = (batches: ReadonlyArray<QuestionWorkflowBatch>) =>
+      Effect.forEach(
+        batches,
+        (batch) =>
+          batch.runtime.attachment._tag !== "attached"
+            ? Effect.void
+            : editQuestionMessageLogged(batch, "failed to terminate question batch message"),
+        { concurrency: "unbounded", discard: true },
+      );
+
+    const routeSignals = (
+      sessionId: string,
+      effect: Effect.Effect<ReadonlyArray<QuestionWorkflowSignal>, unknown>,
+    ) => effect.pipe(Effect.map((signals) => ({ sessionId, signals })));
+
     const terminateSession = (sessionId: string) =>
       expirePendingBatches(sessionId).pipe(
-        Effect.flatMap(({ terminated }) =>
-          Effect.forEach(
-            terminated,
-            (batch) =>
-              batch.runtime.attachment._tag === "attached"
-                ? editQuestionMessage(batch).pipe(
-                    Effect.catch((error) =>
-                      deps.logger.warn("failed to terminate question batch message", {
-                        channelId: batch.runtime.channelId,
-                        requestId: batch.domain.request.id,
-                        error: deps.formatError(error),
-                      }),
-                    ),
-                  )
-                : Effect.void,
-            { concurrency: "unbounded", discard: true },
-          ),
-        ),
+        Effect.flatMap(({ terminated }) => editAttachedQuestionBatches(terminated)),
         Effect.as(noSignals),
       );
 
     const shutdownSession = (sessionId: string) =>
       markSessionStopped(sessionId).pipe(
         Effect.andThen(expirePendingBatches(sessionId, true)),
-        Effect.tap(({ terminated }) =>
-          Effect.forEach(
-            terminated,
-            (batch) =>
-              batch.runtime.attachment._tag === "attached"
-                ? editQuestionMessage(batch).pipe(
-                    Effect.catch((error) =>
-                      deps.logger.warn("failed to terminate question batch message", {
-                        channelId: batch.runtime.channelId,
-                        requestId: batch.domain.request.id,
-                        error: deps.formatError(error),
-                      }),
-                    ),
-                  )
-                : Effect.void,
-            { concurrency: "unbounded", discard: true },
-          ),
-        ),
+        Effect.tap(({ terminated }) => editAttachedQuestionBatches(terminated)),
         Effect.flatMap(({ requestIds }) => rejectQuestionIdsForShutdown(sessionId, requestIds)),
       );
 
@@ -1136,33 +1096,37 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
 
             switch (event.type) {
               case "asked":
-                return deps.getSessionContext(event.sessionId).pipe(
-                  Effect.flatMap((context) =>
-                    !context?.activeRun
-                      ? Effect.succeed(null)
-                      : handleQuestionAsked(
-                          event.sessionId,
-                          context.session,
-                          context.activeRun,
-                          event.request,
-                        ).pipe(
-                          Effect.map((signals) => ({
-                            sessionId: event.sessionId,
-                            signals,
-                          })),
-                        ),
+                return deps
+                  .getSessionContext(event.sessionId)
+                  .pipe(
+                    Effect.flatMap((context) =>
+                      !context?.activeRun
+                        ? Effect.succeed(null)
+                        : routeSignals(
+                            event.sessionId,
+                            handleQuestionAsked(
+                              event.sessionId,
+                              context.session,
+                              context.activeRun,
+                              event.request,
+                            ),
+                          ),
+                    ),
+                  );
+              case "replied":
+                return routeSignals(
+                  event.sessionId,
+                  finalizeQuestionBatch(
+                    event.sessionId,
+                    event.requestId,
+                    "answered",
+                    event.answers,
                   ),
                 );
-              case "replied":
-                return finalizeQuestionBatch(
-                  event.sessionId,
-                  event.requestId,
-                  "answered",
-                  event.answers,
-                ).pipe(Effect.map((signals) => ({ sessionId: event.sessionId, signals })));
               case "rejected":
-                return finalizeQuestionBatch(event.sessionId, event.requestId, "rejected").pipe(
-                  Effect.map((signals) => ({ sessionId: event.sessionId, signals })),
+                return routeSignals(
+                  event.sessionId,
+                  finalizeQuestionBatch(event.sessionId, event.requestId, "rejected"),
                 );
             }
           }),

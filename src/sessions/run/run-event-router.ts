@@ -12,23 +12,14 @@ import {
   handleAssistantMessageUpdated,
   handleSessionError as failPendingPromptFromSessionError,
   handleSessionStatusUpdated,
-  type PromptTrackingAction,
   handleUserMessageUpdated,
   resolvePromptTrackingActions,
 } from "@/sessions/run/prompt-state.ts";
 import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
-const recordPromptUserMessage = (activeRun: ActiveRun, userMessageId: string) => {
-  activeRun.currentPromptUserMessageId = userMessageId;
-};
-
 const isPreviousPromptMessage = (activeRun: ActiveRun, messageId: string) =>
   activeRun.previousPromptMessageIds.has(messageId);
-
-const recordCurrentPromptMessage = (activeRun: ActiveRun, messageId: string) => {
-  activeRun.currentPromptMessageIds.add(messageId);
-};
 
 const recordPromptAssistantMessage = (activeRun: ActiveRun, message: AssistantMessage) => {
   if (isCompactionSummaryAssistant(message)) {
@@ -38,18 +29,10 @@ const recordPromptAssistantMessage = (activeRun: ActiveRun, message: AssistantMe
   activeRun.assistantMessageParentIds.set(message.id, message.parentID);
 };
 
-const assistantBelongsToCurrentPrompt = (activeRun: ActiveRun, assistantMessageId: string) => {
-  if (activeRun.currentPromptUserMessageId === null) {
-    return false;
-  }
-
-  const parentId = activeRun.assistantMessageParentIds.get(assistantMessageId);
-  if (parentId === undefined) {
-    return false;
-  }
-
-  return parentId === activeRun.currentPromptUserMessageId;
-};
+const assistantBelongsToCurrentPrompt = (activeRun: ActiveRun, assistantMessageId: string) =>
+  activeRun.currentPromptUserMessageId !== null &&
+  activeRun.assistantMessageParentIds.get(assistantMessageId) ===
+    activeRun.currentPromptUserMessageId;
 
 const isInFlightToolPart = (status: ToolPart["state"]["status"]) =>
   status === "pending" || status === "running";
@@ -140,31 +123,31 @@ export const routeRunEvent = (
     const sessionError = getEventByType(event, "session.error")?.properties ?? null;
     const sessionStatus = getEventByType(event, "session.status")?.properties ?? null;
     const toolPart = getUpdatedPartByType(event, "tool");
+    const isNewUserMessage =
+      userMessage && !isPreviousPromptMessage(deps.activeRun, userMessage.id);
+    const isNewAssistantMessage =
+      assistantMessage && !isPreviousPromptMessage(deps.activeRun, assistantMessage.id);
 
-    if (userMessage) {
-      if (!isPreviousPromptMessage(deps.activeRun, userMessage.id)) {
-        recordCurrentPromptMessage(deps.activeRun, userMessage.id);
-        recordPromptUserMessage(deps.activeRun, userMessage.id);
-      }
+    if (isNewUserMessage) {
+      deps.activeRun.currentPromptMessageIds.add(userMessage.id);
+      deps.activeRun.currentPromptUserMessageId = userMessage.id;
     }
 
-    if (assistantMessage) {
-      if (!isPreviousPromptMessage(deps.activeRun, assistantMessage.id)) {
-        recordCurrentPromptMessage(deps.activeRun, assistantMessage.id);
-        recordPromptAssistantMessage(deps.activeRun, assistantMessage);
-      }
+    if (isNewAssistantMessage) {
+      deps.activeRun.currentPromptMessageIds.add(assistantMessage.id);
+      recordPromptAssistantMessage(deps.activeRun, assistantMessage);
     }
 
     const relevantToolPart = toolPart ? selectToolPartForActiveRun(deps.activeRun, toolPart) : null;
-    const promptActions: PromptTrackingAction[] = [];
+    const promptActions = [];
 
-    if (userMessage && !isPreviousPromptMessage(deps.activeRun, userMessage.id)) {
+    if (isNewUserMessage) {
       promptActions.push(
         ...(yield* handleUserMessageUpdated(deps.activeRun.promptState, userMessage)),
       );
     }
 
-    if (assistantMessage && !isPreviousPromptMessage(deps.activeRun, assistantMessage.id)) {
+    if (isNewAssistantMessage) {
       promptActions.push(
         ...(yield* handleAssistantMessageUpdated(deps.activeRun.promptState, assistantMessage)),
       );

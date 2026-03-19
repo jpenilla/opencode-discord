@@ -1,9 +1,14 @@
 import type { Event } from "@opencode-ai/sdk/v2";
 import { Effect } from "effect";
 
-import { getEventSessionId } from "@/opencode/events.ts";
+import {
+  getEventByType,
+  getEventSessionId,
+  getMessageUpdatedByRole,
+  isCompactionSummaryAssistant,
+  isObservedAssistantMessage,
+} from "@/opencode/events.ts";
 import type { OpencodeServiceShape } from "@/opencode/service.ts";
-import { routeCompactionEvent } from "@/sessions/compaction/compaction-event-router.ts";
 import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import {
   routeQuestionEvent,
@@ -45,12 +50,22 @@ export const createEventHandler = (deps: EventHandlerDeps): EventHandler => ({
         sessionId,
         handleQuestionEvent: deps.handleQuestionEvent,
       });
-      yield* routeCompactionEvent(event, {
-        sessionId,
-        session: context.session,
-        hasActiveRun: Boolean(context.activeRun),
-        idleCompactionWorkflow: deps.idleCompactionWorkflow,
-      });
+
+      const assistantMessage = getMessageUpdatedByRole(event, "assistant");
+      if (
+        assistantMessage &&
+        isCompactionSummaryAssistant(assistantMessage) &&
+        isObservedAssistantMessage(assistantMessage)
+      ) {
+        yield* deps.idleCompactionWorkflow.emitSummary({
+          session: context.session,
+          messageId: assistantMessage.id,
+        });
+      }
+
+      if (!context.activeRun && getEventByType(event, "session.compacted")?.properties) {
+        yield* deps.idleCompactionWorkflow.handleCompacted(sessionId);
+      }
 
       if (!context.activeRun) {
         return;

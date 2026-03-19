@@ -56,26 +56,27 @@ const makeBatch = () =>
 
 describe("question draft helpers", () => {
   test("single-select custom answers replace selected options", () => {
-    const draft = setQuestionCustomAnswer(
-      request.questions[0]!,
-      { selectedOptions: ["TypeScript"], customAnswer: null },
-      "Other",
-    );
-    expect(draft).toEqual({
+    expect(
+      setQuestionCustomAnswer(
+        request.questions[0]!,
+        { selectedOptions: ["TypeScript"], customAnswer: null },
+        "Other",
+      ),
+    ).toEqual({
       selectedOptions: [],
       customAnswer: "Other",
     });
   });
 
   test("multi-select option updates retain selections from other pages", () => {
-    const updated = setQuestionOptionSelection({
-      question: request.questions[1]!,
-      draft: { selectedOptions: ["Web", "Infra"], customAnswer: null },
-      visibleOptions: ["Web", "CLI"],
-      selectedOptions: ["CLI"],
-    });
-
-    expect(updated.selectedOptions).toEqual(["Infra", "CLI"]);
+    expect(
+      setQuestionOptionSelection({
+        question: request.questions[1]!,
+        draft: { selectedOptions: ["Web", "Infra"], customAnswer: null },
+        visibleOptions: ["Web", "CLI"],
+        selectedOptions: ["CLI"],
+      }).selectedOptions,
+    ).toEqual(["Infra", "CLI"]);
   });
 
   test("buildQuestionAnswers combines drafts into OpenCode answer payloads", () => {
@@ -101,23 +102,21 @@ describe("question batch state transitions", () => {
 
   test("stores resolved answers when finalized as answered", () => {
     const answers = [["TypeScript"], ["CLI", "Other"]];
-    const finalized = setQuestionBatchStatus(makeBatch(), "answered", answers);
-
-    expect(finalized.domain.lifecycle).toBe("answered");
-    expect(finalized.domain.resolvedAnswers).toEqual(answers);
+    expect(setQuestionBatchStatus(makeBatch(), "answered", answers).domain).toMatchObject({
+      lifecycle: "answered",
+      resolvedAnswers: answers,
+    });
   });
 
   test("fills rejected batches with empty resolved answers", () => {
-    const rejected = setQuestionBatchStatus(makeBatch(), "rejected");
-
-    expect(rejected.domain.lifecycle).toBe("rejected");
-    expect(rejected.domain.resolvedAnswers).toEqual([[], []]);
+    expect(setQuestionBatchStatus(makeBatch(), "rejected").domain).toMatchObject({
+      lifecycle: "rejected",
+      resolvedAnswers: [[], []],
+    });
   });
 
   test("marks active batches as expired", () => {
-    const expired = terminateQuestionBatch(makeBatch());
-
-    expect(expired.domain.lifecycle).toBe("expired");
+    expect(terminateQuestionBatch(makeBatch()).domain.lifecycle).toBe("expired");
   });
 
   test("clearQuestionDraft returns an empty draft", () => {

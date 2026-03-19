@@ -1,7 +1,11 @@
 import type { Message } from "discord.js";
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
 
-import type { QuestionBatchCardStatus, QuestionDraft } from "@/discord/question-card.ts";
+import type {
+  PendingQuestionBatchView,
+  QuestionBatchCardStatus,
+  QuestionDraft,
+} from "@/discord/question-card.ts";
 
 export type QuestionBatchLifecycle =
   | "posting"
@@ -37,6 +41,26 @@ export type QuestionWorkflowBatch = {
 
 const emptyResolvedAnswers = (request: QuestionRequest): Array<QuestionAnswer> =>
   request.questions.map(() => []);
+const withQuestionBatchDomain = (
+  batch: QuestionWorkflowBatch,
+  domain: Partial<QuestionBatchDomainState>,
+): QuestionWorkflowBatch => ({
+  ...batch,
+  domain: {
+    ...batch.domain,
+    ...domain,
+  },
+});
+const withQuestionBatchRuntime = (
+  batch: QuestionWorkflowBatch,
+  runtime: Partial<QuestionBatchRuntimeState>,
+): QuestionWorkflowBatch => ({
+  ...batch,
+  runtime: {
+    ...batch.runtime,
+    ...runtime,
+  },
+});
 
 export const createQuestionWorkflowBatch = (input: {
   request: QuestionRequest;
@@ -63,17 +87,7 @@ export const createQuestionWorkflowBatch = (input: {
 export const questionBatchCardStatus = (batch: QuestionWorkflowBatch): QuestionBatchCardStatus =>
   batch.domain.lifecycle === "posting" ? "active" : batch.domain.lifecycle;
 
-export const questionBatchView = (
-  batch: QuestionWorkflowBatch,
-): {
-  request: QuestionRequest;
-  version: number;
-  page: number;
-  optionPages: ReadonlyArray<number>;
-  drafts: ReadonlyArray<QuestionDraft>;
-  status: QuestionBatchCardStatus;
-  resolvedAnswers?: ReadonlyArray<QuestionAnswer>;
-} => ({
+export const questionBatchView = (batch: QuestionWorkflowBatch): PendingQuestionBatchView => ({
   request: batch.domain.request,
   version: batch.domain.version,
   page: batch.domain.page,
@@ -96,44 +110,28 @@ export const isTerminalQuestionBatch = (batch: QuestionWorkflowBatch) =>
 export const attachQuestionMessage = (
   batch: QuestionWorkflowBatch,
   message: Message,
-): QuestionWorkflowBatch => ({
-  ...batch,
-  runtime: {
-    ...batch.runtime,
+): QuestionWorkflowBatch =>
+  withQuestionBatchRuntime(batch, {
     attachment: { _tag: "attached", message },
-  },
-});
+  });
 
-export const activateQuestionBatch = (batch: QuestionWorkflowBatch): QuestionWorkflowBatch => ({
-  ...batch,
-  domain: {
-    ...batch.domain,
-    lifecycle: "active",
-  },
-});
+export const activateQuestionBatch = (batch: QuestionWorkflowBatch): QuestionWorkflowBatch =>
+  withQuestionBatchDomain(batch, { lifecycle: "active" });
 
 export const setQuestionBatchStatus = (
   batch: QuestionWorkflowBatch,
   lifecycle: "active" | "submitting" | "answered" | "rejected",
   resolvedAnswers?: ReadonlyArray<QuestionAnswer>,
-): QuestionWorkflowBatch => ({
-  ...batch,
-  domain: {
-    ...batch.domain,
+): QuestionWorkflowBatch =>
+  withQuestionBatchDomain(batch, {
     lifecycle,
     resolvedAnswers:
       resolvedAnswers ??
       (lifecycle === "rejected" ? emptyResolvedAnswers(batch.domain.request) : undefined),
-  },
-});
+  });
 
-export const terminateQuestionBatch = (batch: QuestionWorkflowBatch): QuestionWorkflowBatch => ({
-  ...batch,
-  domain: {
-    ...batch.domain,
-    lifecycle: "expired",
-  },
-});
+export const terminateQuestionBatch = (batch: QuestionWorkflowBatch): QuestionWorkflowBatch =>
+  withQuestionBatchDomain(batch, { lifecycle: "expired" });
 
 export const persistQuestionBatchUpdate = (
   batch: QuestionWorkflowBatch,

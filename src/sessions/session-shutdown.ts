@@ -33,6 +33,22 @@ type SessionShutdownDeps = {
   formatError: (error: unknown) => string;
 };
 
+const catchShutdownWarn =
+  (
+    deps: Pick<SessionShutdownDeps, "logger" | "formatError">,
+    message: string,
+    context: (error: unknown) => Record<string, unknown> = () => ({}),
+  ) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    effect.pipe(
+      Effect.catch((error) =>
+        deps.logger.warn(message, {
+          ...context(error),
+          error: deps.formatError(error),
+        }),
+      ),
+    );
+
 const withShutdownRpcTimeout =
   (message: string) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | Error, R> =>
@@ -43,20 +59,31 @@ const withShutdownRpcTimeout =
       ),
     );
 
+const warnAfterGraceTimeout = (
+  effect: Effect.Effect<void, unknown>,
+  onTimeout: () => Effect.Effect<void, unknown>,
+) =>
+  effect.pipe(
+    Effect.timeoutOption(SHUTDOWN_GRACE_PERIOD),
+    Effect.flatMap(
+      Option.match({
+        onSome: () => Effect.void,
+        onNone: onTimeout,
+      }),
+    ),
+  );
+
 const forceCloseSessionHandle = (
   deps: Pick<SessionShutdownDeps, "logger" | "formatError">,
   session: ChannelSession,
   reason: string,
 ) =>
   session.opencode.close().pipe(
-    Effect.catch((error) =>
-      deps.logger.warn("failed to force-close opencode session during shutdown", {
-        channelId: session.channelId,
-        sessionId: session.opencode.sessionId,
-        reason,
-        error: deps.formatError(error),
-      }),
-    ),
+    catchShutdownWarn(deps, "failed to force-close opencode session during shutdown", (error) => ({
+      channelId: session.channelId,
+      sessionId: session.opencode.sessionId,
+      reason,
+    })),
   );
 
 const interruptRunForShutdown = (
@@ -107,16 +134,13 @@ const awaitSessionIdleObservedAfterInterrupt = (
   deps: SessionShutdownDeps,
   session: ChannelSession,
 ) =>
-  awaitSessionIdleObservedAfterInterruptLoop(deps, session.opencode.sessionId).pipe(
-    Effect.timeoutOption(SHUTDOWN_GRACE_PERIOD),
-    Effect.flatMap((result) =>
-      Option.isSome(result)
-        ? Effect.void
-        : deps.logger.warn("active run did not reach observed idle before question shutdown", {
-            channelId: session.channelId,
-            sessionId: session.opencode.sessionId,
-          }),
-    ),
+  warnAfterGraceTimeout(
+    awaitSessionIdleObservedAfterInterruptLoop(deps, session.opencode.sessionId),
+    () =>
+      deps.logger.warn("active run did not reach observed idle before question shutdown", {
+        channelId: session.channelId,
+        sessionId: session.opencode.sessionId,
+      }),
   );
 
 const interruptIdleCompactionForShutdown = (deps: SessionShutdownDeps, session: ChannelSession) =>
@@ -138,11 +162,12 @@ const interruptIdleCompactionForShutdown = (deps: SessionShutdownDeps, session: 
           ),
           Effect.andThen(
             deps.idleCompactionWorkflow.handleInterrupted(session.opencode.sessionId).pipe(
-              Effect.catch((finalizeError) =>
-                deps.logger.warn("failed to finalize idle compaction after forced shutdown", {
+              catchShutdownWarn(
+                deps,
+                "failed to finalize idle compaction after forced shutdown",
+                (finalizeError) => ({
                   channelId: session.channelId,
                   sessionId: session.opencode.sessionId,
-                  error: deps.formatError(finalizeError),
                 }),
               ),
             ),
@@ -166,10 +191,7 @@ const requestSessionShutdown = (deps: SessionShutdownDeps, session: ChannelSessi
 
     if (yield* deps.idleCompactionWorkflow.hasActive(session.opencode.sessionId)) {
       yield* interruptIdleCompactionForShutdown(deps, session);
-      yield* deps.questionRuntime.shutdownSession(session.opencode.sessionId);
-      return;
     }
-
     yield* deps.questionRuntime.shutdownSession(session.opencode.sessionId);
   });
 
@@ -210,32 +232,23 @@ const awaitShutdownDrainLoop = (deps: SessionShutdownDeps): Effect.Effect<void, 
   );
 
 const awaitShutdownDrain = (deps: SessionShutdownDeps) =>
-  awaitShutdownDrainLoop(deps).pipe(
-    Effect.timeoutOption(SHUTDOWN_GRACE_PERIOD),
-    Effect.flatMap((result) =>
-      Option.isSome(result)
-        ? Effect.void
-        : readShutdownDrainState(deps).pipe(
-            Effect.flatMap((drainState) =>
-              deps.logger.warn("shutdown grace period elapsed before local work drained", {
-                hasActiveRuns: drainState?.hasActiveRuns ?? false,
-                hasIdleCompactions: drainState?.hasIdleCompactions ?? false,
-                hasPendingQuestions: drainState?.hasPendingQuestions ?? false,
-              }),
-            ),
-          ),
+  warnAfterGraceTimeout(awaitShutdownDrainLoop(deps), () =>
+    readShutdownDrainState(deps).pipe(
+      Effect.flatMap((drainState) =>
+        deps.logger.warn("shutdown grace period elapsed before local work drained", {
+          hasActiveRuns: drainState?.hasActiveRuns ?? false,
+          hasIdleCompactions: drainState?.hasIdleCompactions ?? false,
+          hasPendingQuestions: drainState?.hasPendingQuestions ?? false,
+        }),
+      ),
     ),
   );
 
 const finalizeShutdownCleanup = (deps: SessionShutdownDeps) =>
   Effect.gen(function* () {
-    yield* deps.questionRuntime.cleanupShutdownQuestions().pipe(
-      Effect.catch((error) =>
-        deps.logger.warn("failed to finalize pending questions during shutdown", {
-          error: deps.formatError(error),
-        }),
-      ),
-    );
+    yield* deps.questionRuntime
+      .cleanupShutdownQuestions()
+      .pipe(catchShutdownWarn(deps, "failed to finalize pending questions during shutdown"));
 
     const state = yield* deps.getState();
     const activeRuns = [...state.activeRunsBySessionId.entries()];
@@ -254,10 +267,11 @@ const finalizeShutdownCleanup = (deps: SessionShutdownDeps) =>
         Effect.gen(function* () {
           yield* Effect.promise(() => activeRun.typing.stop()).pipe(Effect.ignore);
           yield* activeRun.finalizeProgress("interrupted").pipe(
-            Effect.catch((error) =>
-              deps.logger.warn("failed to finalize interrupted run progress during shutdown", {
+            catchShutdownWarn(
+              deps,
+              "failed to finalize interrupted run progress during shutdown",
+              (error) => ({
                 sessionId,
-                error: deps.formatError(error),
               }),
             ),
           );
@@ -268,13 +282,10 @@ const finalizeShutdownCleanup = (deps: SessionShutdownDeps) =>
               "OpenCode stopped the active run in this channel because the bot is shutting down.",
             )
             .pipe(
-              Effect.catch((error) =>
-                deps.logger.warn("failed to post shutdown interrupt info card", {
-                  channelId: activeRun.originMessage.channelId,
-                  sessionId,
-                  error: deps.formatError(error),
-                }),
-              ),
+              catchShutdownWarn(deps, "failed to post shutdown interrupt info card", (error) => ({
+                channelId: activeRun.originMessage.channelId,
+                sessionId,
+              })),
               Effect.ignore,
             );
         }),
@@ -285,12 +296,9 @@ const finalizeShutdownCleanup = (deps: SessionShutdownDeps) =>
       idleCompactionSessionIds,
       (sessionId) =>
         deps.idleCompactionWorkflow.handleInterrupted(sessionId).pipe(
-          Effect.catch((error) =>
-            deps.logger.warn("failed to finalize idle compaction on shutdown", {
-              sessionId,
-              error: deps.formatError(error),
-            }),
-          ),
+          catchShutdownWarn(deps, "failed to finalize idle compaction on shutdown", (error) => ({
+            sessionId,
+          })),
         ),
       { concurrency: "unbounded", discard: true },
     );
@@ -303,13 +311,9 @@ export const createSessionShutdown =
         !shouldRun
           ? Effect.void
           : Effect.gen(function* () {
-              yield* deps.idleCompactionWorkflow.shutdown().pipe(
-                Effect.catch((error) =>
-                  deps.logger.warn("failed to begin idle compaction shutdown", {
-                    error: deps.formatError(error),
-                  }),
-                ),
-              );
+              yield* deps.idleCompactionWorkflow
+                .shutdown()
+                .pipe(catchShutdownWarn(deps, "failed to begin idle compaction shutdown"));
               const state = yield* deps.getState();
               const sessions = [...state.sessionsBySessionId.values()];
               yield* Effect.forEach(sessions, (session) => requestSessionShutdown(deps, session), {
@@ -320,20 +324,12 @@ export const createSessionShutdown =
               yield* awaitShutdownDrain(deps);
               yield* finalizeShutdownCleanup(deps);
 
-              yield* deps.interruptSessionWorkers().pipe(
-                Effect.catch((error) =>
-                  deps.logger.warn("failed to interrupt session workers on shutdown", {
-                    error: deps.formatError(error),
-                  }),
-                ),
-              );
-              yield* deps.shutdownSessions().pipe(
-                Effect.catch((error) =>
-                  deps.logger.warn("failed to shut down sessions", {
-                    error: deps.formatError(error),
-                  }),
-                ),
-              );
+              yield* deps
+                .interruptSessionWorkers()
+                .pipe(catchShutdownWarn(deps, "failed to interrupt session workers on shutdown"));
+              yield* deps
+                .shutdownSessions()
+                .pipe(catchShutdownWarn(deps, "failed to shut down sessions"));
             }),
       ),
       Effect.catch((error) =>

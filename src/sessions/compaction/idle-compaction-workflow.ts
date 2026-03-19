@@ -227,6 +227,14 @@ const createSessionIdleCompactionWorkflow = (deps: {
 
     const getInterruptRequested = () =>
       Ref.get(stateRef).pipe(Effect.map((state) => state?.interruptRequested ?? false));
+    const finalizeStatusCard = (status: "compacted" | "interrupted") => {
+      const card = compactionCardContent(status);
+      return finalizeCard(card.title, card.body);
+    };
+    const updateStatusCard = (status: "compacting" | "interrupting") => {
+      const card = compactionCardContent(status);
+      return updateCard(card.title, card.body);
+    };
 
     return {
       hasActive: () => Ref.get(stateRef).pipe(Effect.map(Boolean)),
@@ -286,6 +294,10 @@ const createSessionIdleCompactionWorkflow = (deps: {
             );
           const finalizeStartedCompaction = (title: string, body: string) =>
             compactionCard ? finalizeCard(title, body) : completeWithoutCard();
+          const finalizeStartedStatus = (status: "compacted" | "interrupted") => {
+            const card = compactionCardContent(status);
+            return finalizeStartedCompaction(card.title, card.body);
+          };
 
           yield* deps.opencode.compactSession(session.opencode).pipe(
             Effect.tap(() => finalizeStartedCompaction(compactedCard.title, compactedCard.body)),
@@ -300,13 +312,7 @@ const createSessionIdleCompactionWorkflow = (deps: {
               getInterruptRequested().pipe(
                 Effect.flatMap((interruptRequested) =>
                   interruptRequested
-                    ? (() => {
-                        const interruptedCard = compactionCardContent("interrupted");
-                        return finalizeStartedCompaction(
-                          interruptedCard.title,
-                          interruptedCard.body,
-                        );
-                      })()
+                    ? finalizeStartedStatus("interrupted")
                     : finalizeStartedCompaction(
                         "❌ Session compaction failed",
                         `OpenCode could not compact this session.\n\n${formatError(error)}`,
@@ -324,37 +330,32 @@ const createSessionIdleCompactionWorkflow = (deps: {
           yield* Ref.update(stateRef, (current) =>
             !current ? current : { ...current, interruptRequested: true },
           );
-          const interruptingCard = compactionCardContent("interrupting");
-          yield* updateCard(interruptingCard.title, interruptingCard.body);
+          yield* updateStatusCard("interrupting");
 
-          const interruptResult = yield* deps.opencode
-            .interruptSession(session.opencode)
-            .pipe(Effect.result);
-          if (interruptResult._tag === "Failure") {
-            yield* Ref.update(stateRef, (current) =>
-              !current ? current : { ...current, interruptRequested: false },
-            );
-            const compactingCard = compactionCardContent("compacting");
-            yield* updateCard(compactingCard.title, compactingCard.body);
-            return {
-              type: "failed",
-              message: formatErrorResponse(
-                "## ❌ Failed to interrupt compaction",
-                formatError(interruptResult.failure),
-              ),
-            } satisfies IdleCompactionWorkflowInterruptResult;
-          }
-
-          return { type: "interrupted" } satisfies IdleCompactionWorkflowInterruptResult;
+          return yield* deps.opencode.interruptSession(session.opencode).pipe(
+            Effect.matchEffect({
+              onFailure: (error) =>
+                Ref.update(stateRef, (current) =>
+                  !current ? current : { ...current, interruptRequested: false },
+                ).pipe(
+                  Effect.andThen(updateStatusCard("compacting")),
+                  Effect.as({
+                    type: "failed",
+                    message: formatErrorResponse(
+                      "## ❌ Failed to interrupt compaction",
+                      formatError(error),
+                    ),
+                  } satisfies IdleCompactionWorkflowInterruptResult),
+                ),
+              onSuccess: () =>
+                Effect.succeed({
+                  type: "interrupted",
+                } satisfies IdleCompactionWorkflowInterruptResult),
+            }),
+          );
         }),
-      handleCompacted: () => {
-        const compactedCard = compactionCardContent("compacted");
-        return finalizeCard(compactedCard.title, compactedCard.body);
-      },
-      handleInterrupted: () => {
-        const interruptedCard = compactionCardContent("interrupted");
-        return finalizeCard(interruptedCard.title, interruptedCard.body);
-      },
+      handleCompacted: () => finalizeStatusCard("compacted"),
+      handleInterrupted: () => finalizeStatusCard("interrupted"),
       shutdown: () =>
         Ref.set(shutdownStartedRef, true).pipe(
           Effect.andThen(Ref.set(lateFinalizerRef, null)),
@@ -376,6 +377,14 @@ export const makeIdleCompactionWorkflow = (): Effect.Effect<
     const workflows = new Map<string, SessionIdleCompactionWorkflow>();
 
     const getWorkflow = (sessionId: string) => Effect.sync(() => workflows.get(sessionId) ?? null);
+    const withWorkflow = <A>(
+      sessionId: string,
+      onMissing: Effect.Effect<A, unknown>,
+      onWorkflow: (workflow: SessionIdleCompactionWorkflow) => Effect.Effect<A, unknown>,
+    ) =>
+      getWorkflow(sessionId).pipe(
+        Effect.flatMap((workflow) => (workflow ? onWorkflow(workflow) : onMissing)),
+      );
 
     const deleteWorkflow = (sessionId: string, workflow?: SessionIdleCompactionWorkflow) =>
       Effect.sync(() => {
@@ -450,36 +459,26 @@ export const makeIdleCompactionWorkflow = (): Effect.Effect<
 
     return {
       hasActive: (sessionId) =>
-        getWorkflow(sessionId).pipe(
-          Effect.flatMap((workflow) => (workflow ? workflow.hasActive() : Effect.succeed(false))),
-        ),
+        withWorkflow(sessionId, Effect.succeed(false), (workflow) => workflow.hasActive()),
       awaitCompletion: (sessionId) =>
-        getWorkflow(sessionId).pipe(
-          Effect.flatMap((workflow) => (workflow ? workflow.awaitCompletion() : Effect.void)),
-        ),
+        withWorkflow(sessionId, Effect.void, (workflow) => workflow.awaitCompletion()),
       start: ({ session, channel }) =>
         getOrCreateWorkflow(session.opencode.sessionId).pipe(
           Effect.flatMap((workflow) => workflow.start({ session, channel })),
         ),
       requestInterrupt: ({ session }) =>
-        getWorkflow(session.opencode.sessionId).pipe(
-          Effect.flatMap((workflow) =>
-            workflow
-              ? workflow.requestInterrupt({ session })
-              : Effect.succeed({
-                  type: "failed",
-                  message: "No active OpenCode run or compaction is running in this channel.",
-                } satisfies IdleCompactionWorkflowInterruptResult),
-          ),
+        withWorkflow(
+          session.opencode.sessionId,
+          Effect.succeed({
+            type: "failed",
+            message: "No active OpenCode run or compaction is running in this channel.",
+          } satisfies IdleCompactionWorkflowInterruptResult),
+          (workflow) => workflow.requestInterrupt({ session }),
         ),
       handleCompacted: (sessionId) =>
-        getWorkflow(sessionId).pipe(
-          Effect.flatMap((workflow) => (workflow ? workflow.handleCompacted() : Effect.void)),
-        ),
+        withWorkflow(sessionId, Effect.void, (workflow) => workflow.handleCompacted()),
       handleInterrupted: (sessionId) =>
-        getWorkflow(sessionId).pipe(
-          Effect.flatMap((workflow) => (workflow ? workflow.handleInterrupted() : Effect.void)),
-        ),
+        withWorkflow(sessionId, Effect.void, (workflow) => workflow.handleInterrupted()),
       emitSummary: emitCompactionSummary,
       shutdown: () =>
         Effect.sync(() => [...workflows.values()]).pipe(
