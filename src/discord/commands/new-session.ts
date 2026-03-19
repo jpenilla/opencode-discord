@@ -7,7 +7,7 @@ import {
 } from "@/channels/command-policy.ts";
 import { CommandContext } from "@/discord/commands/command-context.ts";
 import { InfoCards } from "@/discord/info-cards.ts";
-import { SessionRuntime } from "@/sessions/session-runtime.ts";
+import { SessionChannelBridge } from "@/sessions/session-runtime.ts";
 import { formatError } from "@/util/errors.ts";
 import { Logger } from "@/util/logging.ts";
 import { defineGuildCommand } from "./definition.ts";
@@ -17,7 +17,7 @@ export const newSessionCommand = defineGuildCommand({
   description: "Start a fresh OpenCode session in this channel on the next message",
   execute: Effect.gen(function* () {
     const context = yield* CommandContext;
-    const sessionRuntime = yield* SessionRuntime;
+    const sessionBridge = yield* SessionChannelBridge;
     const infoCards = yield* InfoCards;
     const logger = yield* Logger;
 
@@ -26,7 +26,7 @@ export const newSessionCommand = defineGuildCommand({
       return;
     }
 
-    const channelActivity = yield* sessionRuntime.readLoadedChannelActivity(context.channelId);
+    const channelActivity = yield* sessionBridge.readLoadedChannelActivity(context.channelId);
     const entry = decideNewSessionEntry({
       channelActivity,
     });
@@ -36,12 +36,12 @@ export const newSessionCommand = defineGuildCommand({
     }
 
     yield* context.ack();
-    const invalidated = yield* sessionRuntime.invalidate(
+    const invalidated = yield* sessionBridge.invalidate(
       context.channelId,
       "requested a fresh session via /new-session",
     );
     if (!invalidated) {
-      const refreshedChannelActivity = yield* sessionRuntime.readLoadedChannelActivity(
+      const refreshedChannelActivity = yield* sessionBridge.readLoadedChannelActivity(
         context.channelId,
       );
       const refreshedEntry = decideNewSessionEntry({

@@ -2,6 +2,7 @@ import { Effect, ServiceMap } from "effect";
 
 import type { ChannelSettings, PersistedChannelSettings } from "@/state/channel-settings.ts";
 import { resolveChannelSettings } from "@/state/channel-settings.ts";
+import type { SessionChannelBridgeShape } from "@/sessions/session-runtime.ts";
 
 export type ToggleableChannelSetting = keyof Pick<
   ChannelSettings,
@@ -47,10 +48,7 @@ export const makeChannelSettingsRuntime = (deps: {
   upsertPersistedChannelSettings: (
     settings: PersistedChannelSettings,
   ) => Effect.Effect<void, unknown>;
-  updateLoadedChannelSettings: (
-    channelId: string,
-    settings: ChannelSettings,
-  ) => Effect.Effect<void, unknown>;
+  updateLoadedChannelSettings: SessionChannelBridgeShape["updateLoadedChannelSettings"];
 }): ChannelSettingsRuntimeShape => ({
   toggle: (channelId, setting) =>
     deps.getPersistedChannelSettings(channelId).pipe(
