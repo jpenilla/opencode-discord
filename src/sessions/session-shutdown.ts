@@ -5,7 +5,7 @@ import type { InfoCardsShape } from "@/discord/info-cards.ts";
 import type { IdleCompactionWorkflowShape } from "@/sessions/idle-compaction-workflow.ts";
 import type { OpencodeServiceShape } from "@/opencode/service.ts";
 import type { QuestionRuntime } from "@/sessions/question-runtime.ts";
-import type { SessionLifecycleState } from "@/sessions/session-runtime.ts";
+import type { SessionRegistryState } from "@/sessions/session-runtime.ts";
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
@@ -15,7 +15,7 @@ const SHUTDOWN_DRAIN_POLL_INTERVAL = "100 millis";
 
 type SessionShutdownDeps = {
   startShutdown: () => Effect.Effect<boolean>;
-  getState: () => Effect.Effect<SessionLifecycleState>;
+  getState: () => Effect.Effect<SessionRegistryState>;
   questionRuntime: Pick<
     QuestionRuntime,
     "shutdownSession" | "cleanupShutdownQuestions" | "hasPendingQuestionsAnywhere"

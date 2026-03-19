@@ -13,7 +13,7 @@ import type { Invocation } from "@/discord/triggers.ts";
 import { collectAttachmentMessages } from "@/sessions/message-context.ts";
 import { SessionChannelBridge } from "@/sessions/session-runtime.ts";
 import type { RunRequest } from "@/sessions/session.ts";
-import { ChannelSettingsPersistence } from "@/state/store.ts";
+import { ChannelSettingsPersistence } from "@/state/persistence.ts";
 import { Logger } from "@/util/logging.ts";
 
 export type ChannelRuntimeShape = {

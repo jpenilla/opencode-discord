@@ -9,7 +9,7 @@ import { OpencodeEventQueueLayer } from "@/opencode/events.ts";
 import { OpencodeServiceLayer } from "@/opencode/service.ts";
 import { SessionRuntimeLayer } from "@/sessions/session-runtime.ts";
 import { installShutdownSignalHandlers } from "@/shutdown/signals.ts";
-import { StatePersistenceLayer } from "@/state/store.ts";
+import { StatePersistenceLayer } from "@/state/persistence.ts";
 import { ToolBridgeLayer } from "@/tools/bridge/server.ts";
 import { Logger, LoggerLayer } from "@/util/logging.ts";
 
