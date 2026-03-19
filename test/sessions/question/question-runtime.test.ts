@@ -6,7 +6,7 @@ import type { QuestionRequest } from "@opencode-ai/sdk/v2";
 import { makeQuestionRuntime } from "@/sessions/question/question-runtime.ts";
 import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
-import { unsafeStub } from "../support/stub.ts";
+import { unsafeStub } from "../../support/stub.ts";
 
 const makeRequest = (id = "req-1") =>
   unsafeStub<QuestionRequest>({

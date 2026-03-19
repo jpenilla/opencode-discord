@@ -8,7 +8,7 @@ import { makeIdleCompactionWorkflow } from "@/sessions/compaction/idle-compactio
 import { OpencodeService, type OpencodeServiceShape } from "@/opencode/service.ts";
 import type { ChannelSession } from "@/sessions/session.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
-import { unsafeStub } from "../support/stub.ts";
+import { unsafeStub } from "../../support/stub.ts";
 
 const getRef = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
 

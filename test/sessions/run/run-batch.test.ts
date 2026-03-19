@@ -8,7 +8,7 @@ import {
   takeQueuedRunBatch,
 } from "@/sessions/run/run-batch.ts";
 import type { RunRequest } from "@/sessions/session.ts";
-import { unsafeStub } from "../support/stub.ts";
+import { unsafeStub } from "../../support/stub.ts";
 
 const makeMessage = (id: string, attachmentCount = 0) =>
   unsafeStub<Message>({
