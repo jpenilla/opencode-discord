@@ -9,7 +9,7 @@ import { Deferred, Effect, Fiber, Option, Redacted } from "effect";
 
 import type { AppConfigShape } from "@/config.ts";
 import type { ActiveRun } from "@/sessions/session.ts";
-import type { SessionRunAccessShape } from "@/sessions/session-runtime.ts";
+import type { SessionRuntimeShape } from "@/sessions/session-runtime.ts";
 import { uploadMetadataHeader } from "@/tools/bridge/handlers/uploads.ts";
 import { handleToolBridgeRequest, runToolBridgeHttpRequest } from "@/tools/bridge/server.ts";
 import type { LoggerShape } from "@/util/logging.ts";
@@ -128,7 +128,9 @@ const makeUploadRequest = (input: {
   return request;
 };
 
-const makeSessions = (activeRun: ActiveRun | null): SessionRunAccessShape => ({
+const makeSessions = (
+  activeRun: ActiveRun | null,
+): Pick<SessionRuntimeShape, "getActiveRunBySessionId"> => ({
   getActiveRunBySessionId: (sessionId: string) =>
     Effect.succeed(sessionId === "session-1" ? activeRun : null),
 });

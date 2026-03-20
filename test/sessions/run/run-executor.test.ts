@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { BunServices } from "@effect/platform-bun";
 import type { Message, SendableChannels } from "discord.js";
 import { Deferred, Effect, Queue, Ref } from "effect";
 
@@ -8,31 +7,9 @@ import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
 import { executeRunBatch } from "@/sessions/run/run-executor.ts";
 import type { NonEmptyRunRequestBatch } from "@/sessions/run/run-batch.ts";
 import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
-import { makeMessage, makeSessionHandle } from "../../support/fixtures.ts";
+import { appendRef, runTestEffect } from "../../support/runtime.ts";
+import { makeRunMessage, makeTestSession } from "../../support/session.ts";
 import { unsafeStub } from "../../support/stub.ts";
-
-const makeRunMessage = (id: string) =>
-  makeMessage({
-    id,
-    channelId: "channel-1",
-    channel: { id: "channel-1", isSendable: () => true },
-  });
-
-const makeSession = (): ChannelSession =>
-  unsafeStub<ChannelSession>({
-    channelId: "channel-1",
-    opencode: makeSessionHandle(),
-    rootDir: "/tmp/session-root",
-    workdir: "/home/opencode/workspace",
-    createdAt: Date.now(),
-    lastActivityAt: Date.now(),
-    channelSettings: {
-      showThinking: true,
-      showCompactionSummaries: true,
-    },
-    queue: {},
-    activeRun: null,
-  });
 
 const makeInitialRequests = (message: Message): NonEmptyRunRequestBatch => [
   {
@@ -42,8 +19,7 @@ const makeInitialRequests = (message: Message): NonEmptyRunRequestBatch => [
   },
 ];
 
-const runExecutorEffect = <A, E = unknown, R = never>(effect: Effect.Effect<A, E, R>): Promise<A> =>
-  Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer)) as Effect.Effect<A, E, never>);
+const runExecutorEffect = runTestEffect;
 
 const makeRuntime = async (options?: {
   promptResult?: PromptResult;
@@ -51,11 +27,11 @@ const makeRuntime = async (options?: {
   progressBehavior?: "ack" | "exit";
   configureActiveRun?: (activeRun: ActiveRun) => void;
 }) => {
-  const calls = await Effect.runPromise(Ref.make<string[]>([]));
-  const finalResponseMessageIds = await Effect.runPromise(Ref.make<string[]>([]));
-  const questionUiFailureMessageIds = await Effect.runPromise(Ref.make<string[]>([]));
-  const runFailureMessageIds = await Effect.runPromise(Ref.make<string[]>([]));
-  const record = (entry: string) => Ref.update(calls, (current) => [...current, entry]);
+  const calls = await runTestEffect(Ref.make<string[]>([]));
+  const finalResponseMessageIds = await runTestEffect(Ref.make<string[]>([]));
+  const questionUiFailureMessageIds = await runTestEffect(Ref.make<string[]>([]));
+  const runFailureMessageIds = await runTestEffect(Ref.make<string[]>([]));
+  const record = (entry: string) => appendRef(calls, entry);
 
   return {
     calls,
@@ -140,17 +116,17 @@ const makeRuntime = async (options?: {
       sendRunInterruptedInfo: (_message: Message, source: "user" | "shutdown") =>
         record(`sendRunInterruptedInfo:${source}`),
       sendFinalResponse: (message: Message, text: string) =>
-        Ref.update(finalResponseMessageIds, (current) => [...current, message.id]).pipe(
+        appendRef(finalResponseMessageIds, message.id).pipe(
           Effect.andThen(record(`sendFinalResponse:${text}`)),
         ),
       sendRunFailure: (message: Message, error: unknown) =>
-        Ref.update(runFailureMessageIds, (current) => [...current, message.id]).pipe(
+        appendRef(runFailureMessageIds, message.id).pipe(
           Effect.andThen(
             record(`sendRunFailure:${error instanceof Error ? error.message : String(error)}`),
           ),
         ),
       sendQuestionUiFailure: (message: Message, error: unknown) =>
-        Ref.update(questionUiFailureMessageIds, (current) => [...current, message.id]).pipe(
+        appendRef(questionUiFailureMessageIds, message.id).pipe(
           Effect.andThen(record(`sendQuestionUiFailure:${String(error)}`)),
         ),
       logger: {
@@ -165,7 +141,7 @@ const makeRuntime = async (options?: {
 
 describe("executeRunBatch", () => {
   test("runs a successful batch through progress finalization and final reply", async () => {
-    const session = makeSession();
+    const session = makeTestSession();
     const responseMessage = makeRunMessage("m-1");
     const initialRequests = makeInitialRequests(responseMessage);
     const { runtime, calls } = await makeRuntime();
@@ -188,7 +164,7 @@ describe("executeRunBatch", () => {
   });
 
   test("sends the final Discord reply against the current prompt reply target", async () => {
-    const session = makeSession();
+    const session = makeTestSession();
     const originMessage = makeRunMessage("trigger-message");
     const replyTargetMessage = makeRunMessage("follow-up-message");
     const initialRequests = makeInitialRequests(originMessage);
@@ -215,7 +191,7 @@ describe("executeRunBatch", () => {
   });
 
   test("sends the question UI failure reply for empty transcripts with an unnotified UI failure", async () => {
-    const session = makeSession();
+    const session = makeTestSession();
     const responseMessage = makeRunMessage("m-1");
     const initialRequests = makeInitialRequests(responseMessage);
     const replyTargetMessage = makeRunMessage("question-target");
@@ -247,7 +223,7 @@ describe("executeRunBatch", () => {
   });
 
   test("sends a run failure and triggers health recovery after non-interrupt errors", async () => {
-    const session = makeSession();
+    const session = makeTestSession();
     const responseMessage = makeRunMessage("m-1");
     const initialRequests = makeInitialRequests(responseMessage);
     const replyTargetMessage = makeRunMessage("failure-target");
@@ -281,7 +257,7 @@ describe("executeRunBatch", () => {
   });
 
   test("suppresses run failure and health recovery when the run was intentionally interrupted", async () => {
-    const session = makeSession();
+    const session = makeTestSession();
     const responseMessage = makeRunMessage("m-1");
     const initialRequests = makeInitialRequests(responseMessage);
     const { runtime, calls } = await makeRuntime({
@@ -308,7 +284,7 @@ describe("executeRunBatch", () => {
   });
 
   test("clears a stale interrupt request when the run still completes successfully", async () => {
-    const session = makeSession();
+    const session = makeTestSession();
     const responseMessage = makeRunMessage("m-1");
     const initialRequests = makeInitialRequests(responseMessage);
     const { runtime, calls } = await makeRuntime({
@@ -335,7 +311,7 @@ describe("executeRunBatch", () => {
   });
 
   test("warns when the progress worker already exited before finalization", async () => {
-    const session = makeSession();
+    const session = makeTestSession();
     const responseMessage = makeRunMessage("m-1");
     const initialRequests = makeInitialRequests(responseMessage);
     const { runtime, calls } = await makeRuntime({
@@ -360,13 +336,13 @@ describe("executeRunBatch", () => {
   });
 
   test("sends a Discord reply for each completed prompt round in the same run", async () => {
-    const session = makeSession();
+    const session = makeTestSession();
     const originMessage = makeRunMessage("trigger-message");
     const followUpMessage = makeRunMessage("follow-up-message");
     const initialRequests = makeInitialRequests(originMessage);
     const calls = await Effect.runPromise(Ref.make<string[]>([]));
     const finalResponseMessageIds = await Effect.runPromise(Ref.make<string[]>([]));
-    const record = (entry: string) => Ref.update(calls, (current) => [...current, entry]);
+    const record = (entry: string) => appendRef(calls, entry);
 
     const runtime = {
       ...(await makeRuntime()).runtime,
@@ -401,7 +377,7 @@ describe("executeRunBatch", () => {
           return { messageId: "msg-2", transcript: "second reply" };
         }),
       sendFinalResponse: (message: Message, text: string) =>
-        Ref.update(finalResponseMessageIds, (current) => [...current, message.id]).pipe(
+        appendRef(finalResponseMessageIds, message.id).pipe(
           Effect.andThen(record(`sendFinalResponse:${text}`)),
         ),
     } as const;
@@ -415,7 +391,7 @@ describe("executeRunBatch", () => {
   });
 
   test("sends replies in order across multiple chained follow-up rounds", async () => {
-    const session = makeSession();
+    const session = makeTestSession();
     const originMessage = makeRunMessage("trigger-message");
     const followUpMessageOne = makeRunMessage("follow-up-message-1");
     const followUpMessageTwo = makeRunMessage("follow-up-message-2");
@@ -463,7 +439,7 @@ describe("executeRunBatch", () => {
           return { messageId: "msg-3", transcript: "third reply" };
         }),
       sendFinalResponse: (message: Message, text: string) =>
-        Ref.update(finalResponseMessageIds, (current) => [...current, `${message.id}:${text}`]),
+        appendRef(finalResponseMessageIds, `${message.id}:${text}`),
     } as const;
 
     await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));

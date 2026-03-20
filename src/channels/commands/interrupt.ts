@@ -5,25 +5,25 @@ import {
   GUILD_TEXT_COMMAND_ONLY_MESSAGE,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
 } from "@/channels/command-policy.ts";
+import type { GuildCommand } from "@/channels/commands.ts";
 import { CommandContext } from "@/discord/command-context.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
-import { SessionChannelBridge } from "@/sessions/session-runtime.ts";
+import { SessionRuntime } from "@/sessions/session-runtime.ts";
 import { formatError } from "@/util/errors.ts";
-import { defineGuildCommand } from "./definition.ts";
 
-export const interruptCommand = defineGuildCommand({
+export const interruptCommand = {
   name: "interrupt",
   description: "Interrupt the active OpenCode run in this channel",
   execute: Effect.gen(function* () {
     const context = yield* CommandContext;
-    const sessionBridge = yield* SessionChannelBridge;
+    const sessionRuntime = yield* SessionRuntime;
 
     if (!context.inGuildTextChannel) {
       yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
       return;
     }
 
-    const channelActivity = yield* sessionBridge.readRestoredChannelActivity(context.channelId);
+    const channelActivity = yield* sessionRuntime.readRestoredChannelActivity(context.channelId);
     const entry = decideInterruptEntry({
       channelActivity,
     });
@@ -34,7 +34,7 @@ export const interruptCommand = defineGuildCommand({
 
     if (entry.target === "run") {
       yield* context.ack();
-      const interruptResult = yield* sessionBridge.requestRunInterrupt(context.channelId);
+      const interruptResult = yield* sessionRuntime.requestRunInterrupt(context.channelId);
       if (interruptResult.type === "failed") {
         yield* context.complete(
           formatErrorResponse("## ❌ Failed to interrupt run", formatError(interruptResult.error)),
@@ -51,7 +51,7 @@ export const interruptCommand = defineGuildCommand({
     }
 
     yield* context.ack();
-    const result = yield* sessionBridge.requestCompactionInterrupt(context.channelId);
+    const result = yield* sessionRuntime.requestCompactionInterrupt(context.channelId);
     if (result.type === "failed") {
       yield* context.complete(result.message);
       return;
@@ -59,4 +59,4 @@ export const interruptCommand = defineGuildCommand({
 
     yield* context.complete("Requested interruption of the active OpenCode compaction.");
   }),
-});
+} satisfies GuildCommand;

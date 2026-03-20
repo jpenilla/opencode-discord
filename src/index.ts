@@ -4,7 +4,7 @@ import { Deferred, Effect, Layer } from "effect";
 import { DiscordBotLayer } from "@/app.ts";
 import { ChannelRuntime, ChannelRuntimeLayer } from "@/channels/channel-runtime.ts";
 import { AppConfigLayer } from "@/config.ts";
-import { InfoCardsLayer } from "@/discord/info-cards.ts";
+import { InfoCardsLayer } from "@/discord/info-card.ts";
 import { OpencodeEventQueueLayer } from "@/opencode/events.ts";
 import { OpencodeServiceLayer } from "@/opencode/service.ts";
 import { SandboxBackendLayer } from "@/sandbox/backend.ts";

@@ -3,7 +3,7 @@ import { Deferred, Effect, Ref, ServiceMap } from "effect";
 
 import { compactionCardContent } from "@/discord/compaction-card.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
-import { InfoCards, type InfoCardsShape } from "@/discord/info-cards.ts";
+import { InfoCards, type InfoCardsShape } from "@/discord/info-card.ts";
 import { sendChannelProgressUpdate } from "@/discord/messages.ts";
 import { formatCompactionSummary } from "@/discord/progress.ts";
 import { OpencodeService, type OpencodeServiceShape } from "@/opencode/service.ts";

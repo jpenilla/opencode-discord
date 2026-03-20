@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { Cause, Effect, FileSystem, Layer, Path, Redacted } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
-import { SessionRunAccess, type SessionRunAccessShape } from "@/sessions/session-runtime.ts";
+import { SessionRuntime, type SessionRuntimeShape } from "@/sessions/session-runtime.ts";
 import { ToolBridgeResponseError, classifyToolBridgeFailure } from "@/tools/bridge/errors.ts";
 import { matchToolBridgeRoute } from "@/tools/bridge/routes.ts";
 import { sendJson } from "@/tools/bridge/transport.ts";
@@ -22,7 +22,7 @@ export const handleToolBridgeRequest = (input: {
   request: IncomingMessage;
   pathname: string;
   config: AppConfigShape;
-  sessions: SessionRunAccessShape;
+  sessions: Pick<SessionRuntimeShape, "getActiveRunBySessionId">;
   logger: LoggerShape;
 }): Effect.Effect<ToolBridgeHttpResponse> => {
   if (
@@ -83,7 +83,7 @@ export const runToolBridgeHttpRequest = (input: {
   response: ServerResponse;
   pathname: string;
   config: AppConfigShape;
-  sessions: SessionRunAccessShape;
+  sessions: Pick<SessionRuntimeShape, "getActiveRunBySessionId">;
   logger: LoggerShape;
 }) =>
   handleToolBridgeRequest(input).pipe(
@@ -138,7 +138,7 @@ export const ToolBridgeLayer = Layer.effectDiscard(
     const fs = yield* FileSystem.FileSystem;
     const logger = yield* Logger;
     const path = yield* Path.Path;
-    const sessions = yield* SessionRunAccess;
+    const sessions = yield* SessionRuntime;
 
     yield* fs.makeDirectory(path.dirname(config.toolBridgeSocketPath), { recursive: true });
     yield* fs.remove(config.toolBridgeSocketPath, { force: true });

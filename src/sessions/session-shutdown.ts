@@ -1,7 +1,7 @@
 import { Data, Effect, Option } from "effect";
 import { type SendableChannels } from "discord.js";
 
-import type { InfoCardsShape } from "@/discord/info-cards.ts";
+import type { InfoCardsShape } from "@/discord/info-card.ts";
 import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import type { OpencodeServiceShape } from "@/opencode/service.ts";
 import type { QuestionRuntime } from "@/sessions/question/question-runtime.ts";

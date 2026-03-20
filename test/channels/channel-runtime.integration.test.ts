@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { BunServices } from "@effect/platform-bun";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +10,7 @@ import {
   type MessageEditOptions,
   type SendableChannels,
 } from "discord.js";
-import { Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, Redacted, Ref } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, Ref } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
 import {
@@ -19,7 +18,7 @@ import {
   ChannelRuntimeLayer,
   type ChannelRuntimeShape,
 } from "@/channels/channel-runtime.ts";
-import { InfoCardsLayer } from "@/discord/info-cards.ts";
+import { InfoCardsLayer } from "@/discord/info-card.ts";
 import {
   buildOpencodePrompt,
   buildQueuedFollowUpPrompt,
@@ -35,16 +34,14 @@ import {
 } from "@/opencode/service.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import {
-  ChannelSettingsPersistence,
   type PersistedChannelSession,
-  SessionPersistence,
-  type ChannelSettingsPersistenceShape,
-  type SessionPersistenceShape,
+  StatePersistence,
+  type StatePersistenceShape,
 } from "@/state/persistence.ts";
 import {
-  SessionRunAccess,
+  SessionRuntime,
   SessionRuntimeLayer,
-  type SessionRunAccessShape,
+  type SessionRuntimeShape,
 } from "@/sessions/session-runtime.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
 import {
@@ -56,33 +53,21 @@ import {
   toGlobalEvent,
 } from "../support/opencode-events.ts";
 import { getRef } from "../support/fixtures.ts";
+import { makeTestConfig } from "../support/config.ts";
 import { failTest, interruptedTestError, timeoutTestError } from "../support/errors.ts";
+import { appendRef, runTestEffect } from "../support/runtime.ts";
 import { unsafeEffect, unsafeStub } from "../support/stub.ts";
 
 const TEST_STATE_DIR = join(tmpdir(), `.opencode-discord-test-storage-${process.pid}`);
 
-const runEffect = <A, E = never, R = never>(effect: Effect.Effect<A, E, R>): Promise<A> =>
-  Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer)) as Effect.Effect<A, E, never>);
+const runEffect = runTestEffect;
 
-const makeConfig = (): AppConfigShape => ({
-  discordToken: Redacted.make("discord-token"),
-  triggerPhrase: "hey opencode",
-  ignoreOtherBotTriggers: false,
-  sessionInstructions: "",
-  stateDir: TEST_STATE_DIR,
-  defaultProviderId: undefined,
-  defaultModelId: undefined,
-  showThinkingByDefault: true,
-  showCompactionSummariesByDefault: true,
-  sessionIdleTimeoutMs: 30 * 60 * 1_000,
-  toolBridgeSocketPath: "/tmp/bridge.sock",
-  toolBridgeToken: Redacted.make("bridge-token"),
-  sandboxBackend: "bwrap",
-  opencodeBin: "opencode",
-  bwrapBin: "bwrap",
-  sandboxReadOnlyPaths: [],
-  sandboxEnvPassthrough: [],
-});
+const makeConfig = (): AppConfigShape =>
+  makeTestConfig({
+    stateDir: TEST_STATE_DIR,
+    toolBridgeSocketPath: "/tmp/bridge.sock",
+    sandboxBackend: "bwrap",
+  });
 
 beforeAll(async () => {
   await rm(TEST_STATE_DIR, { recursive: true, force: true });
@@ -98,8 +83,7 @@ const makeLogger = (): LoggerShape => ({
   error: () => Effect.void,
 });
 
-const pushRef = <A>(ref: Ref.Ref<A[]>, value: A) =>
-  Ref.update(ref, (current) => [...current, value]);
+const pushRef = appendRef;
 const promptFor = (message: Message, prompt: string) =>
   buildOpencodePrompt({ message: promptMessageContext(message, prompt) });
 const queuedPromptFor = (message: Message, prompt: string) =>
@@ -203,7 +187,7 @@ const makeSessionIdleEvent = (sessionId = "session-1"): GlobalEvent =>
 type Harness = Awaited<ReturnType<typeof makeHarness>>;
 type RuntimeServices = {
   channels: ChannelRuntimeShape;
-  sessions: SessionRunAccessShape;
+  sessions: Pick<SessionRuntimeShape, "getActiveRunBySessionId">;
 };
 
 const withHarness = <A>(
@@ -214,12 +198,12 @@ const withHarness = <A>(
     Effect.scoped(
       Effect.gen(function* () {
         const channels = yield* ChannelRuntime;
-        const sessions = yield* SessionRunAccess;
+        const sessions = yield* SessionRuntime;
         return yield* run({
           channels,
           sessions,
         });
-      }).pipe(Effect.provide(harness.harnessLayer), Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(harness.harnessLayer)),
     ),
   );
 
@@ -533,7 +517,7 @@ const makeHarness = async (options: {
     isHealthy: () => options.isHealthyImpl?.() ?? Effect.succeed(true),
   };
 
-  const sessionPersistence: SessionPersistenceShape = {
+  const statePersistence: StatePersistenceShape = {
     getSession: (channelId) =>
       Ref.get(persistedSessions).pipe(Effect.map((sessions) => sessions.get(channelId) ?? null)),
     upsertSession: (session) =>
@@ -560,9 +544,6 @@ const makeHarness = async (options: {
         next.delete(channelId);
         return next;
       }),
-  };
-
-  const channelSettingsPersistence: ChannelSettingsPersistenceShape = {
     getChannelSettings: (channelId) =>
       Ref.get(persistedSettings).pipe(Effect.map((settings) => settings.get(channelId) ?? null)),
     upsertChannelSettings: (settings) =>
@@ -578,8 +559,7 @@ const makeHarness = async (options: {
     InfoCardsLayer,
     Layer.succeed(Logger, makeLogger()),
     Layer.succeed(OpencodeService, service),
-    Layer.succeed(SessionPersistence, sessionPersistence),
-    Layer.succeed(ChannelSettingsPersistence, channelSettingsPersistence),
+    Layer.succeed(StatePersistence, statePersistence),
     Layer.succeed(OpencodeEventQueue, eventQueue),
   );
   const sessionRuntimeLayer = SessionRuntimeLayer.pipe(Layer.provide(deps));

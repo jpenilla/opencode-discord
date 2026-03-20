@@ -3,7 +3,7 @@ import { Effect, FiberSet, FileSystem, Layer, Path, Queue, Ref, ServiceMap } fro
 
 import { AppConfig } from "@/config.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
-import { InfoCards } from "@/discord/info-cards.ts";
+import { InfoCards } from "@/discord/info-card.ts";
 import { sendFinalResponse, startTypingLoop } from "@/discord/messages.ts";
 import { buildSessionSystemAppend } from "@/discord/system-context.ts";
 import { OpencodeEventQueue } from "@/opencode/events.ts";
@@ -34,6 +34,10 @@ import { executeRunBatch } from "@/sessions/run/run-executor.ts";
 import { takeQueuedRunBatch } from "@/sessions/run/run-batch.ts";
 import {
   buildSessionCreateSpec,
+  setSessionActiveRun,
+  setSessionChannelSettings,
+  setSessionLastActivityAt,
+  setSessionProgressContext,
   type ActiveRun,
   type ChannelSession,
   type RunRequest,
@@ -51,11 +55,7 @@ import {
   sessionPathsFromRoot,
   type SessionPaths,
 } from "@/state/paths.ts";
-import {
-  ChannelSettingsPersistence,
-  SessionPersistence,
-  type PersistedChannelSession,
-} from "@/state/persistence.ts";
+import { StatePersistence, type PersistedChannelSession } from "@/state/persistence.ts";
 import { formatError } from "@/util/errors.ts";
 import { createKeyedSingleflight } from "@/util/keyed-singleflight.ts";
 import { Logger } from "@/util/logging.ts";
@@ -97,7 +97,7 @@ export type RunInterruptRequestResult =
   | { type: "question-pending" }
   | { type: "failed"; error: unknown };
 
-type SessionRuntimeShape = {
+export type SessionRuntimeShape = {
   readLoadedChannelActivity: (channelId: string) => Effect.Effect<ChannelActivity, unknown>;
   readRestoredChannelActivity: (
     channelId: string,
@@ -131,29 +131,8 @@ type SessionRuntimeShape = {
   shutdown: () => Effect.Effect<void, unknown>;
 };
 
-export type SessionChannelBridgeShape = Pick<
-  SessionRuntimeShape,
-  | "readLoadedChannelActivity"
-  | "readRestoredChannelActivity"
-  | "queueMessageRunRequest"
-  | "routeQuestionInteraction"
-  | "invalidate"
-  | "updateLoadedChannelSettings"
-  | "requestRunInterrupt"
-  | "startCompaction"
-  | "requestCompactionInterrupt"
-  | "shutdown"
->;
-
-export class SessionChannelBridge extends ServiceMap.Service<
-  SessionChannelBridge,
-  SessionChannelBridgeShape
->()("SessionChannelBridge") {}
-
-export type SessionRunAccessShape = Pick<SessionRuntimeShape, "getActiveRunBySessionId">;
-
-export class SessionRunAccess extends ServiceMap.Service<SessionRunAccess, SessionRunAccessShape>()(
-  "SessionRunAccess",
+export class SessionRuntime extends ServiceMap.Service<SessionRuntime, SessionRuntimeShape>()(
+  "SessionRuntime",
 ) {}
 
 type SessionLifecycleDeps = {
@@ -188,6 +167,78 @@ type SessionLifecycleDeps = {
 
 export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
   const sessionGate = createKeyedSingleflight<string>();
+
+  const registryState = {
+    read: <A>(map: (state: SessionRegistryState) => A) =>
+      Ref.get(deps.stateRef).pipe(Effect.map(map)),
+    updateSession: (
+      session: ChannelSession,
+      options?: {
+        previousSessionId?: string;
+        activeRun?: ActiveRun | null;
+      },
+    ) =>
+      Ref.update(deps.stateRef, (current) => {
+        const previousSessionId = options?.previousSessionId ?? session.opencode.sessionId;
+        const activeRun = options && "activeRun" in options ? options.activeRun : session.activeRun;
+
+        const sessionsByChannelId = new Map(current.sessionsByChannelId);
+        sessionsByChannelId.set(session.channelId, session);
+
+        const sessionsBySessionId = new Map(current.sessionsBySessionId);
+        sessionsBySessionId.delete(previousSessionId);
+        sessionsBySessionId.set(session.opencode.sessionId, session);
+
+        const activeRunsBySessionId = new Map(current.activeRunsBySessionId);
+        activeRunsBySessionId.delete(previousSessionId);
+        if (activeRun) {
+          activeRunsBySessionId.set(session.opencode.sessionId, activeRun);
+        }
+
+        return {
+          ...current,
+          sessionsByChannelId,
+          sessionsBySessionId,
+          activeRunsBySessionId,
+        };
+      }),
+    deleteSession: (session: ChannelSession) =>
+      Ref.update(deps.stateRef, (current) => {
+        const sessionsByChannelId = new Map(current.sessionsByChannelId);
+        sessionsByChannelId.delete(session.channelId);
+
+        const sessionsBySessionId = new Map(current.sessionsBySessionId);
+        sessionsBySessionId.delete(session.opencode.sessionId);
+
+        const activeRunsBySessionId = new Map(current.activeRunsBySessionId);
+        activeRunsBySessionId.delete(session.opencode.sessionId);
+
+        return {
+          ...current,
+          sessionsByChannelId,
+          sessionsBySessionId,
+          activeRunsBySessionId,
+        };
+      }),
+    getSession: (channelId: string) =>
+      registryState.read((state) => state.sessionsByChannelId.get(channelId)),
+    getActiveRunBySessionId: (sessionId: string) =>
+      registryState.read((state) => state.activeRunsBySessionId.get(sessionId) ?? null),
+    getSessionContext: (sessionId: string) =>
+      registryState.read((state): SessionContext | null => {
+        const session = state.sessionsBySessionId.get(sessionId);
+        if (!session) {
+          return null;
+        }
+
+        return {
+          session,
+          activeRun: state.activeRunsBySessionId.get(sessionId) ?? null,
+        };
+      }),
+    snapshotSessions: () => registryState.read((state) => [...state.sessionsByChannelId.values()]),
+  };
+
   const loadChannelSettings = (channelId: string) =>
     deps
       .getPersistedChannelSettings(channelId)
@@ -199,27 +250,7 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
         ),
       );
 
-  const getSession = (channelId: string) =>
-    Ref.get(deps.stateRef).pipe(Effect.map((state) => state.sessionsByChannelId.get(channelId)));
-
-  const getActiveRunBySessionId = (sessionId: string) =>
-    Ref.get(deps.stateRef).pipe(
-      Effect.map((state) => state.activeRunsBySessionId.get(sessionId) ?? null),
-    );
-
-  const getSessionContext = (sessionId: string) =>
-    Ref.get(deps.stateRef).pipe(
-      Effect.map((state): SessionContext | null => {
-        const session = state.sessionsBySessionId.get(sessionId);
-        if (!session) {
-          return null;
-        }
-        return {
-          session,
-          activeRun: state.activeRunsBySessionId.get(sessionId) ?? null,
-        };
-      }),
-    );
+  const { getSession, getActiveRunBySessionId, getSessionContext } = registryState;
 
   const toPersistedSession = (session: ChannelSession): PersistedChannelSession => ({
     channelId: session.channelId,
@@ -230,65 +261,14 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     lastActivityAt: session.lastActivityAt,
   });
 
-  const writeSession = (
-    current: SessionRegistryState,
-    session: ChannelSession,
-    options?: {
-      previousSessionId?: string;
-      activeRun?: ActiveRun | null;
-    },
-  ): SessionRegistryState => {
-    const previousSessionId = options?.previousSessionId ?? session.opencode.sessionId;
-    const activeRun = options && "activeRun" in options ? options.activeRun : session.activeRun;
-    const sessionsByChannelId = new Map(current.sessionsByChannelId);
-    sessionsByChannelId.set(session.channelId, session);
+  const putSession = (session: ChannelSession) => registryState.updateSession(session);
 
-    const sessionsBySessionId = new Map(current.sessionsBySessionId);
-    sessionsBySessionId.delete(previousSessionId);
-    sessionsBySessionId.set(session.opencode.sessionId, session);
-
-    const activeRunsBySessionId = new Map(current.activeRunsBySessionId);
-    activeRunsBySessionId.delete(previousSessionId);
-    if (activeRun) {
-      activeRunsBySessionId.set(session.opencode.sessionId, activeRun);
-    }
-
-    return {
-      ...current,
-      sessionsByChannelId,
-      sessionsBySessionId,
-      activeRunsBySessionId,
-    };
-  };
-
-  const removeSession = (
-    current: SessionRegistryState,
-    session: ChannelSession,
-  ): SessionRegistryState => {
-    const sessionsByChannelId = new Map(current.sessionsByChannelId);
-    sessionsByChannelId.delete(session.channelId);
-    const sessionsBySessionId = new Map(current.sessionsBySessionId);
-    sessionsBySessionId.delete(session.opencode.sessionId);
-    const activeRunsBySessionId = new Map(current.activeRunsBySessionId);
-    activeRunsBySessionId.delete(session.opencode.sessionId);
-    return {
-      ...current,
-      sessionsByChannelId,
-      sessionsBySessionId,
-      activeRunsBySessionId,
-    };
-  };
-
-  const putSession = (session: ChannelSession) =>
-    Ref.update(deps.stateRef, (current) => writeSession(current, session));
-
-  const deleteSession = (session: ChannelSession) =>
-    Ref.update(deps.stateRef, (current) => removeSession(current, session));
+  const deleteSession = (session: ChannelSession) => registryState.deleteSession(session);
 
   const setActiveRun = (session: ChannelSession, activeRun: ActiveRun | null) =>
-    Effect.sync(() => {
-      session.activeRun = activeRun;
-    }).pipe(Effect.andThen(Ref.update(deps.stateRef, (current) => writeSession(current, session))));
+    Effect.sync(() => setSessionActiveRun(session, activeRun)).pipe(
+      Effect.andThen(registryState.updateSession(session)),
+    );
 
   const replaceSessionHandle = (
     session: ChannelSession,
@@ -299,12 +279,10 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
       session.opencode = replacement;
     }).pipe(
       Effect.andThen(
-        Ref.update(deps.stateRef, (current) =>
-          writeSession(current, session, {
-            previousSessionId,
-            activeRun: null,
-          }),
-        ),
+        registryState.updateSession(session, {
+          previousSessionId,
+          activeRun: null,
+        }),
       ),
     );
   };
@@ -316,7 +294,7 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
 
   const touchSessionActivity = (session: ChannelSession, at = Date.now()) =>
     Effect.gen(function* () {
-      session.lastActivityAt = at;
+      setSessionLastActivityAt(session, at);
       yield* deps.touchPersistedSession(session.channelId, at);
     });
 
@@ -652,10 +630,10 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     });
 
   const closeExpiredSessions = (now = Date.now()) =>
-    Ref.get(deps.stateRef).pipe(
-      Effect.flatMap((state) =>
+    registryState.snapshotSessions().pipe(
+      Effect.flatMap((sessions) =>
         Effect.forEach(
-          state.sessionsByChannelId.values(),
+          sessions,
           (session) =>
             Effect.gen(function* () {
               const busy = yield* isSessionBusy(session);
@@ -721,9 +699,9 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     );
 
   const shutdownSessions = () =>
-    Ref.get(deps.stateRef).pipe(
-      Effect.flatMap((state) =>
-        Effect.forEach(state.sessionsByChannelId.values(), unloadSession, {
+    registryState.snapshotSessions().pipe(
+      Effect.flatMap((sessions) =>
+        Effect.forEach(sessions, unloadSession, {
           concurrency: "unbounded",
           discard: true,
         }),
@@ -758,8 +736,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
     const infoCards = yield* InfoCards;
     const opencode = yield* OpencodeService;
     const eventQueue = yield* OpencodeEventQueue;
-    const sessionPersistence = yield* SessionPersistence;
-    const channelSettingsPersistence = yield* ChannelSettingsPersistence;
+    const statePersistence = yield* StatePersistence;
     const stateRef = yield* Ref.make(createSessionRuntimeState());
     const shutdownStartedRef = yield* Ref.make(false);
     const questionTypingPausedRef = yield* Ref.make(new Set<string>());
@@ -802,11 +779,11 @@ export const SessionRuntimeLayer = Layer.unwrap(
       stateRef,
       createOpencodeSession: opencode.createSession,
       attachOpencodeSession: opencode.attachSession,
-      getPersistedSession: sessionPersistence.getSession,
-      upsertPersistedSession: sessionPersistence.upsertSession,
-      getPersistedChannelSettings: channelSettingsPersistence.getChannelSettings,
-      touchPersistedSession: sessionPersistence.touchSession,
-      deletePersistedSession: sessionPersistence.deleteSession,
+      getPersistedSession: statePersistence.getSession,
+      upsertPersistedSession: statePersistence.upsertSession,
+      getPersistedChannelSettings: statePersistence.getChannelSettings,
+      touchPersistedSession: statePersistence.touchSession,
+      deletePersistedSession: statePersistence.deleteSession,
       isSessionHealthy: opencode.isHealthy,
       startWorker: (session) =>
         FiberSet.run(fiberSet, { startImmediately: true })(worker(session)).pipe(Effect.asVoid),
@@ -1144,17 +1121,19 @@ export const SessionRuntimeLayer = Layer.unwrap(
         );
       });
 
-    const sessionChannelBridge: SessionChannelBridgeShape = {
+    const sessionRuntime = {
       readLoadedChannelActivity: (channelId) => readChannelActivity(getSession(channelId)),
       readRestoredChannelActivity: (channelId) =>
         readChannelActivity(getOrRestoreSession(channelId)),
+      getActiveRunBySessionId,
       queueMessageRunRequest: (message, request, reason) =>
         Effect.gen(function* () {
           const session = yield* getUsableSession(message, reason);
-          session.progressChannel = message.channel.isSendable()
-            ? (message.channel as SendableChannels)
-            : null;
-          session.progressMentionContext = message;
+          setSessionProgressContext({
+            session,
+            channel: message.channel.isSendable() ? (message.channel as SendableChannels) : null,
+            mentionContext: message,
+          });
           const destination = yield* enqueueRunRequest(session, request);
           return {
             sessionId: session.opencode.sessionId,
@@ -1169,9 +1148,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
           Effect.flatMap((session) =>
             !session
               ? Effect.void
-              : Effect.sync(() => {
-                  session.channelSettings = settings;
-                }),
+              : Effect.sync(() => setSessionChannelSettings(session, settings)),
           ),
         ),
       requestRunInterrupt: (channelId) =>
@@ -1190,9 +1167,9 @@ export const SessionRuntimeLayer = Layer.unwrap(
                   type: "rejected",
                   message: "No OpenCode session exists in this channel yet.",
                 } satisfies IdleCompactionWorkflowStartResult)
-              : Effect.sync(() => {
-                  session.progressChannel = channel;
-                }).pipe(Effect.andThen(idleCompaction.start({ session, channel }))),
+              : Effect.sync(() => setSessionProgressContext({ session, channel })).pipe(
+                  Effect.andThen(idleCompaction.start({ session, channel })),
+                ),
           ),
         ),
       requestCompactionInterrupt: (channelId) =>
@@ -1207,15 +1184,20 @@ export const SessionRuntimeLayer = Layer.unwrap(
           ),
         ),
       shutdown,
-    };
+    } satisfies SessionRuntimeShape;
 
-    const sessionRunAccess: SessionRunAccessShape = {
-      getActiveRunBySessionId,
-    };
-
-    return Layer.mergeAll(
-      Layer.succeed(SessionChannelBridge, sessionChannelBridge),
-      Layer.succeed(SessionRunAccess, sessionRunAccess),
-    );
+    return Layer.succeed(SessionRuntime, {
+      readLoadedChannelActivity: sessionRuntime.readLoadedChannelActivity,
+      readRestoredChannelActivity: sessionRuntime.readRestoredChannelActivity,
+      getActiveRunBySessionId: sessionRuntime.getActiveRunBySessionId,
+      queueMessageRunRequest: sessionRuntime.queueMessageRunRequest,
+      routeQuestionInteraction: sessionRuntime.routeQuestionInteraction,
+      invalidate: sessionRuntime.invalidate,
+      updateLoadedChannelSettings: sessionRuntime.updateLoadedChannelSettings,
+      requestRunInterrupt: sessionRuntime.requestRunInterrupt,
+      startCompaction: sessionRuntime.startCompaction,
+      requestCompactionInterrupt: sessionRuntime.requestCompactionInterrupt,
+      shutdown: sessionRuntime.shutdown,
+    } satisfies SessionRuntimeShape);
   }),
 );

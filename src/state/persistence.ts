@@ -14,7 +14,7 @@ export type PersistedChannelSession = {
   lastActivityAt: number;
 };
 
-type StateStoreShape = {
+export type StatePersistenceShape = {
   getSession: (channelId: string) => Effect.Effect<PersistedChannelSession | null>;
   upsertSession: (session: PersistedChannelSession) => Effect.Effect<void>;
   touchSession: (channelId: string, lastActivityAt: number) => Effect.Effect<void>;
@@ -23,27 +23,9 @@ type StateStoreShape = {
   upsertChannelSettings: (settings: PersistedChannelSettings) => Effect.Effect<void>;
 };
 
-export type SessionPersistenceShape = Pick<
-  StateStoreShape,
-  "getSession" | "upsertSession" | "touchSession" | "deleteSession"
->;
-
-export class SessionPersistence extends ServiceMap.Service<
-  SessionPersistence,
-  SessionPersistenceShape
->()("SessionPersistence") {}
-
-export type ChannelSettingsPersistenceShape = Pick<
-  StateStoreShape,
-  "getChannelSettings" | "upsertChannelSettings"
->;
-
-export class ChannelSettingsPersistence extends ServiceMap.Service<
-  ChannelSettingsPersistence,
-  ChannelSettingsPersistenceShape
->()("ChannelSettingsPersistence") {}
-
-class StateStore extends ServiceMap.Service<StateStore, StateStoreShape>()("StateStore") {}
+export class StatePersistence extends ServiceMap.Service<StatePersistence, StatePersistenceShape>()(
+  "StatePersistence",
+) {}
 
 type PersistedChannelSessionRow = {
   channel_id: string;
@@ -103,8 +85,8 @@ const fromChannelSettingsRow = (row: PersistedChannelSettingsRow): PersistedChan
     row.show_compaction_summaries === null ? undefined : row.show_compaction_summaries === 1,
 });
 
-const StateStoreLayer = Layer.effect(
-  StateStore,
+export const StatePersistenceLayer = Layer.effect(
+  StatePersistence,
   Effect.gen(function* () {
     const config = yield* AppConfig;
     const fs = yield* FileSystem.FileSystem;
@@ -225,35 +207,6 @@ const StateStoreLayer = Layer.effect(
               : Number(settings.showCompactionSummaries),
           );
         }),
-    } satisfies StateStoreShape;
+    } satisfies StatePersistenceShape;
   }),
 );
-
-const SessionPersistenceLayer = Layer.effect(
-  SessionPersistence,
-  Effect.gen(function* () {
-    const store = yield* StateStore;
-    return {
-      getSession: store.getSession,
-      upsertSession: store.upsertSession,
-      touchSession: store.touchSession,
-      deleteSession: store.deleteSession,
-    } satisfies SessionPersistenceShape;
-  }),
-);
-
-const ChannelSettingsPersistenceLayer = Layer.effect(
-  ChannelSettingsPersistence,
-  Effect.gen(function* () {
-    const store = yield* StateStore;
-    return {
-      getChannelSettings: store.getChannelSettings,
-      upsertChannelSettings: store.upsertChannelSettings,
-    } satisfies ChannelSettingsPersistenceShape;
-  }),
-);
-
-export const StatePersistenceLayer = Layer.mergeAll(
-  SessionPersistenceLayer,
-  ChannelSettingsPersistenceLayer,
-).pipe(Layer.provide(StateStoreLayer));
