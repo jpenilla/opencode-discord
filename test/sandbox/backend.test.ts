@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { BunServices } from "@effect/platform-bun";
-import { Effect, Exit, Layer, Redacted, Scope } from "effect";
+import { Effect, Layer, Scope } from "effect";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,32 +11,15 @@ import { SandboxBackendLayer } from "@/sandbox/backend.ts";
 import { renderSyntheticGroupFile, renderSyntheticPasswdFile } from "@/sandbox/identity.ts";
 import { consumeServerUrlOutput } from "@/sandbox/launch.ts";
 import { stageSandboxConfigDirectory } from "@/sandbox/staging.ts";
+import { makeTestConfig } from "../support/config.ts";
+import { closeTestScope, runTestEffect } from "../support/runtime.ts";
 
-const runEffect = <A, E = never, R = never>(effect: Effect.Effect<A, E, R>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer)) as Effect.Effect<A, E, never>);
+const runEffect = runTestEffect;
 
-const closeScope = (scope: Scope.Closeable) => runEffect(Scope.close(scope, Exit.void));
+const closeScope = closeTestScope;
 
-const makeConfig = (overrides?: Partial<AppConfigShape>): AppConfigShape => ({
-  discordToken: Redacted.make("discord-token"),
-  triggerPhrase: "hey opencode",
-  ignoreOtherBotTriggers: false,
-  sessionInstructions: "",
-  stateDir: "/tmp/opencode-discord-test",
-  defaultProviderId: undefined,
-  defaultModelId: undefined,
-  showThinkingByDefault: true,
-  showCompactionSummariesByDefault: true,
-  sessionIdleTimeoutMs: 30 * 60 * 1_000,
-  toolBridgeSocketPath: "/tmp/bridge.sock",
-  toolBridgeToken: Redacted.make("bridge-token"),
-  sandboxBackend: "unsafe-dev",
-  opencodeBin: "opencode",
-  bwrapBin: "bwrap",
-  sandboxReadOnlyPaths: [],
-  sandboxEnvPassthrough: [],
-  ...overrides,
-});
+const makeConfig = (overrides?: Partial<AppConfigShape>): AppConfigShape =>
+  makeTestConfig({ stateDir: "/tmp/opencode-discord-test", ...overrides });
 
 describe("consumeServerUrlOutput", () => {
   test("waits for a complete line before parsing the server url", () => {

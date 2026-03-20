@@ -3,7 +3,7 @@ import { Deferred, Effect, Layer, Ref } from "effect";
 import type { Message, SendableChannels } from "discord.js";
 
 import { formatErrorResponse } from "@/discord/formatting.ts";
-import { InfoCards, type InfoCardsShape } from "@/discord/info-cards.ts";
+import { InfoCards, type InfoCardsShape } from "@/discord/info-card.ts";
 import { makeIdleCompactionWorkflow } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import { OpencodeService, type OpencodeServiceShape } from "@/opencode/service.ts";
 import type { ChannelSession } from "@/sessions/session.ts";

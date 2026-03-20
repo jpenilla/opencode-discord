@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { GlobalEvent, PermissionRequest } from "@opencode-ai/sdk/v2";
-import { BunServices } from "@effect/platform-bun";
-import { Deferred, Effect, Fiber, Queue, Redacted } from "effect";
+import { Deferred, Effect, Fiber, Queue } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
 import { OpencodeEventQueue } from "@/opencode/events.ts";
@@ -13,27 +12,11 @@ import {
 } from "@/opencode/service.ts";
 import { SandboxBackend } from "@/sandbox/common.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
+import { makeTestConfig } from "../support/config.ts";
+import { runTestEffect } from "../support/runtime.ts";
 import { unsafeStub } from "../support/stub.ts";
 
-const makeConfig = (): AppConfigShape => ({
-  discordToken: Redacted.make("discord-token"),
-  triggerPhrase: "hey opencode",
-  ignoreOtherBotTriggers: false,
-  sessionInstructions: "",
-  stateDir: "/tmp/opencode-discord-test",
-  defaultProviderId: undefined,
-  defaultModelId: undefined,
-  showThinkingByDefault: true,
-  showCompactionSummariesByDefault: true,
-  sessionIdleTimeoutMs: 30 * 60 * 1_000,
-  toolBridgeSocketPath: "/tmp/bridge.sock",
-  toolBridgeToken: Redacted.make("bridge-token"),
-  sandboxBackend: "unsafe-dev",
-  opencodeBin: "opencode",
-  bwrapBin: "bwrap",
-  sandboxReadOnlyPaths: [],
-  sandboxEnvPassthrough: [],
-});
+const makeConfig = (): AppConfigShape => makeTestConfig({ stateDir: "/tmp/opencode-discord-test" });
 
 const logger: LoggerShape = {
   info: () => Effect.void,
@@ -41,8 +24,7 @@ const logger: LoggerShape = {
   error: () => Effect.void,
 };
 
-const runEffect = <A, E = never, R = never>(effect: Effect.Effect<A, E, R>): Promise<A> =>
-  Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer)) as Effect.Effect<A, E, never>);
+const runEffect = runTestEffect;
 
 const ok = <A>(data: A) => ({ data });
 const emptyEventStream = () => ({

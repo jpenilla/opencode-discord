@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { BunServices } from "@effect/platform-bun";
 import {
   ChannelType,
   type ChatInputCommandInteraction,
@@ -14,7 +13,7 @@ import {
 } from "@/channels/command-policy.ts";
 import { createCommandHandler } from "@/channels/command-handler.ts";
 import { AppConfig, type AppConfigShape } from "@/config.ts";
-import { InfoCards, type InfoCardsShape } from "@/discord/info-cards.ts";
+import { InfoCards, type InfoCardsShape } from "@/discord/info-card.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import {
@@ -24,8 +23,8 @@ import {
 } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import {
   type ChannelActivity,
-  SessionChannelBridge,
-  type SessionChannelBridgeShape,
+  SessionRuntime,
+  type SessionRuntimeShape,
 } from "@/sessions/session-runtime.ts";
 import {
   noQuestionOutcome,
@@ -34,40 +33,25 @@ import {
   type RunRequest,
 } from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
-import {
-  ChannelSettingsPersistence,
-  type ChannelSettingsPersistenceShape,
-} from "@/state/persistence.ts";
+import { StatePersistence, type StatePersistenceShape } from "@/state/persistence.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
 import { getRef } from "../support/fixtures.ts";
+import { makeTestConfig } from "../support/config.ts";
 import { failTest } from "../support/errors.ts";
+import { appendRef, runTestEffect } from "../support/runtime.ts";
 import { unsafeStub } from "../support/stub.ts";
 
-const runEffect = <A, E = never, R = never>(effect: Effect.Effect<A, E, R>): Promise<A> =>
-  Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer)) as Effect.Effect<A, E, never>);
+const runEffect = runTestEffect;
 
 const makeConfig = (defaults: {
   showThinking: boolean;
   showCompactionSummaries: boolean;
-}): AppConfigShape => ({
-  discordToken: { raw: "<redacted>" } as never,
-  triggerPhrase: "hey opencode",
-  ignoreOtherBotTriggers: false,
-  sessionInstructions: "",
-  stateDir: "/tmp/opencode-discord-test-state",
-  defaultProviderId: undefined,
-  defaultModelId: undefined,
-  showThinkingByDefault: defaults.showThinking,
-  showCompactionSummariesByDefault: defaults.showCompactionSummaries,
-  sessionIdleTimeoutMs: 30 * 60 * 1_000,
-  toolBridgeSocketPath: "/tmp/bridge.sock",
-  toolBridgeToken: { raw: "<redacted>" } as never,
-  sandboxBackend: "bwrap",
-  opencodeBin: "opencode",
-  bwrapBin: "bwrap",
-  sandboxReadOnlyPaths: [],
-  sandboxEnvPassthrough: [],
-});
+}): AppConfigShape =>
+  makeTestConfig({
+    showThinkingByDefault: defaults.showThinking,
+    showCompactionSummariesByDefault: defaults.showCompactionSummaries,
+    sandboxBackend: "bwrap",
+  });
 
 type HarnessOptions = {
   sessionHealthy?: boolean;
@@ -85,16 +69,16 @@ type HarnessOptions = {
 };
 
 const makeCommandsLayer = (deps: {
-  sessionBridge: SessionChannelBridgeShape;
-  channelSettingsPersistence: ChannelSettingsPersistenceShape;
+  sessionRuntime: SessionRuntimeShape;
+  statePersistence: StatePersistenceShape;
   infoCards: InfoCardsShape;
   logger: LoggerShape;
   config: AppConfigShape;
 }) =>
   Layer.mergeAll(
     Layer.succeed(AppConfig, deps.config),
-    Layer.succeed(ChannelSettingsPersistence, deps.channelSettingsPersistence),
-    Layer.succeed(SessionChannelBridge, deps.sessionBridge),
+    Layer.succeed(StatePersistence, deps.statePersistence),
+    Layer.succeed(SessionRuntime, deps.sessionRuntime),
     Layer.succeed(InfoCards, deps.infoCards),
     Layer.succeed(Logger, deps.logger),
   );
@@ -233,7 +217,11 @@ const makeHarness = async (options?: HarnessOptions) => {
     error: () => Effect.void,
   };
 
-  const channelSettingsPersistence: ChannelSettingsPersistenceShape = {
+  const statePersistence: StatePersistenceShape = {
+    getSession: () => Effect.succeed(null),
+    upsertSession: () => Effect.void,
+    touchSession: () => Effect.void,
+    deleteSession: () => Effect.void,
     getChannelSettings: (channelId: string) =>
       Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(channelId) ?? null)),
     upsertChannelSettings: (settings: PersistedChannelSettings) =>
@@ -368,11 +356,12 @@ const makeHarness = async (options?: HarnessOptions) => {
     );
   };
 
-  const sessionBridge: SessionChannelBridgeShape = {
+  const sessionRuntime: SessionRuntimeShape = {
     readLoadedChannelActivity: (channelId: string) =>
       readSession(channelId).pipe(Effect.flatMap(readChannelActivity)),
     readRestoredChannelActivity: (channelId: string) =>
       readSession(channelId).pipe(Effect.flatMap(readChannelActivity)),
+    getActiveRunBySessionId: () => Effect.succeed(null),
     queueMessageRunRequest: () => failTest("unused in command tests"),
     routeQuestionInteraction: () => Effect.void,
     invalidate: (channelId: string, reason: string) =>
@@ -468,8 +457,8 @@ const makeHarness = async (options?: HarnessOptions) => {
   };
 
   const commandsLayer = makeCommandsLayer({
-    sessionBridge,
-    channelSettingsPersistence,
+    sessionRuntime,
+    statePersistence,
     infoCards,
     logger,
     config: makeConfig(channelSettingsDefaults),

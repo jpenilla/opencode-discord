@@ -3,13 +3,13 @@ import { type Interaction, type Message } from "discord.js";
 
 import { AppConfig } from "@/config.ts";
 import { createCommandHandler } from "@/channels/command-handler.ts";
-import { InfoCards } from "@/discord/info-cards.ts";
+import { InfoCards } from "@/discord/info-card.ts";
 import { buildOpencodePrompt, promptMessageContext, startTypingLoop } from "@/discord/messages.ts";
 import type { Invocation } from "@/discord/triggers.ts";
 import { collectAttachmentMessages } from "@/sessions/message-context.ts";
-import { SessionChannelBridge } from "@/sessions/session-runtime.ts";
+import { SessionRuntime } from "@/sessions/session-runtime.ts";
 import type { RunRequest } from "@/sessions/session.ts";
-import { ChannelSettingsPersistence } from "@/state/persistence.ts";
+import { StatePersistence } from "@/state/persistence.ts";
 import { Logger } from "@/util/logging.ts";
 
 export type ChannelRuntimeShape = {
@@ -35,15 +35,15 @@ export const ChannelRuntimeLayer = Layer.effect(
     const config = yield* AppConfig;
     const logger = yield* Logger;
     const infoCards = yield* InfoCards;
-    const sessionBridge = yield* SessionChannelBridge;
-    const channelSettingsPersistence = yield* ChannelSettingsPersistence;
+    const sessionRuntime = yield* SessionRuntime;
+    const statePersistence = yield* StatePersistence;
     const shutdownStartedRef = yield* Ref.make(false);
 
     const commandLayer = Layer.mergeAll(
       Layer.succeed(AppConfig, config),
-      Layer.succeed(ChannelSettingsPersistence, channelSettingsPersistence),
+      Layer.succeed(StatePersistence, statePersistence),
       Layer.succeed(InfoCards, infoCards),
-      Layer.succeed(SessionChannelBridge, sessionBridge),
+      Layer.succeed(SessionRuntime, sessionRuntime),
       Layer.succeed(Logger, logger),
     );
     const commandHandler = createCommandHandler({
@@ -76,7 +76,7 @@ export const ChannelRuntimeLayer = Layer.effect(
                         attachmentMessages,
                       } satisfies RunRequest;
 
-                      const queued = yield* sessionBridge.queueMessageRunRequest(
+                      const queued = yield* sessionRuntime.queueMessageRunRequest(
                         message,
                         request,
                         "health probe failed before queueing run",
@@ -109,7 +109,7 @@ export const ChannelRuntimeLayer = Layer.effect(
                 : interaction.isButton() ||
                     interaction.isStringSelectMenu() ||
                     interaction.isModalSubmit()
-                  ? sessionBridge.routeQuestionInteraction(interaction)
+                  ? sessionRuntime.routeQuestionInteraction(interaction)
                   : Effect.void,
           ),
         ),
@@ -117,7 +117,7 @@ export const ChannelRuntimeLayer = Layer.effect(
         Ref.modify(shutdownStartedRef, (started): readonly [boolean, boolean] =>
           started ? [false, true] : [true, true],
         ).pipe(
-          Effect.flatMap((startedNow) => (startedNow ? sessionBridge.shutdown() : Effect.void)),
+          Effect.flatMap((startedNow) => (startedNow ? sessionRuntime.shutdown() : Effect.void)),
         ),
     } satisfies ChannelRuntimeShape;
 

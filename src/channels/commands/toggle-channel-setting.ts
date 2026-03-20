@@ -1,6 +1,7 @@
 import { Effect } from "effect";
 
 import { GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/channels/command-policy.ts";
+import type { GuildCommand } from "@/channels/commands.ts";
 import { AppConfig } from "@/config.ts";
 import { CommandContext } from "@/discord/command-context.ts";
 import type { ChannelSettings } from "@/state/channel-settings.ts";
@@ -9,10 +10,8 @@ import {
   resolveChannelSettings,
   type PersistedChannelSettings,
 } from "@/state/channel-settings.ts";
-import { SessionChannelBridge } from "@/sessions/session-runtime.ts";
-import { ChannelSettingsPersistence } from "@/state/persistence.ts";
-
-import { defineGuildCommand } from "./definition.ts";
+import { SessionRuntime } from "@/sessions/session-runtime.ts";
+import { StatePersistence } from "@/state/persistence.ts";
 
 type ToggleableChannelSetting = keyof Pick<
   ChannelSettings,
@@ -46,36 +45,35 @@ const defineChannelSettingToggleCommand = <
   description: TDescription;
   setting: ToggleableChannelSetting;
   label: string;
-}) =>
-  defineGuildCommand({
-    name: input.name,
-    description: input.description,
-    execute: Effect.gen(function* () {
-      const context = yield* CommandContext;
-      const config = yield* AppConfig;
-      const channelSettingsPersistence = yield* ChannelSettingsPersistence;
-      const sessionBridge = yield* SessionChannelBridge;
+}): GuildCommand => ({
+  name: input.name,
+  description: input.description,
+  execute: Effect.gen(function* () {
+    const context = yield* CommandContext;
+    const config = yield* AppConfig;
+    const statePersistence = yield* StatePersistence;
+    const sessionRuntime = yield* SessionRuntime;
 
-      if (!context.inGuildTextChannel) {
-        yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
-        return;
-      }
+    if (!context.inGuildTextChannel) {
+      yield* context.complete(GUILD_TEXT_COMMAND_ONLY_MESSAGE);
+      return;
+    }
 
-      const persisted = yield* channelSettingsPersistence.getChannelSettings(context.channelId);
-      const { next, resolved } = resolveToggledSettings(
-        defaultChannelSettings(config),
-        persisted,
-        input.setting,
-      );
-      next.channelId = context.channelId;
-      yield* channelSettingsPersistence.upsertChannelSettings(next);
-      yield* sessionBridge.updateLoadedChannelSettings(context.channelId, resolved);
+    const persisted = yield* statePersistence.getChannelSettings(context.channelId);
+    const { next, resolved } = resolveToggledSettings(
+      defaultChannelSettings(config),
+      persisted,
+      input.setting,
+    );
+    next.channelId = context.channelId;
+    yield* statePersistence.upsertChannelSettings(next);
+    yield* sessionRuntime.updateLoadedChannelSettings(context.channelId, resolved);
 
-      yield* context.complete(
-        `${input.label} are now ${resolved[input.setting] ? "enabled" : "disabled"} in this channel.`,
-      );
-    }),
-  });
+    yield* context.complete(
+      `${input.label} are now ${resolved[input.setting] ? "enabled" : "disabled"} in this channel.`,
+    );
+  }),
+});
 
 export const toggleThinkingCommand = defineChannelSettingToggleCommand({
   name: "toggle-thinking",

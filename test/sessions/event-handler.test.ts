@@ -5,12 +5,7 @@ import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
 import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import { createEventHandler } from "@/sessions/event-handler.ts";
 import { beginPendingPrompt, createPromptState } from "@/sessions/run/prompt-state.ts";
-import {
-  noQuestionOutcome,
-  type ActiveRun,
-  type ChannelSession,
-  type RunProgressEvent,
-} from "@/sessions/session.ts";
+import { type ActiveRun, type ChannelSession, type RunProgressEvent } from "@/sessions/session.ts";
 import {
   makeAssistantMessageUpdatedEvent,
   makeQuestionAskedEvent,
@@ -24,56 +19,22 @@ import {
 } from "../support/opencode-events.ts";
 import { getRef, makeMessage, makeSessionHandle, makeSilentLogger } from "../support/fixtures.ts";
 import { failTest } from "../support/errors.ts";
+import { appendRef } from "../support/runtime.ts";
+import { makeTestActiveRun, makeTestSession } from "../support/session.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const makeSession = async (withActiveRun: boolean, showCompactionSummaries = true) => {
-  const progressQueue = await Effect.runPromise(Queue.unbounded<RunProgressEvent>());
-  const promptState = await Effect.runPromise(createPromptState());
-  const activeRun = withActiveRun
-    ? unsafeStub<ActiveRun>({
-        originMessage: makeMessage({
-          id: "discord-message",
-          channelId: "channel-1",
-          channel: { id: "channel-1" },
-        }),
-        workdir: "/home/opencode/workspace",
-        attachmentMessagesById: new Map(),
-        currentPromptContext: null,
-        previousPromptMessageIds: new Set<string>(),
-        currentPromptMessageIds: new Set<string>(),
-        currentPromptUserMessageId: null,
-        assistantMessageParentIds: new Map<string, string>(),
-        observedToolCallIds: new Set<string>(),
-        progressQueue,
-        promptState,
-        followUpQueue: {} as ActiveRun["followUpQueue"],
-        acceptFollowUps: {} as ActiveRun["acceptFollowUps"],
-        typing: {
-          pause: () => Promise.resolve(),
-          resume: () => {},
-          stop: () => Promise.resolve(),
-        },
-        questionOutcome: noQuestionOutcome(),
-        interruptRequested: false,
-        interruptSource: null,
-      })
-    : null;
-
-  const session = unsafeStub<ChannelSession>({
-    channelId: "channel-1",
+  const activeRunState = withActiveRun ? await makeTestActiveRun() : null;
+  const activeRun = activeRunState?.activeRun ?? null;
+  const progressQueue =
+    activeRunState?.progressQueue ?? (await Effect.runPromise(Queue.unbounded<RunProgressEvent>()));
+  const promptState = activeRun?.promptState ?? (await Effect.runPromise(createPromptState()));
+  const session = makeTestSession({
     opencode: makeSessionHandle(),
-    rootDir: "/tmp/session-root",
-    workdir: "/home/opencode/workspace",
-    createdAt: Date.now(),
-    lastActivityAt: Date.now(),
     channelSettings: {
       showThinking: true,
       showCompactionSummaries,
     },
-    progressChannel: null,
-    progressMentionContext: null,
-    emittedCompactionSummaryMessageIds: new Set<string>(),
-    queue: {} as ChannelSession["queue"],
     activeRun,
   });
 
@@ -123,7 +84,7 @@ describe("createEventHandler", () => {
 
     const runtime = makeRuntime({
       session,
-      handleQuestionEvent: (event) => Ref.update(questionEvents, (current) => [...current, event]),
+      handleQuestionEvent: (event) => appendRef(questionEvents, event),
     });
 
     await Effect.runPromise(runtime.handleEvent(makeQuestionAskedEvent()));
@@ -143,7 +104,7 @@ describe("createEventHandler", () => {
 
     const runtime = makeRuntime({
       session,
-      handleQuestionEvent: (event) => Ref.update(questionEvents, (current) => [...current, event]),
+      handleQuestionEvent: (event) => appendRef(questionEvents, event),
     });
 
     await Effect.runPromise(runtime.handleEvent(makeQuestionRepliedEvent()));
@@ -187,8 +148,7 @@ describe("createEventHandler", () => {
       session,
       idleCompactionWorkflow: {
         ...noopIdleCompactionWorkflow,
-        handleCompacted: (sessionId) =>
-          Ref.update(idleUpdates, (current) => [...current, sessionId]),
+        handleCompacted: (sessionId) => appendRef(idleUpdates, sessionId),
       },
     });
 
@@ -223,14 +183,14 @@ describe("createEventHandler", () => {
     const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]));
 
     const readPromptResult = (_session: SessionHandle, messageId: string) =>
-      Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
+      appendRef(readPromptCalls, messageId).pipe(
         Effect.as({
           messageId,
           transcript: "summary text",
         }),
       );
     const sendCompactionSummary = (_session: ChannelSession, text: string) =>
-      Ref.update(sentSummaries, (current) => [...current, text]).pipe(Effect.asVoid);
+      appendRef(sentSummaries, text).pipe(Effect.asVoid);
 
     const runtime = makeRuntime({
       session,
@@ -277,14 +237,14 @@ describe("createEventHandler", () => {
     const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]));
 
     const readPromptResult = (_session: SessionHandle, messageId: string) =>
-      Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
+      appendRef(readPromptCalls, messageId).pipe(
         Effect.as({
           messageId,
           transcript: "summary text",
         }),
       );
     const sendCompactionSummary = (_session: ChannelSession, text: string) =>
-      Ref.update(sentSummaries, (current) => [...current, text]).pipe(Effect.asVoid);
+      appendRef(sentSummaries, text).pipe(Effect.asVoid);
 
     const runtime = makeRuntime({
       session,
@@ -334,7 +294,7 @@ describe("createEventHandler", () => {
     const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]));
 
     const readPromptResult = (_session: SessionHandle, messageId: string) =>
-      Ref.update(readPromptCalls, (current) => [...current, messageId]).pipe(
+      appendRef(readPromptCalls, messageId).pipe(
         Effect.as(
           messageId === "summary-1"
             ? {
@@ -348,7 +308,7 @@ describe("createEventHandler", () => {
         ),
       );
     const sendCompactionSummary = (_session: ChannelSession, text: string) =>
-      Ref.update(sentSummaries, (current) => [...current, text]).pipe(Effect.asVoid);
+      appendRef(sentSummaries, text).pipe(Effect.asVoid);
 
     const runtime = makeRuntime({
       session,

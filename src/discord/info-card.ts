@@ -1,5 +1,19 @@
 import { ContainerBuilder, TextDisplayBuilder } from "@discordjs/builders";
 import { MessageFlags, type Message, type SendableChannels } from "discord.js";
+import { Effect, Layer, ServiceMap } from "effect";
+
+export type InfoCardsShape = {
+  send: (channel: SendableChannels, title: string, body: string) => Effect.Effect<Message, unknown>;
+  edit: (card: Message, title: string, body: string) => Effect.Effect<void, unknown>;
+  upsert: (input: {
+    channel: SendableChannels;
+    existingCard: Message | null;
+    title: string;
+    body: string;
+  }) => Effect.Effect<Message, unknown>;
+};
+
+export class InfoCards extends ServiceMap.Service<InfoCards, InfoCardsShape>()("InfoCards") {}
 
 const createInfoCardPayload = (title: string, body: string, suppressNotifications: boolean) => ({
   flags: suppressNotifications
@@ -36,3 +50,13 @@ export const upsertInfoCard = async (input: {
 
   return sendInfoCard(input.channel, input.title, input.body);
 };
+
+export const makeInfoCards = (): InfoCardsShape => ({
+  send: (channel, title, body) =>
+    Effect.promise(() => sendInfoCard(channel, title, body) as Promise<Message>),
+  edit: (card, title, body) =>
+    Effect.promise(() => editInfoCard(card, title, body)).pipe(Effect.asVoid),
+  upsert: (input) => Effect.promise(() => upsertInfoCard(input) as Promise<Message>),
+});
+
+export const InfoCardsLayer = Layer.succeed(InfoCards, makeInfoCards());
