@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { Message } from "discord.js";
+import { BunServices } from "@effect/platform-bun";
+import type { Message, SendableChannels } from "discord.js";
 import { Deferred, Effect, Queue, Ref } from "effect";
 
 import type { PromptResult } from "@/opencode/service.ts";
@@ -14,7 +15,7 @@ const makeRunMessage = (id: string) =>
   makeMessage({
     id,
     channelId: "channel-1",
-    channel: { id: "channel-1" },
+    channel: { id: "channel-1", isSendable: () => true },
   });
 
 const makeSession = (): ChannelSession =>
@@ -40,6 +41,9 @@ const makeInitialRequests = (message: Message): NonEmptyRunRequestBatch => [
     attachmentMessages: [message],
   },
 ];
+
+const runExecutorEffect = <A, E = unknown, R = never>(effect: Effect.Effect<A, E, R>): Promise<A> =>
+  Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer)) as Effect.Effect<A, E, never>);
 
 const makeRuntime = async (options?: {
   promptResult?: PromptResult;
@@ -93,9 +97,9 @@ const makeRuntime = async (options?: {
           return result;
         }),
       runProgressWorker: (
-        _session: ChannelSession,
+        _channel: SendableChannels,
+        _session: Pick<ChannelSession, "channelSettings" | "opencode" | "workdir">,
         _message: Message,
-        _workdir: string,
         queue: Queue.Queue<RunProgressEvent>,
       ) => {
         if (options?.progressBehavior === "exit") {
@@ -166,7 +170,7 @@ describe("executeRunBatch", () => {
     const initialRequests = makeInitialRequests(responseMessage);
     const { runtime, calls } = await makeRuntime();
 
-    await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
+    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
       "typing:start",
@@ -203,7 +207,7 @@ describe("executeRunBatch", () => {
       },
     });
 
-    await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
+    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
     expect(await Effect.runPromise(Ref.get(finalResponseMessageIds))).toEqual([
       "follow-up-message",
@@ -232,7 +236,7 @@ describe("executeRunBatch", () => {
       },
     });
 
-    await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
+    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
     const seen = await Effect.runPromise(Ref.get(calls));
     expect(seen).toContain("sendQuestionUiFailure:question failed");
@@ -259,7 +263,7 @@ describe("executeRunBatch", () => {
       },
     });
 
-    await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
+    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
       "typing:start",
@@ -287,7 +291,7 @@ describe("executeRunBatch", () => {
       },
     });
 
-    await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
+    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
       "typing:start",
@@ -313,7 +317,7 @@ describe("executeRunBatch", () => {
       },
     });
 
-    await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
+    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
       "typing:start",
@@ -338,7 +342,7 @@ describe("executeRunBatch", () => {
       progressBehavior: "exit",
     });
 
-    await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
+    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
     expect(await Effect.runPromise(Ref.get(calls))).toEqual([
       "progress:exit",
@@ -402,7 +406,7 @@ describe("executeRunBatch", () => {
         ),
     } as const;
 
-    await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
+    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
     expect(await Effect.runPromise(Ref.get(finalResponseMessageIds))).toEqual([
       "trigger-message",
@@ -462,7 +466,7 @@ describe("executeRunBatch", () => {
         Ref.update(finalResponseMessageIds, (current) => [...current, `${message.id}:${text}`]),
     } as const;
 
-    await Effect.runPromise(executeRunBatch(runtime)(session, initialRequests));
+    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
     expect(await Effect.runPromise(Ref.get(finalResponseMessageIds))).toEqual([
       "trigger-message:first reply",

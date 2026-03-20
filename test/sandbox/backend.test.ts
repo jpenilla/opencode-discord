@@ -1,14 +1,69 @@
 import { describe, expect, test } from "bun:test";
+import { BunServices } from "@effect/platform-bun";
+import { Effect, Exit, Layer, Redacted, Scope } from "effect";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import {
-  renderSyntheticGroupFile,
-  renderSyntheticPasswdFile,
-  stageSandboxConfigDirectory,
-} from "@/sandbox/backend.ts";
+import type { AppConfigShape } from "@/config.ts";
+import { AppConfig } from "@/config.ts";
+import { SandboxBackendLayer } from "@/sandbox/backend.ts";
+import { renderSyntheticGroupFile, renderSyntheticPasswdFile } from "@/sandbox/identity.ts";
+import { consumeServerUrlOutput } from "@/sandbox/launch.ts";
+import { stageSandboxConfigDirectory } from "@/sandbox/staging.ts";
+
+const runEffect = <A, E = never, R = never>(effect: Effect.Effect<A, E, R>) =>
+  Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer)) as Effect.Effect<A, E, never>);
+
+const closeScope = (scope: Scope.Closeable) => runEffect(Scope.close(scope, Exit.void));
+
+const makeConfig = (overrides?: Partial<AppConfigShape>): AppConfigShape => ({
+  discordToken: Redacted.make("discord-token"),
+  triggerPhrase: "hey opencode",
+  ignoreOtherBotTriggers: false,
+  sessionInstructions: "",
+  stateDir: "/tmp/opencode-discord-test",
+  defaultProviderId: undefined,
+  defaultModelId: undefined,
+  showThinkingByDefault: true,
+  showCompactionSummariesByDefault: true,
+  sessionIdleTimeoutMs: 30 * 60 * 1_000,
+  toolBridgeSocketPath: "/tmp/bridge.sock",
+  toolBridgeToken: Redacted.make("bridge-token"),
+  sandboxBackend: "unsafe-dev",
+  opencodeBin: "opencode",
+  bwrapBin: "bwrap",
+  sandboxReadOnlyPaths: [],
+  sandboxEnvPassthrough: [],
+  ...overrides,
+});
+
+describe("consumeServerUrlOutput", () => {
+  test("waits for a complete line before parsing the server url", () => {
+    const first = consumeServerUrlOutput("", "opencode server listening on http://127.0.0");
+    expect(first.url).toBeNull();
+
+    const second = consumeServerUrlOutput(first.pendingLine, ".1:4321\nready\n");
+    expect(second.url).toBe("http://127.0.0.1:4321");
+  });
+});
+
+describe("SandboxBackendLayer", () => {
+  test("fails fast when the opencode binary is missing", async () => {
+    await expect(
+      runEffect(
+        Layer.build(
+          SandboxBackendLayer.pipe(
+            Layer.provide(
+              Layer.succeed(AppConfig, makeConfig({ opencodeBin: "/definitely/missing/opencode" })),
+            ),
+          ),
+        ).pipe(Effect.scoped),
+      ),
+    ).rejects.toThrow("opencode binary not found");
+  });
+});
 
 describe("renderSyntheticPasswdFile", () => {
   test("renders a passwd entry with the sandbox home", () => {
@@ -65,18 +120,28 @@ describe("stageSandboxConfigDirectory", () => {
   test("keeps the staged temp root until cleanup is called", async () => {
     const sourceDir = await mkdtemp(join(tmpdir(), "opencode-discord-source-"));
     await writeFile(join(sourceDir, "config.json"), '{"ok":true}\n');
+    let scope: Scope.Closeable | null = null;
 
     try {
-      const staged = await stageSandboxConfigDirectory(sourceDir);
-      const tempRoot = dirname(staged.configDir);
+      scope = await runEffect(Scope.make());
+      const configDir = await runEffect(
+        stageSandboxConfigDirectory(sourceDir, "unsafe-dev", sourceDir).pipe(
+          Effect.provideService(Scope.Scope, scope),
+        ),
+      );
+      const tempRoot = dirname(configDir);
 
       expect(existsSync(tempRoot)).toBe(true);
-      expect(await Bun.file(join(staged.configDir, "config.json")).text()).toBe('{"ok":true}\n');
+      expect(await Bun.file(join(configDir, "config.json")).text()).toBe('{"ok":true}\n');
 
-      await staged.cleanup();
+      await closeScope(scope);
+      scope = null;
 
       expect(existsSync(tempRoot)).toBe(false);
     } finally {
+      if (scope) {
+        await closeScope(scope);
+      }
       await rm(sourceDir, { recursive: true, force: true });
     }
   });
@@ -93,12 +158,73 @@ describe("stageSandboxConfigDirectory", () => {
     await symlink(join(sourceDir, "missing-target"), join(nodeModulesDir, "broken-link"));
 
     try {
-      await expect(stageSandboxConfigDirectory(sourceDir)).rejects.toThrow();
+      await expect(
+        stageSandboxConfigDirectory(sourceDir, "unsafe-dev", sourceDir).pipe(
+          Effect.scoped,
+          runEffect,
+        ),
+      ).rejects.toThrow();
       const remainingRoots = new Set(
         (await readdir(tmpdir())).filter((entry) => entry.startsWith("opencode-discord-config-")),
       );
       expect(remainingRoots).toEqual(existingRoots);
     } finally {
+      await rm(sourceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("dereferences staged config symlinks", async () => {
+    const sourceDir = await mkdtemp(join(tmpdir(), "opencode-discord-source-"));
+    const targetPath = join(sourceDir, "target.txt");
+    const linkedPath = join(sourceDir, "linked.txt");
+    let scope: Scope.Closeable | null = null;
+
+    await writeFile(targetPath, "hello\n");
+    await symlink(targetPath, linkedPath);
+
+    try {
+      scope = await runEffect(Scope.make());
+      const configDir = await runEffect(
+        stageSandboxConfigDirectory(sourceDir, "unsafe-dev", sourceDir).pipe(
+          Effect.provideService(Scope.Scope, scope),
+        ),
+      );
+
+      expect(await Bun.file(join(configDir, "linked.txt")).text()).toBe("hello\n");
+      expect((await lstat(join(configDir, "linked.txt"))).isSymbolicLink()).toBe(false);
+    } finally {
+      if (scope) {
+        await closeScope(scope);
+      }
+      await rm(sourceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("dereferences staged config symlinks inside copied directories", async () => {
+    const sourceDir = await mkdtemp(join(tmpdir(), "opencode-discord-source-"));
+    const nestedDir = join(sourceDir, "nested");
+    const targetPath = join(sourceDir, "target.txt");
+    const linkedPath = join(nestedDir, "linked.txt");
+    let scope: Scope.Closeable | null = null;
+
+    await mkdir(nestedDir, { recursive: true });
+    await writeFile(targetPath, "hello\n");
+    await symlink(targetPath, linkedPath);
+
+    try {
+      scope = await runEffect(Scope.make());
+      const configDir = await runEffect(
+        stageSandboxConfigDirectory(sourceDir, "unsafe-dev", sourceDir).pipe(
+          Effect.provideService(Scope.Scope, scope),
+        ),
+      );
+
+      expect(await Bun.file(join(configDir, "nested", "linked.txt")).text()).toBe("hello\n");
+      expect((await lstat(join(configDir, "nested", "linked.txt"))).isSymbolicLink()).toBe(false);
+    } finally {
+      if (scope) {
+        await closeScope(scope);
+      }
       await rm(sourceDir, { recursive: true, force: true });
     }
   });

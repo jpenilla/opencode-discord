@@ -1,15 +1,14 @@
-import { resolve } from "node:path";
-
+import type { ResolvedSandboxBackend } from "@/sandbox/common.ts";
 import {
-  SANDBOX_HOME_DIR,
   displayHostPath,
   displaySessionPath,
   pathAliases,
   resolveHostPath,
   resolveSessionPath,
+  SANDBOX_HOME_DIR,
 } from "@/sandbox/session-paths.ts";
 
-import type { ToolCardPathContext } from "./types.ts";
+import type { ToolCardPathDisplay } from "./types.ts";
 
 type NormalizedToolPath = { kind: "resolved"; path: string } | { kind: "raw"; value: string };
 type PatchAction = "add" | "modify" | "remove";
@@ -27,190 +26,181 @@ const isSandboxAliasPath = (path: string) =>
   path.startsWith(`${SANDBOX_HOME_DIR}/`) ||
   path.startsWith(SANDBOX_HOME_DIR.slice(1));
 
-const normalizeToolPath = (path: string, context: ToolCardPathContext): NormalizedToolPath => {
-  const trimmed = path.trim();
-  if (trimmed.length === 0) {
-    return { kind: "raw", value: trimmed };
-  }
-
-  if (context.backend === "bwrap") {
-    const slashPrefixed = trimmed.startsWith(SANDBOX_HOME_DIR.slice(1)) ? `/${trimmed}` : trimmed;
-    return {
-      kind: "resolved",
-      path: resolveSessionPath(context.workdir, slashPrefixed),
-    };
-  }
-
-  if (isSandboxAliasPath(trimmed)) {
-    return { kind: "raw", value: trimmed };
-  }
-
-  return {
-    kind: "resolved",
-    path: resolveHostPath(context.workdir, trimmed),
-  };
-};
-
-const displayResolvedPath = (path: string, context: ToolCardPathContext) =>
-  context.backend === "bwrap"
-    ? displaySessionPath(context.workdir, path)
-    : displayHostPath(context.workdir, path);
-
-const displayNormalizedPath = (path: NormalizedToolPath, context: ToolCardPathContext) =>
-  path.kind === "resolved" ? displayResolvedPath(path.path, context) : path.value;
-
-export const displayPath = (path: string, context: ToolCardPathContext) =>
-  displayNormalizedPath(normalizeToolPath(path, context), context);
-
-export const formatPathSummaryLine = (path: string, context: ToolCardPathContext) => {
-  const normalized = displayPath(path, context);
-  return normalized === "." ? "`.` (cwd)" : `\`${normalized}\``;
-};
-
-const patchPathIdentityKey = (path: NormalizedToolPath) =>
-  path.kind === "resolved"
-    ? (pathAliases(resolve(path.path)).sort()[0] ?? path.path)
-    : `raw:${path.value}`;
-
-const displayPatchFilePath = (path: NormalizedToolPath, context: ToolCardPathContext) => {
-  const displayed = displayNormalizedPath(path, context);
-
-  if (path.kind !== "resolved") {
-    return displayed;
-  }
-
-  if (
-    displayed !== "." &&
-    !displayed.startsWith("./") &&
-    !displayed.startsWith("../") &&
-    !displayed.startsWith("~/") &&
-    !displayed.startsWith("/")
-  ) {
-    return `./${displayed}`;
-  }
-
-  return displayed;
-};
-
 const createPatchActionMap = () => ({
   add: new Map<string, string>(),
   modify: new Map<string, string>(),
   remove: new Map<string, string>(),
 });
 
-const recordPatchFile = (
-  groups: ReturnType<typeof createPatchActionMap>,
-  action: PatchAction,
-  path: string,
-  context: ToolCardPathContext,
-) => {
-  const normalized = normalizeToolPath(path, context);
-  const key = patchPathIdentityKey(normalized);
-  const displayed = displayPatchFilePath(normalized, context);
-  for (const candidate of PATCH_ACTION_ORDER) {
-    groups[candidate].delete(key);
-  }
-  groups[action].set(key, displayed);
-};
-
-const collectPatchHunkFiles = (
-  value: string,
-  groups: ReturnType<typeof createPatchActionMap>,
-  context: ToolCardPathContext,
-) => {
-  let pendingUpdate: string | null = null;
-  const flushPendingUpdate = () => {
-    if (!pendingUpdate) {
-      return;
+export const makeToolCardPathDisplay = (context: {
+  workdir: string;
+  backend: ResolvedSandboxBackend;
+}): ToolCardPathDisplay => {
+  const normalizeToolPath = (value: string): NormalizedToolPath => {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      return { kind: "raw", value: trimmed };
     }
-    recordPatchFile(groups, "modify", pendingUpdate, context);
-    pendingUpdate = null;
+
+    if (context.backend === "bwrap") {
+      const slashPrefixed = trimmed.startsWith(SANDBOX_HOME_DIR.slice(1)) ? `/${trimmed}` : trimmed;
+      return {
+        kind: "resolved",
+        path: resolveSessionPath(context.workdir, slashPrefixed),
+      };
+    }
+
+    if (isSandboxAliasPath(trimmed)) {
+      return { kind: "raw", value: trimmed };
+    }
+
+    return {
+      kind: "resolved",
+      path: resolveHostPath(context.workdir, trimmed),
+    };
   };
 
-  for (const line of value.split(/\r?\n/)) {
-    const add = line.match(/^\*\*\* Add File: (.+)$/);
-    if (add) {
-      flushPendingUpdate();
-      recordPatchFile(groups, "add", add[1], context);
-      continue;
+  const displayNormalizedPath = (value: NormalizedToolPath) =>
+    value.kind === "resolved"
+      ? context.backend === "bwrap"
+        ? displaySessionPath(context.workdir, value.path)
+        : displayHostPath(context.workdir, value.path)
+      : value.value;
+
+  const displayPath = (value: string) => displayNormalizedPath(normalizeToolPath(value));
+
+  const formatPathSummaryLine = (value: string) => {
+    const normalized = displayPath(value);
+    return normalized === "." ? "`.` (cwd)" : `\`${normalized}\``;
+  };
+
+  const patchPathIdentityKey = (value: NormalizedToolPath) =>
+    value.kind === "resolved"
+      ? (pathAliases(value.path).sort()[0] ?? value.path)
+      : `raw:${value.value}`;
+
+  const displayPatchFilePath = (value: NormalizedToolPath) => {
+    const displayed = displayNormalizedPath(value);
+    if (
+      value.kind === "resolved" &&
+      displayed !== "." &&
+      !displayed.startsWith("./") &&
+      !displayed.startsWith("../") &&
+      !displayed.startsWith("~/") &&
+      !displayed.startsWith("/")
+    ) {
+      return `./${displayed}`;
     }
 
-    const remove = line.match(/^\*\*\* Delete File: (.+)$/);
-    if (remove) {
-      flushPendingUpdate();
-      recordPatchFile(groups, "remove", remove[1], context);
-      continue;
-    }
+    return displayed;
+  };
 
-    const update = line.match(/^\*\*\* Update File: (.+)$/);
-    if (update) {
-      flushPendingUpdate();
-      pendingUpdate = update[1];
-      continue;
+  const recordPatchFile = (
+    groups: ReturnType<typeof createPatchActionMap>,
+    action: PatchAction,
+    value: string,
+  ) => {
+    const normalized = normalizeToolPath(value);
+    const key = patchPathIdentityKey(normalized);
+    const displayed = displayPatchFilePath(normalized);
+    for (const candidate of PATCH_ACTION_ORDER) {
+      groups[candidate].delete(key);
     }
+    groups[action].set(key, displayed);
+  };
 
-    const move = line.match(/^\*\*\* Move to: (.+)$/);
-    if (move) {
-      if (pendingUpdate) {
-        recordPatchFile(groups, "remove", pendingUpdate, context);
-        recordPatchFile(groups, "add", move[1], context);
-        pendingUpdate = null;
-      } else {
-        recordPatchFile(groups, "modify", move[1], context);
+  const extractPatchFiles = (value: string) => {
+    const groups = createPatchActionMap();
+    let pendingUpdate: string | null = null;
+    const flushPendingUpdate = () => {
+      if (!pendingUpdate) {
+        return;
       }
-      continue;
-    }
+      recordPatchFile(groups, "modify", pendingUpdate);
+      pendingUpdate = null;
+    };
 
-    if (line.startsWith("*** ")) {
+    for (const line of value.split(/\r?\n/)) {
+      const add = line.match(/^\*\*\* Add File: (.+)$/);
+      if (add) {
+        flushPendingUpdate();
+        recordPatchFile(groups, "add", add[1]);
+        continue;
+      }
+
+      const remove = line.match(/^\*\*\* Delete File: (.+)$/);
+      if (remove) {
+        flushPendingUpdate();
+        recordPatchFile(groups, "remove", remove[1]);
+        continue;
+      }
+
+      const update = line.match(/^\*\*\* Update File: (.+)$/);
+      if (update) {
+        flushPendingUpdate();
+        pendingUpdate = update[1];
+        continue;
+      }
+
+      const move = line.match(/^\*\*\* Move to: (.+)$/);
+      if (move) {
+        if (pendingUpdate) {
+          recordPatchFile(groups, "remove", pendingUpdate);
+          recordPatchFile(groups, "add", move[1]);
+          pendingUpdate = null;
+        } else {
+          recordPatchFile(groups, "modify", move[1]);
+        }
+        continue;
+      }
+
+      if (line.startsWith("*** ")) {
+        flushPendingUpdate();
+        continue;
+      }
+
+      const rawLine = line.trim();
+      if (rawLine.length === 0) {
+        continue;
+      }
+
+      const rename = rawLine.match(/^R\d+\s+(.+?)\s+->\s+(.+)$/);
+      if (rename) {
+        flushPendingUpdate();
+        recordPatchFile(groups, "remove", rename[1]);
+        recordPatchFile(groups, "add", rename[2]);
+        continue;
+      }
+
+      const copy = rawLine.match(/^C\d+\s+(.+?)\s+->\s+(.+)$/);
+      if (copy) {
+        flushPendingUpdate();
+        recordPatchFile(groups, "add", copy[2]);
+        continue;
+      }
+
+      const status = rawLine.match(/^([AMD])\s+(.+)$/);
+      if (!status) {
+        continue;
+      }
+
       flushPendingUpdate();
-    }
-  }
-
-  flushPendingUpdate();
-};
-
-const collectPatchOutputFiles = (
-  value: string,
-  groups: ReturnType<typeof createPatchActionMap>,
-  context: ToolCardPathContext,
-) => {
-  for (const rawLine of value.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (line.length === 0) {
-      continue;
+      const action = status[1] === "A" ? "add" : status[1] === "D" ? "remove" : "modify";
+      recordPatchFile(groups, action, status[2]);
     }
 
-    const rename = line.match(/^R\d+\s+(.+?)\s+->\s+(.+)$/);
-    if (rename) {
-      recordPatchFile(groups, "remove", rename[1], context);
-      recordPatchFile(groups, "add", rename[2], context);
-      continue;
-    }
+    flushPendingUpdate();
 
-    const copy = line.match(/^C\d+\s+(.+?)\s+->\s+(.+)$/);
-    if (copy) {
-      recordPatchFile(groups, "add", copy[2], context);
-      continue;
-    }
-
-    const status = line.match(/^([AMD])\s+(.+)$/);
-    if (!status) {
-      continue;
-    }
-
-    const action = status[1] === "A" ? "add" : status[1] === "D" ? "remove" : "modify";
-    recordPatchFile(groups, action, status[2], context);
-  }
-};
-
-export const extractPatchFiles = (value: string, context: ToolCardPathContext) => {
-  const groups = createPatchActionMap();
-  collectPatchHunkFiles(value, groups, context);
-  collectPatchOutputFiles(value, groups, context);
+    return {
+      add: [...groups.add.values()].sort(),
+      modify: [...groups.modify.values()].sort(),
+      remove: [...groups.remove.values()].sort(),
+    };
+  };
 
   return {
-    add: [...groups.add.values()].sort(),
-    modify: [...groups.modify.values()].sort(),
-    remove: [...groups.remove.values()].sort(),
-  } as const;
+    displayPath,
+    formatPathSummaryLine,
+    extractPatchFiles,
+  };
 };

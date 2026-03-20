@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { BunServices } from "@effect/platform-bun";
 import { ChannelType } from "discord.js";
 import { Deferred, Effect, Fiber, Ref } from "effect";
 
@@ -7,6 +8,7 @@ import { createSessionRegistry, type SessionRegistryState } from "@/sessions/ses
 import type { ActiveRun } from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import type { PersistedChannelSession } from "@/state/persistence.ts";
+import { sessionPathsFromRoot } from "@/state/paths.ts";
 import { makeMessage, makeSilentLogger } from "../support/fixtures.ts";
 import { failTest } from "../support/errors.ts";
 import { unsafeStub } from "../support/stub.ts";
@@ -48,6 +50,9 @@ const makeState = (): SessionRegistryState => ({
 
 const logger = makeSilentLogger();
 
+const runEffect = <A, E = never, R = never>(effect: Effect.Effect<A, E, R>): Promise<A> =>
+  Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer)) as Effect.Effect<A, E, never>);
+
 const makeHarness = async (options?: {
   createOpencodeSession?: (input: {
     workdir: string;
@@ -56,45 +61,30 @@ const makeHarness = async (options?: {
   }) => Effect.Effect<SessionHandle, unknown>;
   isSessionHealthy?: (session: SessionHandle) => Effect.Effect<boolean>;
   isSessionBusy?: (sessionId: string) => Effect.Effect<boolean>;
+  getPersistedChannelSettings?: (
+    channelId: string,
+  ) => Effect.Effect<PersistedChannelSettings | null, unknown>;
 }) => {
-  const stateRef = await Effect.runPromise(Ref.make(makeState()));
-  const created = await Effect.runPromise(
+  const stateRef = await runEffect(Ref.make(makeState()));
+  const created = await runEffect(
     Ref.make<Array<{ workdir: string; title: string; systemPromptAppend?: string }>>([]),
   );
-  const started = await Effect.runPromise(Ref.make<string[]>([]));
-  const removedRoots = await Effect.runPromise(Ref.make<string[]>([]));
-  const closed = await Effect.runPromise(Ref.make<string[]>([]));
-  const nextRoot = await Effect.runPromise(Ref.make(0));
-  const nextSession = await Effect.runPromise(Ref.make(0));
-  const persisted = await Effect.runPromise(
-    Ref.make<Map<string, PersistedChannelSession>>(new Map()),
-  );
-  const persistedSettings = await Effect.runPromise(
+  const started = await runEffect(Ref.make<string[]>([]));
+  const removedRoots = await runEffect(Ref.make<string[]>([]));
+  const closed = await runEffect(Ref.make<string[]>([]));
+  const nextRoot = await runEffect(Ref.make(0));
+  const nextSession = await runEffect(Ref.make(0));
+  const persisted = await runEffect(Ref.make<Map<string, PersistedChannelSession>>(new Map()));
+  const persistedSettings = await runEffect(
     Ref.make<Map<string, PersistedChannelSettings>>(new Map()),
   );
 
   const createSessionPaths = (_channelId: string) =>
-    Ref.modify(
-      nextRoot,
-      (
-        current,
-      ): readonly [
-        ReturnType<typeof Effect.succeed> extends never
-          ? never
-          : { rootDir: string; workdir: string },
-        number,
-      ] => {
-        const index = current + 1;
-        const rootDir = `/tmp/session-root-${index}`;
-        return [
-          {
-            rootDir,
-            workdir: `${rootDir}/home/workspace`,
-          },
-          index,
-        ];
-      },
-    ).pipe(Effect.flatMap((paths) => Effect.succeed(paths)));
+    Ref.modify(nextRoot, (current): readonly [PersistedChannelSession["rootDir"], number] => {
+      const index = current + 1;
+      const rootDir = `/tmp/session-root-${index}`;
+      return [rootDir, index];
+    }).pipe(Effect.map((rootDir) => sessionPathsFromRoot(rootDir)));
 
   const defaultCreateOpencodeSession = ({
     workdir,
@@ -138,8 +128,10 @@ const makeHarness = async (options?: {
         next.set(session.channelId, session);
         return next;
       }),
-    getPersistedChannelSettings: (channelId) =>
-      Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(channelId) ?? null)),
+    getPersistedChannelSettings:
+      options?.getPersistedChannelSettings ??
+      ((channelId) =>
+        Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(channelId) ?? null))),
     touchPersistedSession: (channelId, lastActivityAt) =>
       Ref.update(persisted, (current) => {
         const next = new Map(current);
@@ -170,7 +162,6 @@ const makeHarness = async (options?: {
         ? options.isSessionBusy(session.opencode.sessionId)
         : Effect.succeed(false),
     idleTimeoutMs: 30 * 60 * 1_000,
-    sessionsRootDir: "/tmp/sessions",
     createSessionPaths,
     deleteSessionRoot: (rootDir) => Ref.update(removedRoots, (current) => [...current, rootDir]),
   });
@@ -188,10 +179,10 @@ const makeHarness = async (options?: {
 
 describe("createSessionRegistry", () => {
   test("single-flights concurrent cold starts for the same channel", async () => {
-    const createStarted = await Effect.runPromise(Deferred.make<void>());
-    const releaseCreate = await Effect.runPromise(Deferred.make<void>());
-    const created = await Effect.runPromise(Ref.make(0));
-    const closed = await Effect.runPromise(Ref.make<string[]>([]));
+    const createStarted = await runEffect(Deferred.make<void>());
+    const releaseCreate = await runEffect(Deferred.make<void>());
+    const created = await runEffect(Ref.make(0));
+    const closed = await runEffect(Ref.make<string[]>([]));
 
     const { lifecycle } = await makeHarness({
       createOpencodeSession: ({ workdir }) =>
@@ -209,7 +200,7 @@ describe("createSessionRegistry", () => {
     });
     const message = makeRegistryMessage("channel-1");
 
-    const [first, second] = await Effect.runPromise(
+    const [first, second] = await runEffect(
       Effect.gen(function* () {
         const fiber1 = yield* Effect.forkChild(lifecycle.createOrGetSession(message));
         yield* Deferred.await(createStarted);
@@ -221,13 +212,13 @@ describe("createSessionRegistry", () => {
 
     expect(first).toBe(second);
     expect(first.opencode.sessionId).toBe("session-1");
-    expect(await Effect.runPromise(Ref.get(created))).toBe(1);
+    expect(await runEffect(Ref.get(created))).toBe(1);
   });
 
   test("clears the gate after a failed cold start so a waiting retry can succeed", async () => {
-    const createStarted = await Effect.runPromise(Deferred.make<void>());
-    const releaseCreate = await Effect.runPromise(Deferred.make<void>());
-    const createCount = await Effect.runPromise(Ref.make(0));
+    const createStarted = await runEffect(Deferred.make<void>());
+    const releaseCreate = await runEffect(Deferred.make<void>());
+    const createCount = await runEffect(Ref.make(0));
     const { lifecycle, started, removedRoots } = await makeHarness({
       createOpencodeSession: ({ workdir }) =>
         Effect.gen(function* () {
@@ -245,7 +236,7 @@ describe("createSessionRegistry", () => {
     });
     const message = makeRegistryMessage("channel-retry");
 
-    const exits = await Effect.runPromise(
+    const exits = await runEffect(
       Effect.gen(function* () {
         const fiber1 = yield* Effect.forkChild(Effect.exit(lifecycle.createOrGetSession(message)), {
           startImmediately: true,
@@ -260,17 +251,30 @@ describe("createSessionRegistry", () => {
     );
 
     expect(exits.map((exit) => exit._tag)).toEqual(["Failure", "Success"]);
-    expect(await Effect.runPromise(Ref.get(removedRoots))).toEqual(["/tmp/session-root-1"]);
+    expect(await runEffect(Ref.get(removedRoots))).toEqual(["/tmp/session-root-1"]);
     const succeeded = exits.find((exit) => exit._tag === "Success");
     expect(succeeded?._tag).toBe("Success");
     expect(
       succeeded && succeeded._tag === "Success" ? succeeded.value.opencode.sessionId : null,
     ).toBe("session-2");
-    expect(await Effect.runPromise(Ref.get(started))).toEqual(["session-2"]);
+    expect(await runEffect(Ref.get(started))).toEqual(["session-2"]);
+  });
+
+  test("cleans the new session root when setup fails before activation", async () => {
+    const { lifecycle, removedRoots, started } = await makeHarness({
+      getPersistedChannelSettings: () => Effect.fail(new Error("settings unavailable")),
+    });
+
+    await expect(
+      runEffect(lifecycle.createOrGetSession(makeRegistryMessage("channel-fail"))),
+    ).rejects.toThrow("settings unavailable");
+
+    expect(await runEffect(Ref.get(removedRoots))).toEqual(["/tmp/session-root-1"]);
+    expect(await runEffect(Ref.get(started))).toEqual([]);
   });
 
   test("bypasses health checks for busy sessions by default", async () => {
-    const healthChecks = await Effect.runPromise(Ref.make<string[]>([]));
+    const healthChecks = await runEffect(Ref.make<string[]>([]));
     const { lifecycle } = await makeHarness({
       isSessionHealthy: (session) =>
         Ref.update(healthChecks, (current) => [...current, session.sessionId]).pipe(
@@ -278,20 +282,20 @@ describe("createSessionRegistry", () => {
         ),
     });
     const message = makeRegistryMessage("channel-busy");
-    const session = await Effect.runPromise(lifecycle.createOrGetSession(message));
+    const session = await runEffect(lifecycle.createOrGetSession(message));
     session.activeRun = makeActiveRun();
 
-    const result = await Effect.runPromise(lifecycle.ensureSessionHealth(session, message, "busy"));
+    const result = await runEffect(lifecycle.ensureSessionHealth(session, message, "busy"));
 
     expect(result).toBe(session);
-    expect(await Effect.runPromise(Ref.get(healthChecks))).toEqual([]);
+    expect(await runEffect(Ref.get(healthChecks))).toEqual([]);
   });
 
   test("single-flights recovery and rekeys session indexes", async () => {
-    const recreateStarted = await Effect.runPromise(Deferred.make<void>());
-    const releaseRecreate = await Effect.runPromise(Deferred.make<void>());
-    const createCount = await Effect.runPromise(Ref.make(0));
-    const closed = await Effect.runPromise(Ref.make<string[]>([]));
+    const recreateStarted = await runEffect(Deferred.make<void>());
+    const releaseRecreate = await runEffect(Deferred.make<void>());
+    const createCount = await runEffect(Ref.make(0));
+    const closed = await runEffect(Ref.make<string[]>([]));
 
     const { lifecycle } = await makeHarness({
       createOpencodeSession: ({ workdir }) =>
@@ -312,11 +316,11 @@ describe("createSessionRegistry", () => {
     });
 
     const message = makeRegistryMessage("channel-recover");
-    const session = await Effect.runPromise(lifecycle.createOrGetSession(message));
+    const session = await runEffect(lifecycle.createOrGetSession(message));
     const previousSessionId = session.opencode.sessionId;
-    await Effect.runPromise(lifecycle.setActiveRun(session, makeActiveRun()));
+    await runEffect(lifecycle.setActiveRun(session, makeActiveRun()));
 
-    const [first, second] = await Effect.runPromise(
+    const [first, second] = await runEffect(
       Effect.gen(function* () {
         const fiber1 = yield* Effect.forkChild(
           lifecycle.ensureSessionHealth(session, message, "recover", false),
@@ -333,52 +337,46 @@ describe("createSessionRegistry", () => {
     expect(first).toBe(session);
     expect(second).toBe(session);
     expect(session.opencode.sessionId).toBe("session-2");
-    expect(await Effect.runPromise(Ref.get(createCount))).toBe(2);
-    expect(await Effect.runPromise(lifecycle.getSession(message.channelId))).toBe(session);
-    expect(await Effect.runPromise(lifecycle.getSessionContext(previousSessionId))).toBeNull();
-    expect(
-      await Effect.runPromise(lifecycle.getSessionContext(session.opencode.sessionId)),
-    ).toEqual({
+    expect(await runEffect(Ref.get(createCount))).toBe(2);
+    expect(await runEffect(lifecycle.getSession(message.channelId))).toBe(session);
+    expect(await runEffect(lifecycle.getSessionContext(previousSessionId))).toBeNull();
+    expect(await runEffect(lifecycle.getSessionContext(session.opencode.sessionId))).toEqual({
       session,
       activeRun: null,
     });
-    expect(
-      await Effect.runPromise(lifecycle.getActiveRunBySessionId(previousSessionId)),
-    ).toBeNull();
-    expect(await Effect.runPromise(Ref.get(closed))).toEqual(["session-1"]);
+    expect(await runEffect(lifecycle.getActiveRunBySessionId(previousSessionId))).toBeNull();
+    expect(await runEffect(Ref.get(closed))).toEqual(["session-1"]);
   });
 
   test("shuts down sessions, closes handles, and keeps persistent session roots", async () => {
     const { lifecycle, closed, removedRoots } = await makeHarness();
 
-    await Effect.runPromise(lifecycle.createOrGetSession(makeRegistryMessage("channel-1")));
-    await Effect.runPromise(lifecycle.createOrGetSession(makeRegistryMessage("channel-2")));
-    await Effect.runPromise(lifecycle.shutdownSessions());
+    await runEffect(lifecycle.createOrGetSession(makeRegistryMessage("channel-1")));
+    await runEffect(lifecycle.createOrGetSession(makeRegistryMessage("channel-2")));
+    await runEffect(lifecycle.shutdownSessions());
 
-    expect(await Effect.runPromise(Ref.get(closed))).toEqual(["session-1", "session-2"]);
-    expect(await Effect.runPromise(Ref.get(removedRoots))).toEqual([]);
+    expect(await runEffect(Ref.get(closed))).toEqual(["session-1", "session-2"]);
+    expect(await runEffect(Ref.get(removedRoots))).toEqual([]);
   });
 
   test("invalidates the loaded session without deleting the session root", async () => {
     const { lifecycle, closed, removedRoots, persisted } = await makeHarness();
     const message = makeRegistryMessage("channel-1");
-    const session = await Effect.runPromise(lifecycle.createOrGetSession(message));
+    const session = await runEffect(lifecycle.createOrGetSession(message));
 
     expect(
-      await Effect.runPromise(
-        lifecycle.invalidateSession("channel-1", "user requested /new-session"),
-      ),
+      await runEffect(lifecycle.invalidateSession("channel-1", "user requested /new-session")),
     ).toBe(true);
 
-    expect(await Effect.runPromise(Ref.get(closed))).toEqual([session.opencode.sessionId]);
-    expect(await Effect.runPromise(lifecycle.getSession("channel-1"))).toBeUndefined();
-    expect(await Effect.runPromise(Ref.get(persisted))).toEqual(new Map());
-    expect(await Effect.runPromise(Ref.get(removedRoots))).toEqual([]);
+    expect(await runEffect(Ref.get(closed))).toEqual([session.opencode.sessionId]);
+    expect(await runEffect(lifecycle.getSession("channel-1"))).toBeUndefined();
+    expect(await runEffect(Ref.get(persisted))).toEqual(new Map());
+    expect(await runEffect(Ref.get(removedRoots))).toEqual([]);
   });
 
   test("invalidates a session that was still being created", async () => {
-    const createStarted = await Effect.runPromise(Deferred.make<void>());
-    const releaseCreate = await Effect.runPromise(Deferred.make<void>());
+    const createStarted = await runEffect(Deferred.make<void>());
+    const releaseCreate = await runEffect(Deferred.make<void>());
     const { lifecycle, closed, persisted } = await makeHarness({
       createOpencodeSession: ({ workdir }) =>
         Effect.gen(function* () {
@@ -391,7 +389,7 @@ describe("createSessionRegistry", () => {
     });
     const message = makeRegistryMessage("channel-race");
 
-    const [created, invalidated] = await Effect.runPromise(
+    const [created, invalidated] = await runEffect(
       Effect.gen(function* () {
         const createFiber = yield* Effect.forkChild(lifecycle.createOrGetSession(message));
         yield* Deferred.await(createStarted);
@@ -405,9 +403,9 @@ describe("createSessionRegistry", () => {
 
     expect(created.opencode.sessionId).toBe("session-race");
     expect(invalidated).toBe(true);
-    expect(await Effect.runPromise(lifecycle.getSession("channel-race"))).toBeUndefined();
-    expect(await Effect.runPromise(Ref.get(persisted))).toEqual(new Map());
-    expect(await Effect.runPromise(Ref.get(closed))).toEqual(["session-race"]);
+    expect(await runEffect(lifecycle.getSession("channel-race"))).toBeUndefined();
+    expect(await runEffect(Ref.get(persisted))).toEqual(new Map());
+    expect(await runEffect(Ref.get(closed))).toEqual(["session-race"]);
   });
 
   test("does not invalidate a loaded session while it is busy", async () => {
@@ -415,17 +413,15 @@ describe("createSessionRegistry", () => {
       isSessionBusy: () => Effect.succeed(true),
     });
     const message = makeRegistryMessage("channel-1");
-    const session = await Effect.runPromise(lifecycle.createOrGetSession(message));
+    const session = await runEffect(lifecycle.createOrGetSession(message));
 
     expect(
-      await Effect.runPromise(
-        lifecycle.invalidateSession("channel-1", "user requested /new-session"),
-      ),
+      await runEffect(lifecycle.invalidateSession("channel-1", "user requested /new-session")),
     ).toBe(false);
 
-    expect(await Effect.runPromise(Ref.get(closed))).toEqual([]);
-    expect(await Effect.runPromise(lifecycle.getSession("channel-1"))).toBe(session);
-    expect(await Effect.runPromise(Ref.get(persisted))).toEqual(
+    expect(await runEffect(Ref.get(closed))).toEqual([]);
+    expect(await runEffect(lifecycle.getSession("channel-1"))).toBe(session);
+    expect(await runEffect(Ref.get(persisted))).toEqual(
       new Map([
         [
           "channel-1",
@@ -447,14 +443,12 @@ describe("createSessionRegistry", () => {
       isSessionBusy: () => Effect.succeed(true),
     });
 
-    const session = await Effect.runPromise(
-      lifecycle.createOrGetSession(makeRegistryMessage("channel-1")),
-    );
+    const session = await runEffect(lifecycle.createOrGetSession(makeRegistryMessage("channel-1")));
     session.lastActivityAt = 0;
 
-    await Effect.runPromise(lifecycle.closeExpiredSessions(30 * 60 * 1_000 + 1));
+    await runEffect(lifecycle.closeExpiredSessions(30 * 60 * 1_000 + 1));
 
-    expect(await Effect.runPromise(Ref.get(closed))).toEqual([]);
-    expect(await Effect.runPromise(lifecycle.getSession(session.channelId))).toBe(session);
+    expect(await runEffect(Ref.get(closed))).toEqual([]);
+    expect(await runEffect(lifecycle.getSession(session.channelId))).toBe(session);
   });
 });

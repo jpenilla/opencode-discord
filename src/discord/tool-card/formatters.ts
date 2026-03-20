@@ -9,14 +9,8 @@ import {
   summaryLine,
   todoLine,
 } from "./lines.ts";
-import type { ToolCardLine, ToolCardPathContext, ToolInputFormatter } from "./types.ts";
-import {
-  extractPatchFiles,
-  displayPath,
-  formatPathSummaryLine,
-  PATCH_ACTION_FORMAT,
-  PATCH_ACTION_ORDER,
-} from "./path-display.ts";
+import type { ToolCardLine, ToolCardPathDisplay, ToolInputFormatter } from "./types.ts";
+import { PATCH_ACTION_FORMAT, PATCH_ACTION_ORDER } from "./path-display.ts";
 import {
   compactUrl,
   findStringInput,
@@ -34,7 +28,7 @@ import {
 const formatGenericValue = (
   key: string,
   value: unknown,
-  pathContext: ToolCardPathContext,
+  pathDisplay: ToolCardPathDisplay,
 ): string | null => {
   if (typeof value === "string") {
     const url = compactUrl(value);
@@ -43,7 +37,7 @@ const formatGenericValue = (
     }
 
     if (isPathLikeKey(key)) {
-      return `\`${displayPath(value, pathContext)}\``;
+      return `\`${pathDisplay.displayPath(value)}\``;
     }
 
     return formatTextValue(value, 160);
@@ -66,24 +60,28 @@ const formatGenericValue = (
 
 const formatGenericInputLines = (
   input: Record<string, unknown>,
-  pathContext: ToolCardPathContext,
+  pathDisplay: ToolCardPathDisplay,
 ) => {
-  const fields = Object.entries(input)
+  const fields: Array<ReturnType<typeof metaField>> = [];
+  const entries = Object.entries(input)
     .filter(([, value]) => value !== undefined && value !== null)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .flatMap(([key, value]) => {
-      const formatted = formatGenericValue(key, value, pathContext);
-      return formatted ? [metaField(titleCaseKey(key), formatted)] : [];
-    });
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  for (const [key, value] of entries) {
+    const formatted = formatGenericValue(key, value, pathDisplay);
+    if (formatted) {
+      fields.push(metaField(titleCaseKey(key), formatted));
+    }
+  }
 
   return packMetaFields(fields);
 };
 
-const formatPatchInputLines: ToolInputFormatter = ({ part, pathContext, input }) => {
+const formatPatchInputLines: ToolInputFormatter = ({ part, pathDisplay, input }) => {
   const patchInput = findStringInput(input, ["patchText", "patch", "content", "diff", "input"]);
   const patchRaw = "raw" in part.state && typeof part.state.raw === "string" ? part.state.raw : "";
   const patchOutput = part.state.status === "completed" ? part.state.output : "";
-  const files = extractPatchFiles(`${patchInput ?? ""}\n${patchRaw}\n${patchOutput}`, pathContext);
+  const files = pathDisplay.extractPatchFiles(`${patchInput ?? ""}\n${patchRaw}\n${patchOutput}`);
 
   if (PATCH_ACTION_ORDER.every((action) => files[action].length === 0)) {
     return part.state.status === "completed" ? [summaryLine("Applied patch")] : [];
@@ -119,44 +117,41 @@ const formatBashInputLines: ToolInputFormatter = ({ part, input }) => {
   return [];
 };
 
-const formatReadInputLines: ToolInputFormatter = ({ pathContext, input }) => {
+const formatReadInputLines: ToolInputFormatter = ({ pathDisplay, input }) => {
   const filePath = findStringInput(input, ["filePath", "path", "filepath", "target"]);
-  if (!filePath) {
-    return [];
-  }
-  return [summaryLine(formatPathSummaryLine(filePath, pathContext))];
+  return filePath ? [summaryLine(pathDisplay.formatPathSummaryLine(filePath))] : [];
 };
 
-const formatGlobInputLines: ToolInputFormatter = ({ pathContext, input }) => {
+const formatGlobInputLines: ToolInputFormatter = ({ pathDisplay, input }) => {
   const pattern = findStringInput(input, ["pattern", "glob", "query"]);
   const path = findStringInput(input, ["path", "cwd", "root"]);
   const hidden = findUnknownInput(input, ["includeHidden", "hidden", "dot"]);
   return packMetaFields([
     metaField("Pattern", pattern ? formatTextValue(pattern, 180) : null),
-    metaField("Path", path ? `\`${displayPath(path, pathContext)}\`` : null),
+    metaField("Path", path ? `\`${pathDisplay.displayPath(path)}\`` : null),
     metaField("Hidden", typeof hidden === "boolean" ? `\`${hidden}\`` : null),
   ]);
 };
 
-const formatGrepInputLines: ToolInputFormatter = ({ pathContext, input }) => {
+const formatGrepInputLines: ToolInputFormatter = ({ pathDisplay, input }) => {
   const pattern = findStringInput(input, ["pattern", "query", "search"]);
   const path = findStringInput(input, ["path", "cwd", "root"]);
   const caseSensitive = findUnknownInput(input, ["caseSensitive", "ignoreCase"]);
   const context = findUnknownInput(input, ["context", "before", "after"]);
   return packMetaFields([
     metaField("Pattern", pattern ? formatTextValue(pattern, 180) : null),
-    metaField("Path", path ? `\`${displayPath(path, pathContext)}\`` : null),
+    metaField("Path", path ? `\`${pathDisplay.displayPath(path)}\`` : null),
     metaField("Case Sensitive", typeof caseSensitive === "boolean" ? `\`${caseSensitive}\`` : null),
     metaField("Context", typeof context === "number" ? `\`${context}\`` : null),
   ]);
 };
 
-const formatEditInputLines: ToolInputFormatter = ({ pathContext, input }) => {
+const formatEditInputLines: ToolInputFormatter = ({ pathDisplay, input }) => {
   const path = findStringInput(input, ["filePath", "path", "file"]);
   const search = findStringInput(input, ["oldText", "search", "find"]);
   const replace = findStringInput(input, ["newText", "replace", "replacement"]);
   return packMetaFields([
-    metaField("File", path ? `\`${displayPath(path, pathContext)}\`` : null),
+    metaField("File", path ? `\`${pathDisplay.displayPath(path)}\`` : null),
     metaField(
       "Edit",
       search && replace
@@ -166,11 +161,11 @@ const formatEditInputLines: ToolInputFormatter = ({ pathContext, input }) => {
   ]);
 };
 
-const formatWriteInputLines: ToolInputFormatter = ({ pathContext, input }) => {
+const formatWriteInputLines: ToolInputFormatter = ({ pathDisplay, input }) => {
   const path = findStringInput(input, ["filePath", "path", "file"]);
   const content = findStringInput(input, ["content", "text"]);
   return [
-    ...(path ? [summaryLine(formatPathSummaryLine(path, pathContext))] : []),
+    ...(path ? [summaryLine(pathDisplay.formatPathSummaryLine(path))] : []),
     ...packMetaFields([metaField("Size", content ? `\`${content.length} chars\`` : null)]),
   ];
 };
@@ -229,12 +224,12 @@ const formatWebfetchInputLines: ToolInputFormatter = ({ part, input }) => {
   return [...lines, ...packMetaFields(metadata)];
 };
 
-const formatSearchInputLines: ToolInputFormatter = ({ pathContext, input }) => {
+const formatSearchInputLines: ToolInputFormatter = ({ pathDisplay, input }) => {
   const query = findStringInput(input, ["query", "q", "pattern", "search"]);
   const path = findStringInput(input, ["path", "cwd", "root"]);
   return [
     ...(query ? [summaryLine(formatTextValue(query, 180))] : []),
-    ...packMetaFields([metaField("Path", path ? `\`${displayPath(path, pathContext)}\`` : null)]),
+    ...packMetaFields([metaField("Path", path ? `\`${pathDisplay.displayPath(path)}\`` : null)]),
   ];
 };
 
@@ -294,12 +289,12 @@ const formatBatchInputLines: ToolInputFormatter = ({ input }) => {
   return Array.isArray(items) ? [metaLine("Batched Calls", `\`${items.length}\``)] : [];
 };
 
-const formatLspInputLines: ToolInputFormatter = ({ pathContext, input }) => {
+const formatLspInputLines: ToolInputFormatter = ({ pathDisplay, input }) => {
   const action = findStringInput(input, ["action", "method", "operation"]);
   const path = findStringInput(input, ["path", "filePath", "uri"]);
   return packMetaFields([
     metaField("Action", action ? `\`${action}\`` : null),
-    metaField("Path", path ? `\`${displayPath(path, pathContext)}\`` : null),
+    metaField("Path", path ? `\`${pathDisplay.displayPath(path)}\`` : null),
   ]);
 };
 
@@ -328,18 +323,18 @@ const TOOL_INPUT_FORMATTERS: Record<string, ToolInputFormatter> = {
   invalid: formatInvalidInputLines,
 };
 
-export const formatToolInputLines = (part: ToolPart, pathContext: ToolCardPathContext) => {
+export const formatToolInputLines = (part: ToolPart, pathDisplay: ToolCardPathDisplay) => {
   const input = inputObject(part);
   if (part.tool === "apply_patch" || part.tool.includes("patch")) {
-    return formatPatchInputLines({ part, pathContext, input });
+    return formatPatchInputLines({ part, input, pathDisplay });
   }
 
   const formatter = TOOL_INPUT_FORMATTERS[part.tool];
   if (formatter) {
-    return formatter({ part, pathContext, input });
+    return formatter({ part, input, pathDisplay });
   }
 
-  return formatGenericInputLines(input, pathContext);
+  return formatGenericInputLines(input, pathDisplay);
 };
 
 type StepDisplayMode = "hidden" | "summary" | "meta";

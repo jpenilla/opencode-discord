@@ -1,6 +1,7 @@
 import { ContainerBuilder, TextDisplayBuilder } from "@discordjs/builders";
 import { MessageFlags, type Message, type SendableChannels } from "discord.js";
 import type { ToolPart } from "@opencode-ai/sdk/v2";
+import { Data, Effect } from "effect";
 
 import {
   formatStepLine,
@@ -9,7 +10,8 @@ import {
   searchResultInfo,
   statusLine,
 } from "./tool-card/formatters.ts";
-import type { ToolCardPathContext } from "./tool-card/types.ts";
+import { makeToolCardPathDisplay } from "./tool-card/path-display.ts";
+import type { ToolCardPathDisplay } from "./tool-card/types.ts";
 import {
   formatDuration,
   formatStatus,
@@ -18,18 +20,21 @@ import {
   toolEmoji,
   truncate,
 } from "./tool-card/utils.ts";
-import type { ResolvedSandboxBackend } from "@/sandbox/backend.ts";
+import type { ResolvedSandboxBackend } from "@/sandbox/common.ts";
 
 const EDIT_TOOL_CARDS = true;
 
-const pathContext = (workdir: string, backend: ResolvedSandboxBackend): ToolCardPathContext => ({
-  workdir,
-  backend,
-});
+class ToolCardSendFailed extends Data.TaggedError("ToolCardSendFailed")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
+const toolCardSendFailed = (message: string, cause?: unknown) =>
+  new ToolCardSendFailed({ message, cause });
 
 const renderToolCard = (input: {
   part: ToolPart;
-  pathContext: ToolCardPathContext;
+  pathDisplay: ToolCardPathDisplay;
   interrupted?: boolean;
 }) => {
   const { part, interrupted = false } = input;
@@ -43,7 +48,7 @@ const renderToolCard = (input: {
       : `**${toolEmoji(part.tool)} ${statusEmoji(part, interrupted)} \`${part.tool}\` ${statusLabel}**`;
   const lines = [header];
 
-  const inputLines = formatToolInputLines(part, input.pathContext);
+  const inputLines = formatToolInputLines(part, input.pathDisplay);
   if (inputLines.length > 0) {
     lines.push(...inputLines.map(renderToolCardLine));
   }
@@ -72,69 +77,71 @@ const renderToolCard = (input: {
     );
   }
 
-  const container = new ContainerBuilder().addTextDisplayComponents(
+  return new ContainerBuilder().addTextDisplayComponents(
     new TextDisplayBuilder().setContent(lines.join("\n")),
   );
-
-  return [container];
 };
 
 const createPayload = (input: {
   part: ToolPart;
-  pathContext: ToolCardPathContext;
-  includeNotificationSuppression: boolean;
+  pathDisplay: ToolCardPathDisplay;
+  suppressNotifications: boolean;
   interrupted?: boolean;
 }) => ({
-  flags: input.includeNotificationSuppression
+  flags: input.suppressNotifications
     ? MessageFlags.IsComponentsV2 | MessageFlags.SuppressNotifications
     : MessageFlags.IsComponentsV2,
-  components: renderToolCard({
-    part: input.part,
-    pathContext: input.pathContext,
-    interrupted: input.interrupted,
-  }),
+  components: [renderToolCard(input)],
   allowedMentions: { parse: [] as Array<never> },
 });
 
-export const upsertToolCard = async (input: {
-  sourceMessage: Message;
+export const upsertToolCard = (input: {
+  channel: SendableChannels;
   existingCard: Message | null;
   part: ToolPart;
   workdir: string;
   backend: ResolvedSandboxBackend;
   mode?: "edit-or-send" | "always-send";
   interrupted?: boolean;
-}) => {
-  const mode = input.mode ?? "edit-or-send";
-  if (mode === "edit-or-send" && EDIT_TOOL_CARDS && input.existingCard) {
-    try {
-      await input.existingCard.edit(
-        createPayload({
-          part: input.part,
-          pathContext: pathContext(input.workdir, input.backend),
-          includeNotificationSuppression: false,
-          interrupted: input.interrupted,
-        }),
+}) =>
+  Effect.gen(function* () {
+    const mode = input.mode ?? "edit-or-send";
+    const pathDisplay = makeToolCardPathDisplay({
+      workdir: input.workdir,
+      backend: input.backend,
+    });
+    const existingCard = input.existingCard;
+
+    if (mode === "edit-or-send" && EDIT_TOOL_CARDS && existingCard) {
+      const payload = createPayload({
+        part: input.part,
+        pathDisplay,
+        suppressNotifications: false,
+        interrupted: input.interrupted,
+      });
+      const updated = yield* Effect.tryPromise({
+        try: () => existingCard.edit(payload),
+        catch: (cause) => toolCardSendFailed("Failed to edit tool progress card", cause),
+      }).pipe(
+        Effect.as(existingCard),
+        Effect.catch(() => Effect.succeed(null)),
       );
-      return input.existingCard;
-    } catch {
-      // fall through and create a fresh card if the previous message was deleted/uneditable.
+      if (updated) {
+        return updated;
+      }
     }
-  }
 
-  if (!input.sourceMessage.channel.isSendable()) {
-    throw new Error("Channel is not sendable for tool progress card");
-  }
-
-  return (input.sourceMessage.channel as SendableChannels).send(
-    createPayload({
+    const payload = createPayload({
       part: input.part,
-      pathContext: pathContext(input.workdir, input.backend),
-      includeNotificationSuppression: true,
+      pathDisplay,
+      suppressNotifications: true,
       interrupted: input.interrupted,
-    }),
-  );
-};
+    });
+    return yield* Effect.tryPromise({
+      try: () => input.channel.send(payload) as Promise<Message>,
+      catch: (cause) => toolCardSendFailed("Failed to send tool progress card", cause),
+    });
+  });
 
 export const editToolCard = (input: {
   card: Message;
@@ -143,11 +150,18 @@ export const editToolCard = (input: {
   backend: ResolvedSandboxBackend;
   interrupted: boolean;
 }) =>
-  input.card.edit(
-    createPayload({
+  Effect.gen(function* () {
+    const payload = createPayload({
       part: input.part,
-      pathContext: pathContext(input.workdir, input.backend),
-      includeNotificationSuppression: false,
+      pathDisplay: makeToolCardPathDisplay({
+        workdir: input.workdir,
+        backend: input.backend,
+      }),
+      suppressNotifications: false,
       interrupted: input.interrupted,
-    }),
-  );
+    });
+    return yield* Effect.tryPromise({
+      try: () => input.card.edit(payload),
+      catch: (cause) => toolCardSendFailed("Failed to edit tool progress card", cause),
+    });
+  });

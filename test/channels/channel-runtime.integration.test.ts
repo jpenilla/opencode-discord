@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { BunServices } from "@effect/platform-bun";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +11,7 @@ import {
   type MessageEditOptions,
   type SendableChannels,
 } from "discord.js";
-import { Deferred, Effect, Fiber, Layer, Queue, Redacted, Ref } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, Redacted, Ref } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
 import {
@@ -59,6 +60,9 @@ import { failTest, interruptedTestError, timeoutTestError } from "../support/err
 import { unsafeEffect, unsafeStub } from "../support/stub.ts";
 
 const TEST_STATE_DIR = join(tmpdir(), `.opencode-discord-test-storage-${process.pid}`);
+
+const runEffect = <A, E = never, R = never>(effect: Effect.Effect<A, E, R>): Promise<A> =>
+  Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer)) as Effect.Effect<A, E, never>);
 
 const makeConfig = (): AppConfigShape => ({
   discordToken: Redacted.make("discord-token"),
@@ -204,9 +208,9 @@ type RuntimeServices = {
 
 const withHarness = <A>(
   harness: Harness,
-  run: (services: RuntimeServices) => Effect.Effect<A, unknown>,
+  run: (services: RuntimeServices) => Effect.Effect<A, unknown, FileSystem.FileSystem | Path.Path>,
 ) =>
-  Effect.runPromise(
+  runEffect(
     Effect.scoped(
       Effect.gen(function* () {
         const channels = yield* ChannelRuntime;
@@ -215,7 +219,7 @@ const withHarness = <A>(
           channels,
           sessions,
         });
-      }).pipe(Effect.provide(harness.harnessLayer)),
+      }).pipe(Effect.provide(harness.harnessLayer), Effect.provide(BunServices.layer)),
     ),
   );
 
@@ -258,7 +262,7 @@ const makeHarness = async (options: {
     promptResults,
     persistedSessions,
     persistedSettings,
-  ] = await Effect.runPromise(
+  ] = await runEffect(
     Effect.all([
       Ref.make<string[]>([]),
       Ref.make<unknown[]>([]),
@@ -283,19 +287,19 @@ const makeHarness = async (options: {
     unsafeStub<Message>({
       id,
       edit: (payload: MessageEditOptions): Promise<Message> =>
-        Effect.runPromise(Ref.update(editedPayloads, (current) => [...current, payload])).then(() =>
+        runEffect(Ref.update(editedPayloads, (current) => [...current, payload])).then(() =>
           makePostedMessage(id),
         ),
     });
 
   const sendOnChannel = (payload: MessageCreateOptions) =>
-    Effect.runPromise(pushRef(sentPayloads, payload)).then(() => {
+    runEffect(pushRef(sentPayloads, payload)).then(() => {
       if (options.failChannelSend) {
         throw new Error("channel send failed");
       }
       const content = payload.content;
       if (content) {
-        return Effect.runPromise(Queue.offer(replyEvents, String(content))).then(() =>
+        return runEffect(Queue.offer(replyEvents, String(content))).then(() =>
           makePostedMessage(`sent-${Date.now()}`),
         );
       }
@@ -306,7 +310,7 @@ const makeHarness = async (options: {
     id: "channel-1",
     type: ChannelType.DM,
     isSendable: () => true,
-    sendTyping: () => Effect.runPromise(Ref.update(typing, (count) => count + 1)),
+    sendTyping: () => runEffect(Ref.update(typing, (count) => count + 1)),
     send: sendOnChannel,
   });
 
@@ -338,7 +342,7 @@ const makeHarness = async (options: {
     id: "channel-1",
     type: ChannelType.GuildText,
     isSendable: () => true,
-    sendTyping: () => Effect.runPromise(Ref.update(typing, (count) => count + 1)),
+    sendTyping: () => runEffect(Ref.update(typing, (count) => count + 1)),
     send: sendOnChannel,
   });
 
@@ -360,14 +364,14 @@ const makeHarness = async (options: {
       guild: null,
       channel: messageChannel,
       reply: (payload: MessageCreateOptions) =>
-        Effect.runPromise(pushRef(replyTargetIds, input.id)).then(() =>
-          Effect.runPromise(pushRef(replyPayloads, payload)).then(async () => {
+        runEffect(pushRef(replyTargetIds, input.id)).then(() =>
+          runEffect(pushRef(replyPayloads, payload)).then(async () => {
             if (options.failComponentReplies && payload.components?.length) {
               throw new Error("question post failed");
             }
             if (payload.content) {
-              await Effect.runPromise(pushRef(replies, String(payload.content)));
-              await Effect.runPromise(Queue.offer(replyEvents, String(payload.content)));
+              await runEffect(pushRef(replies, String(payload.content)));
+              await runEffect(Queue.offer(replyEvents, String(payload.content)));
             }
             return makePostedMessage(`reply-${input.id}`);
           }),
@@ -401,13 +405,13 @@ const makeHarness = async (options: {
       isChatInputCommand: () => true,
       reply: (payload: unknown) => {
         interaction.replied = true;
-        return Effect.runPromise(pushRef(interactionReplies, payload));
+        return runEffect(pushRef(interactionReplies, payload));
       },
       deferReply: (_payload: unknown) => {
         interaction.deferred = true;
-        return Effect.runPromise(Ref.update(interactionDefers, (count) => count + 1));
+        return runEffect(Ref.update(interactionDefers, (count) => count + 1));
       },
-      editReply: (payload: unknown) => Effect.runPromise(pushRef(interactionEdits, payload)),
+      editReply: (payload: unknown) => runEffect(pushRef(interactionEdits, payload)),
     });
 
     return {
@@ -435,10 +439,10 @@ const makeHarness = async (options: {
       isChatInputCommand: () => false,
       reply: (payload: unknown) => {
         interaction.replied = true;
-        return Effect.runPromise(pushRef(interactionReplies, payload));
+        return runEffect(pushRef(interactionReplies, payload));
       },
       update: (payload: unknown) =>
-        Effect.runPromise(pushRef(interactionEdits, payload)).then(() =>
+        runEffect(pushRef(interactionEdits, payload)).then(() =>
           makePostedMessage("reply-message-1"),
         ),
       followUp: (_payload: unknown) => Promise.resolve(makePostedMessage("reply-message-1")),
@@ -602,9 +606,9 @@ const makeHarness = async (options: {
     makeCommandInteraction,
     makeQuestionButtonInteraction,
     storePromptResult: (result: PromptResult) =>
-      Effect.runPromise(storePromptResult(result)).then(() => undefined),
+      runEffect(storePromptResult(result)).then(() => undefined),
     publishEvent: (event: Event | GlobalEvent) =>
-      Effect.runPromise(publishEvent(event)).then(() => undefined),
+      runEffect(publishEvent(event)).then(() => undefined),
   };
 };
 
@@ -635,8 +639,8 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("absorbs follow-up messages into the active run and re-prompts opencode", async () => {
-    const firstPromptStarted = await Effect.runPromise(Deferred.make<void>());
-    const allowFirstPromptToFinish = await Effect.runPromise(Deferred.make<void>());
+    const firstPromptStarted = await runEffect(Deferred.make<void>());
+    const allowFirstPromptToFinish = await runEffect(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: ({ prompt, callIndex, completePrompt }) =>
         callIndex === 1
@@ -688,8 +692,8 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("keeps the active run open after the final assistant update until session.status idle arrives", async () => {
-    const assistantFinished = await Effect.runPromise(Deferred.make<void>());
-    const allowIdleStatus = await Effect.runPromise(Deferred.make<void>());
+    const assistantFinished = await runEffect(Deferred.make<void>());
+    const allowIdleStatus = await runEffect(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: ({
         callIndex,
@@ -765,8 +769,8 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("ignores replayed message updates from the previous prompt when running an absorbed follow-up", async () => {
-    const firstPromptStarted = await Effect.runPromise(Deferred.make<void>());
-    const allowFirstPromptToFinish = await Effect.runPromise(Deferred.make<void>());
+    const firstPromptStarted = await runEffect(Deferred.make<void>());
+    const allowFirstPromptToFinish = await runEffect(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: ({ callIndex, publishEvent, completePrompt, sessionId }) =>
         callIndex === 1
@@ -967,9 +971,9 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("runs /interrupt through ChannelRuntimeLayer and stops the active run", async () => {
-    const promptStarted = await Effect.runPromise(Deferred.make<void>());
-    const interruptRequested = await Effect.runPromise(Deferred.make<void>());
-    const promptFinished = await Effect.runPromise(Deferred.make<void>());
+    const promptStarted = await runEffect(Deferred.make<void>());
+    const interruptRequested = await runEffect(Deferred.make<void>());
+    const promptFinished = await runEffect(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: () =>
         unsafeEffect(
@@ -1006,10 +1010,10 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("shows the question prompt when it wins the race after /interrupt is requested", async () => {
-    const promptStarted = await Effect.runPromise(Deferred.make<void>());
-    const interruptRequested = await Effect.runPromise(Deferred.make<void>());
-    const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>());
-    const promptFinished = await Effect.runPromise(Deferred.make<void>());
+    const promptStarted = await runEffect(Deferred.make<void>());
+    const interruptRequested = await runEffect(Deferred.make<void>());
+    const allowPromptToFinish = await runEffect(Deferred.make<void>());
+    const promptFinished = await runEffect(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: ({ publishEvent, completePrompt }) =>
         unsafeEffect(
@@ -1100,8 +1104,8 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("marks idle compaction interrupted when the compaction exits with an abort after interrupt", async () => {
-    const compactStarted = await Effect.runPromise(Deferred.make<void>());
-    const allowCompactToFinish = await Effect.runPromise(Deferred.make<void, Error>());
+    const compactStarted = await runEffect(Deferred.make<void>());
+    const allowCompactToFinish = await runEffect(Deferred.make<void, Error>());
     const harness = await makeHarness({
       promptImpl: ({ completePrompt }) =>
         completePrompt({
@@ -1140,10 +1144,10 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("does not create an extra compaction completion card when a late completion arrives after an interrupt request", async () => {
-    const compactStarted = await Effect.runPromise(Deferred.make<void>());
-    const allowCompactToFinish = await Effect.runPromise(Deferred.make<void>());
-    const secondPromptStarted = await Effect.runPromise(Deferred.make<void>());
-    const allowSecondPromptToFinish = await Effect.runPromise(Deferred.make<void>());
+    const compactStarted = await runEffect(Deferred.make<void>());
+    const allowCompactToFinish = await runEffect(Deferred.make<void>());
+    const secondPromptStarted = await runEffect(Deferred.make<void>());
+    const allowSecondPromptToFinish = await runEffect(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: ({ callIndex, completePrompt }) =>
         callIndex === 1
@@ -1210,8 +1214,8 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("recreates an unhealthy session after a failed run and succeeds on the next submit", async () => {
-    const healthy = await Effect.runPromise(Ref.make(true));
-    const createSessionCount = await Effect.runPromise(Ref.make(0));
+    const healthy = await runEffect(Ref.make(true));
+    const createSessionCount = await runEffect(Ref.make(0));
     const harness = await makeHarness({
       promptImpl: ({ callIndex, completePrompt }) =>
         callIndex === 1
@@ -1266,8 +1270,8 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("processes queued question events through ChannelRuntimeLayer and finalizes the question card", async () => {
-    const promptStarted = await Effect.runPromise(Deferred.make<void>());
-    const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>());
+    const promptStarted = await runEffect(Deferred.make<void>());
+    const allowPromptToFinish = await runEffect(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: ({ completePrompt }) =>
         Deferred.succeed(promptStarted, undefined).pipe(
@@ -1306,8 +1310,8 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("routes question interactions through ChannelRuntimeLayer after command handling falls through", async () => {
-    const promptStarted = await Effect.runPromise(Deferred.make<void>());
-    const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>());
+    const promptStarted = await runEffect(Deferred.make<void>());
+    const allowPromptToFinish = await runEffect(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: ({ completePrompt }) =>
         Deferred.succeed(promptStarted, undefined).pipe(
@@ -1344,9 +1348,9 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("waits for observed session idle before expiring active question cards during session shutdown", async () => {
-    const promptStarted = await Effect.runPromise(Deferred.make<void>());
-    const interruptStarted = await Effect.runPromise(Deferred.make<void>());
-    const allowIdleStatus = await Effect.runPromise(Deferred.make<void>());
+    const promptStarted = await runEffect(Deferred.make<void>());
+    const interruptStarted = await runEffect(Deferred.make<void>());
+    const allowIdleStatus = await runEffect(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: ({ messageId, publishEvent, sessionId, storePromptResult }) =>
         Deferred.succeed(promptStarted, undefined).pipe(
@@ -1409,8 +1413,8 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("uses shutdown-specific copy for run interrupt cards during graceful shutdown", async () => {
-    const promptStarted = await Effect.runPromise(Deferred.make<void>());
-    const interruptRequested = await Effect.runPromise(Deferred.make<void>());
+    const promptStarted = await runEffect(Deferred.make<void>());
+    const interruptRequested = await runEffect(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: () =>
         Deferred.succeed(promptStarted, undefined).pipe(
@@ -1464,8 +1468,8 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("surfaces a question UI failure reply when posting the question card fails", async () => {
-    const promptStarted = await Effect.runPromise(Deferred.make<void>());
-    const allowPromptToFinish = await Effect.runPromise(Deferred.make<void>());
+    const promptStarted = await runEffect(Deferred.make<void>());
+    const allowPromptToFinish = await runEffect(Deferred.make<void>());
     const harness = await makeHarness({
       promptImpl: ({ completePrompt }) =>
         Deferred.succeed(promptStarted, undefined).pipe(

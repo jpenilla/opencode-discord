@@ -1,4 +1,4 @@
-import { Effect, Layer, Ref, ServiceMap } from "effect";
+import { Effect, FileSystem, Layer, Path, Ref, ServiceMap } from "effect";
 import { type Interaction, type Message } from "discord.js";
 
 import { AppConfig } from "@/config.ts";
@@ -13,8 +13,13 @@ import { ChannelSettingsPersistence } from "@/state/persistence.ts";
 import { Logger } from "@/util/logging.ts";
 
 export type ChannelRuntimeShape = {
-  submit: (message: Message, invocation: Invocation) => Effect.Effect<void, unknown>;
-  handleInteraction: (interaction: Interaction) => Effect.Effect<void, unknown>;
+  submit: (
+    message: Message,
+    invocation: Invocation,
+  ) => Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path>;
+  handleInteraction: (
+    interaction: Interaction,
+  ) => Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path>;
   shutdown: () => Effect.Effect<void, unknown>;
 };
 
@@ -22,7 +27,7 @@ export class ChannelRuntime extends ServiceMap.Service<ChannelRuntime, ChannelRu
   "ChannelRuntime",
 ) {}
 
-type FallibleEffect<A> = Effect.Effect<A, unknown>;
+type FallibleEffect<A> = Effect.Effect<A, unknown, FileSystem.FileSystem | Path.Path>;
 
 export const ChannelRuntimeLayer = Layer.effect(
   ChannelRuntime,

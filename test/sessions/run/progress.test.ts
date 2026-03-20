@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { Message, MessageCreateOptions, MessageEditOptions } from "discord.js";
+import { BunServices } from "@effect/platform-bun";
+import type {
+  Message,
+  MessageCreateOptions,
+  MessageEditOptions,
+  SendableChannels,
+} from "discord.js";
 import type { CompactionPart, ToolPart } from "@opencode-ai/sdk/v2";
 import { Deferred, Effect, Fiber, Queue, Ref } from "effect";
 
@@ -70,6 +76,19 @@ const makeHarness = async (showThinking = true) => {
   };
 };
 
+const startProgressWorker = (
+  harness: Awaited<ReturnType<typeof makeHarness>>,
+  queue: Queue.Queue<RunProgressEvent>,
+) =>
+  Effect.forkChild(
+    runProgressWorker(
+      harness.sourceMessage.channel as SendableChannels,
+      harness.session,
+      harness.sourceMessage,
+      queue,
+    ),
+  );
+
 const makeToolPart = (
   status: "running" | "completed" | "error",
   input?: {
@@ -131,14 +150,7 @@ const runFinalizationScenario = async (reason: "interrupted") => {
     Effect.scoped(
       Effect.gen(function* () {
         const queue = yield* Queue.unbounded<RunProgressEvent>();
-        const worker = yield* Effect.forkChild(
-          runProgressWorker(
-            harness.session,
-            harness.sourceMessage,
-            "/home/opencode/workspace",
-            queue,
-          ),
-        );
+        const worker = yield* startProgressWorker(harness, queue);
 
         const ack = yield* Deferred.make<void>();
         yield* Queue.offer(queue, {
@@ -162,7 +174,7 @@ const runFinalizationScenario = async (reason: "interrupted") => {
           edited: yield* Ref.get(harness.editedPayloads),
         };
       }),
-    ),
+    ).pipe(Effect.provide(BunServices.layer)),
   );
 
   return result;
@@ -215,14 +227,7 @@ describe("runProgressWorker", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* Effect.forkChild(
-            runProgressWorker(
-              harness.session,
-              harness.sourceMessage,
-              "/home/opencode/workspace",
-              queue,
-            ),
-          );
+          const worker = yield* startProgressWorker(harness, queue);
 
           const ack = yield* Deferred.make<void>();
           yield* Queue.offer(queue, {
@@ -243,7 +248,7 @@ describe("runProgressWorker", () => {
             edited: yield* Ref.get(harness.editedPayloads),
           };
         }),
-      ),
+      ).pipe(Effect.provide(BunServices.layer)),
     );
 
     expect(result.sent.map(cardText)).toEqual([]);
@@ -269,14 +274,7 @@ describe("runProgressWorker", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* Effect.forkChild(
-            runProgressWorker(
-              harness.session,
-              harness.sourceMessage,
-              "/home/opencode/workspace",
-              queue,
-            ),
-          );
+          const worker = yield* startProgressWorker(harness, queue);
 
           const firstAck = yield* Deferred.make<void>();
           const secondAck = yield* Deferred.make<void>();
@@ -308,7 +306,7 @@ describe("runProgressWorker", () => {
             edited: yield* Ref.get(harness.editedPayloads),
           };
         }),
-      ),
+      ).pipe(Effect.provide(BunServices.layer)),
     );
 
     expect(result.sent.map(cardText)).toContain(
@@ -337,14 +335,7 @@ describe("runProgressWorker", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* Effect.forkChild(
-            runProgressWorker(
-              harness.session,
-              harness.sourceMessage,
-              "/home/opencode/workspace",
-              queue,
-            ),
-          );
+          const worker = yield* startProgressWorker(harness, queue);
 
           const ack = yield* Deferred.make<void>();
           yield* Queue.offer(queue, {
@@ -361,7 +352,7 @@ describe("runProgressWorker", () => {
 
           return yield* Ref.get(harness.sentPayloads);
         }),
-      ),
+      ).pipe(Effect.provide(BunServices.layer)),
     );
 
     expect(result.map((payload) => payload.content)).toContain("*🧠 planning the change*");
@@ -374,14 +365,7 @@ describe("runProgressWorker", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* Effect.forkChild(
-            runProgressWorker(
-              harness.session,
-              harness.sourceMessage,
-              "/home/opencode/workspace",
-              queue,
-            ),
-          );
+          const worker = yield* startProgressWorker(harness, queue);
 
           const ack = yield* Deferred.make<void>();
           yield* Queue.offer(queue, {
@@ -398,10 +382,41 @@ describe("runProgressWorker", () => {
 
           return yield* Ref.get(harness.sentPayloads);
         }),
-      ),
+      ).pipe(Effect.provide(BunServices.layer)),
     );
 
     expect(result.map((payload) => payload.content)).not.toContain("*🧠 planning the change*");
+  });
+
+  test("uses updated channel settings during an active run", async () => {
+    const harness = await makeHarness(true);
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const queue = yield* Queue.unbounded<RunProgressEvent>();
+          const worker = yield* startProgressWorker(harness, queue);
+
+          harness.session.channelSettings = {
+            ...harness.session.channelSettings,
+            showThinking: false,
+          };
+
+          const ack = yield* Deferred.make<void>();
+          yield* Queue.offer(queue, makeReasoningCompletedEvent(1));
+          yield* Queue.offer(queue, {
+            type: "run-finalizing",
+            ack,
+          });
+          yield* Deferred.await(ack);
+          yield* Fiber.interrupt(worker);
+
+          return yield* Ref.get(harness.sentPayloads);
+        }),
+      ).pipe(Effect.provide(BunServices.layer)),
+    );
+
+    expect(result.map((payload) => payload.content)).not.toContain("*🧠 thinking 1*");
   });
 
   test("ignores later terminal updates once a tool call is already terminal", async () => {
@@ -411,14 +426,7 @@ describe("runProgressWorker", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* Effect.forkChild(
-            runProgressWorker(
-              harness.session,
-              harness.sourceMessage,
-              "/home/opencode/workspace",
-              queue,
-            ),
-          );
+          const worker = yield* startProgressWorker(harness, queue);
 
           const ack = yield* Deferred.make<void>();
           yield* Queue.offer(queue, {
@@ -445,7 +453,7 @@ describe("runProgressWorker", () => {
             edited: yield* Ref.get(harness.editedPayloads),
           };
         }),
-      ),
+      ).pipe(Effect.provide(BunServices.layer)),
     );
 
     expect(result.sent.map(cardText)).toEqual([

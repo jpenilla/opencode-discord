@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { ToolPart } from "@opencode-ai/sdk/v2";
-import type { Message, MessageCreateOptions } from "discord.js";
-import type { ResolvedSandboxBackend } from "@/sandbox/backend.ts";
+import type { Message, MessageCreateOptions, SendableChannels } from "discord.js";
+import type { ResolvedSandboxBackend } from "@/sandbox/common.ts";
+import { Effect } from "effect";
 
 import { upsertToolCard } from "@/discord/tool-card.ts";
 import { unsafeStub } from "../support/stub.ts";
@@ -51,23 +52,23 @@ const renderCard = async (
   }: { workdir?: string; backend?: ResolvedSandboxBackend } = {},
 ) => {
   let payload: MessageCreateOptions | null = null;
-  const sourceMessage = unsafeStub<Message>({
-    channel: unsafeStub({
-      isSendable: () => true,
-      send: async (nextPayload: MessageCreateOptions) => {
-        payload = nextPayload;
-        return unsafeStub<Message>({});
-      },
-    }),
+  const channel = unsafeStub<SendableChannels>({
+    isSendable: () => true,
+    send: async (nextPayload: MessageCreateOptions) => {
+      payload = nextPayload;
+      return unsafeStub<Message>({});
+    },
   });
 
-  await upsertToolCard({
-    sourceMessage,
-    existingCard: null,
-    part,
-    workdir,
-    backend,
-  });
+  await Effect.runPromise(
+    upsertToolCard({
+      channel,
+      existingCard: null,
+      part,
+      workdir,
+      backend,
+    }),
+  );
 
   if (!payload) {
     throw new Error("tool card payload was not sent");
@@ -170,6 +171,44 @@ describe("tool card formatting", () => {
         "**🩹 ✅ `apply_patch` Completed in 0.00s**",
         "➕ Added: `./src/new-tool.ts`",
         "✏️ Modified: `./src/existing-tool.ts`",
+        "🗑️ Removed: `./src/old-tool.ts`",
+      ].join("\n"),
+    );
+  });
+
+  test("prefers delete status output over a trailing update header", async () => {
+    const text = await renderCard(
+      makeToolPart({
+        tool: "apply_patch",
+        status: "completed",
+        toolInput: {
+          patchText: "*** Update File: ./src/old-tool.ts\n@@\n-old\n+new",
+        },
+        output: "D ./src/old-tool.ts",
+      }),
+    );
+
+    expect(text).toBe(
+      "**🩹 ✅ `apply_patch` Completed in 0.00s**\n🗑️ Removed: `./src/old-tool.ts`",
+    );
+  });
+
+  test("renders renames as a remove plus an add when status output is present", async () => {
+    const text = await renderCard(
+      makeToolPart({
+        tool: "apply_patch",
+        status: "completed",
+        toolInput: {
+          patchText: "*** Update File: ./src/old-tool.ts\n@@\n-old\n+new",
+        },
+        output: "R100 ./src/old-tool.ts -> ./src/new-tool.ts",
+      }),
+    );
+
+    expect(text).toBe(
+      [
+        "**🩹 ✅ `apply_patch` Completed in 0.00s**",
+        "➕ Added: `./src/new-tool.ts`",
         "🗑️ Removed: `./src/old-tool.ts`",
       ].join("\n"),
     );

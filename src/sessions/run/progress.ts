@@ -6,16 +6,14 @@ import { compactionCardContent } from "@/discord/compaction-card.ts";
 import { editInfoCard, upsertInfoCard } from "@/discord/info-card.ts";
 import { sendProgressUpdate } from "@/discord/messages.ts";
 import { editToolCard, upsertToolCard } from "@/discord/tool-card.ts";
-import {
-  formatPatchUpdated,
-  formatSessionStatus,
-  formatThinkingCompleted,
-} from "@/discord/progress.ts";
+import { formatSessionStatus, formatThinkingCompleted } from "@/discord/progress.ts";
 import type {
   ChannelSession,
   RunFinalizationReason,
   RunProgressEvent,
 } from "@/sessions/session.ts";
+import { ResolvedSandboxBackend } from "@/sandbox/common";
+import { ChannelSettings } from "@/state/channel-settings";
 
 export const maxProgressBatchSize = 65;
 
@@ -34,7 +32,6 @@ const SKIPPED_TOOL_CARD_NAMES = new Set([
 ]);
 
 type ProgressState = {
-  patchPartIds: Set<string>;
   toolUpdateKeys: Map<string, string>;
   terminalToolCallIds: Set<string>;
   toolCards: Map<string, Message>;
@@ -52,7 +49,6 @@ type RunCompactionState =
 const inactiveRunCompaction = (): RunCompactionState => ({ type: "inactive" });
 
 const createProgressState = (): ProgressState => ({
-  patchPartIds: new Set<string>(),
   toolUpdateKeys: new Map<string, string>(),
   terminalToolCallIds: new Set<string>(),
   toolCards: new Map<string, Message>(),
@@ -140,7 +136,7 @@ const shouldSkipToolUpdate = (
 const progressUpdateForEvent = (
   event: RunProgressEvent,
   state: ProgressState,
-  session: Pick<ChannelSession, "channelSettings">,
+  channelSettings: ChannelSettings,
 ) => {
   switch (event.type) {
     case "run-finalizing":
@@ -150,7 +146,7 @@ const progressUpdateForEvent = (
         return null;
       }
       state.completedReasoningPartIds.add(event.partId);
-      if (!session.channelSettings.showThinking) {
+      if (!channelSettings.showThinking) {
         return null;
       }
       const thinkingText = event.text.trim();
@@ -158,13 +154,6 @@ const progressUpdateForEvent = (
         return null;
       }
       return formatThinkingCompleted(thinkingText);
-    }
-    case "patch-updated": {
-      if (state.patchPartIds.has(event.part.id)) {
-        return null;
-      }
-      state.patchPartIds.add(event.part.id);
-      return formatPatchUpdated(event.part);
     }
     case "session-compacting":
     case "session-compacted":
@@ -203,8 +192,11 @@ const trackLiveToolState = (state: ProgressState, part: ToolPart) => {
 
 const handleToolCard = (
   state: ProgressState,
-  message: Message,
-  pathContext: { workdir: string; backend: ChannelSession["opencode"]["backend"] },
+  channel: SendableChannels,
+  pathContext: {
+    workdir: string;
+    backend: ResolvedSandboxBackend;
+  },
   event: Extract<RunProgressEvent, { type: "tool-updated" }>,
 ) =>
   Effect.gen(function* () {
@@ -214,16 +206,14 @@ const handleToolCard = (
 
     const todoTool = isTodoTool(event.part.tool);
     const existingCard = state.toolCards.get(event.part.callID) ?? null;
-    const card = yield* Effect.promise(() =>
-      upsertToolCard({
-        sourceMessage: message,
-        existingCard: todoTool ? null : existingCard,
-        workdir: pathContext.workdir,
-        backend: pathContext.backend,
-        part: event.part,
-        mode: todoTool ? "always-send" : "edit-or-send",
-      }),
-    );
+    const card = yield* upsertToolCard({
+      channel,
+      existingCard: todoTool ? null : existingCard,
+      workdir: pathContext.workdir,
+      backend: pathContext.backend,
+      part: event.part,
+      mode: todoTool ? "always-send" : "edit-or-send",
+    });
     state.toolCards.set(event.part.callID, card);
     trackLiveToolState(state, event.part);
 
@@ -234,15 +224,10 @@ const handleToolCard = (
 
 const handleCompactionCard = (
   state: ProgressState,
-  message: Message,
+  channel: SendableChannels,
   event: Extract<RunProgressEvent, { type: "session-compacting" | "session-compacted" }>,
 ) =>
   Effect.gen(function* () {
-    if (!message.channel.isSendable()) {
-      throw new Error("Channel is not sendable for compaction card");
-    }
-    const channel = message.channel as SendableChannels;
-
     if (event.type === "session-compacting") {
       if (beginRunCompaction(state, event.part.id)) {
         return;
@@ -283,7 +268,7 @@ const handleCompactionCard = (
 
 const finalizeLiveCards = (
   state: ProgressState,
-  pathContext: { workdir: string; backend: ChannelSession["opencode"]["backend"] },
+  pathContext: { workdir: string; backend: ResolvedSandboxBackend },
   reason: RunFinalizationReason,
 ) =>
   Effect.gen(function* () {
@@ -296,15 +281,13 @@ const finalizeLiveCards = (
             return Effect.void;
           }
 
-          return Effect.promise(() =>
-            editToolCard({
-              card,
-              part,
-              workdir: pathContext.workdir,
-              backend: pathContext.backend,
-              interrupted: true,
-            }),
-          ).pipe(Effect.ignore);
+          return editToolCard({
+            card,
+            part,
+            workdir: pathContext.workdir,
+            backend: pathContext.backend,
+            interrupted: true,
+          }).pipe(Effect.ignore);
         },
         { concurrency: "unbounded", discard: true },
       );
@@ -325,16 +308,16 @@ const finalizeLiveCards = (
   });
 
 export const runProgressWorker = (
-  session: Pick<ChannelSession, "channelSettings" | "opencode">,
+  channel: SendableChannels,
+  channelSession: Pick<ChannelSession, "channelSettings" | "opencode" | "workdir">,
   message: Message,
-  workdir: string,
   queue: Queue.Queue<RunProgressEvent>,
 ): Effect.Effect<never, unknown> =>
   Effect.gen(function* () {
     const state = createProgressState();
     const pathContext = {
-      workdir,
-      backend: session.opencode.backend,
+      workdir: channelSession.workdir,
+      backend: channelSession.opencode.backend,
     } as const;
 
     while (true) {
@@ -342,7 +325,7 @@ export const runProgressWorker = (
 
       for (const event of batch) {
         if (event.type === "run-finalizing") {
-          progressUpdateForEvent(event, state, session);
+          progressUpdateForEvent(event, state, channelSession.channelSettings);
           if (event.reason) {
             yield* finalizeLiveCards(state, pathContext, event.reason);
           }
@@ -351,20 +334,20 @@ export const runProgressWorker = (
         }
 
         if (event.type === "tool-updated") {
-          yield* handleToolCard(state, message, pathContext, event);
+          yield* handleToolCard(state, channel, pathContext, event);
           continue;
         }
 
         if (event.type === "session-compacting" || event.type === "session-compacted") {
-          yield* handleCompactionCard(state, message, event);
+          yield* handleCompactionCard(state, channel, event);
           continue;
         }
 
-        const update = progressUpdateForEvent(event, state, session);
+        const update = progressUpdateForEvent(event, state, channelSession.channelSettings);
         if (!update) {
           continue;
         }
-        yield* Effect.promise(() => sendProgressUpdate({ message, text: update }));
+        yield* Effect.promise(() => sendProgressUpdate(message, update));
       }
     }
   });

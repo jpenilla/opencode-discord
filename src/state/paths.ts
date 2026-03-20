@@ -1,4 +1,4 @@
-import { join, resolve } from "node:path";
+import path from "node:path";
 
 export type StatePaths = {
   rootDir: string;
@@ -6,16 +6,29 @@ export type StatePaths = {
   sessionsRootDir: string;
 };
 
+export type SessionPaths = {
+  rootDir: string;
+  workdir: string;
+};
+
 export const resolveStatePaths = (stateDir: string): StatePaths => {
-  const rootDir = resolve(stateDir);
+  const rootDir = path.resolve(stateDir);
   return {
     rootDir,
-    dbPath: join(rootDir, "state.sqlite"),
-    sessionsRootDir: join(rootDir, "sessions"),
+    dbPath: path.join(rootDir, "state.sqlite"),
+    sessionsRootDir: path.join(rootDir, "sessions"),
   };
 };
 
 export const sessionRootDir = (sessionsRootDir: string, channelId: string) =>
-  join(sessionsRootDir, channelId);
+  path.join(sessionsRootDir, channelId);
 
-export const sessionWorkdirFromRoot = (rootDir: string) => join(rootDir, "home", "workspace");
+export const sessionWorkdirFromRoot = (rootDir: string) => path.join(rootDir, "home", "workspace");
+
+export const sessionPathsFromRoot = (rootDir: string): SessionPaths => ({
+  rootDir,
+  workdir: sessionWorkdirFromRoot(rootDir),
+});
+
+export const sessionPathsForChannel = (sessionsRootDir: string, channelId: string): SessionPaths =>
+  sessionPathsFromRoot(sessionRootDir(sessionsRootDir, channelId));

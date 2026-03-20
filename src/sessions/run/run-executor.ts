@@ -1,5 +1,5 @@
-import type { Message } from "discord.js";
-import { Deferred, Effect, Fiber, Queue, Ref } from "effect";
+import type { Message, SendableChannels } from "discord.js";
+import { Deferred, Effect, Fiber, FileSystem, Path, Queue, Ref } from "effect";
 
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
 import type { PendingPrompt } from "@/sessions/run/prompt-state.ts";
@@ -18,6 +18,8 @@ import {
 } from "@/sessions/session.ts";
 import type { TypingLoop } from "@/discord/messages.ts";
 import type { LoggerShape } from "@/util/logging.ts";
+import { ChannelSettings } from "@/state/channel-settings";
+import { ResolvedSandboxBackend } from "@/sandbox/common";
 
 type RunExecutorPromptInput = {
   channelId: string;
@@ -33,9 +35,9 @@ type RunExecutorPromptInput = {
 type RunExecutorDeps = {
   runPrompts: (input: RunExecutorPromptInput) => Effect.Effect<PromptResult, unknown>;
   runProgressWorker: (
-    session: ChannelSession,
+    channel: SendableChannels,
+    channelSession: Pick<ChannelSession, "channelSettings" | "opencode" | "workdir">,
     message: Message,
-    workdir: string,
     queue: Queue.Queue<RunProgressEvent>,
   ) => Effect.Effect<unknown, unknown>;
   startTyping: (message: Message) => TypingLoop;
@@ -47,7 +49,7 @@ type RunExecutorDeps = {
   ensureSessionHealthAfterFailure: (
     session: ChannelSession,
     responseMessage: Message,
-  ) => Effect.Effect<void, unknown>;
+  ) => Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path>;
   sendRunInterruptedInfo: (
     message: Message,
     source: RunInterruptSource,
@@ -70,7 +72,11 @@ const finishProgressWorker = (
     const progressFiberExit = yield* Effect.sync(() => progressFiber.pollUnsafe());
     if (progressFiberExit === undefined) {
       const finalizingAck = yield* Deferred.make<void>();
-      yield* Queue.offer(progressQueue, { type: "run-finalizing", ack: finalizingAck, reason });
+      yield* Queue.offer(progressQueue, {
+        type: "run-finalizing",
+        ack: finalizingAck,
+        reason,
+      });
       const finalizingResult = yield* Deferred.await(finalizingAck).pipe(
         Effect.timeoutOption("2 seconds"),
       );
@@ -95,15 +101,19 @@ export const executeRunBatch =
   (
     session: ChannelSession,
     initialRequests: NonEmptyRunRequestBatch,
-  ): Effect.Effect<void, unknown> =>
+  ): Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path> =>
     Effect.gen(function* () {
       const progressQueue = yield* Queue.unbounded<RunProgressEvent>();
       const promptState = yield* Ref.make<PendingPrompt | null>(null);
       const followUpQueue = yield* Queue.unbounded<RunRequest>();
       const acceptFollowUps = yield* Ref.make(true);
       const originMessage = initialRequests[0]!.message;
+      const originChannel = originMessage.channel;
+      if (!originChannel.isSendable()) {
+        return yield* Effect.fail("Channel is not sendable");
+      }
       const progressFiber = yield* deps
-        .runProgressWorker(session, originMessage, session.workdir, progressQueue)
+        .runProgressWorker(originChannel, session, originMessage, progressQueue)
         .pipe(Effect.forkChild({ startImmediately: true }));
       const finalizeProgress = (reason?: RunFinalizationReason) =>
         finishProgressWorker(deps, session, progressQueue, progressFiber, reason);

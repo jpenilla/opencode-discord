@@ -1,4 +1,4 @@
-import { BunRuntime } from "@effect/platform-bun";
+import { BunRuntime, BunServices } from "@effect/platform-bun";
 import { Deferred, Effect, Layer } from "effect";
 
 import { DiscordBotLayer } from "@/app.ts";
@@ -7,6 +7,7 @@ import { AppConfigLayer } from "@/config.ts";
 import { InfoCardsLayer } from "@/discord/info-cards.ts";
 import { OpencodeEventQueueLayer } from "@/opencode/events.ts";
 import { OpencodeServiceLayer } from "@/opencode/service.ts";
+import { SandboxBackendLayer } from "@/sandbox/backend.ts";
 import { SessionRuntimeLayer } from "@/sessions/session-runtime.ts";
 import { installShutdownSignalHandlers } from "@/shutdown/signals.ts";
 import { StatePersistenceLayer } from "@/state/persistence.ts";
@@ -14,41 +15,37 @@ import { ToolBridgeLayer } from "@/tools/bridge/server.ts";
 import { Logger, LoggerLayer } from "@/util/logging.ts";
 
 const baseLayer = Layer.mergeAll(AppConfigLayer, LoggerLayer, OpencodeEventQueueLayer);
-const uiLayer = InfoCardsLayer;
-
-const opencodeLayer = OpencodeServiceLayer.pipe(Layer.provide(baseLayer));
+const sandboxLayer = SandboxBackendLayer.pipe(Layer.provide(AppConfigLayer));
+const opencodeLayer = OpencodeServiceLayer.pipe(
+  Layer.provide(Layer.mergeAll(baseLayer, sandboxLayer)),
+);
 const statePersistenceLayer = StatePersistenceLayer.pipe(Layer.provide(AppConfigLayer));
-const sessionDependenciesLayer = Layer.mergeAll(
-  baseLayer,
-  uiLayer,
-  opencodeLayer,
-  statePersistenceLayer,
+const sessionRuntimeLayer = SessionRuntimeLayer.pipe(
+  Layer.provide(Layer.mergeAll(baseLayer, InfoCardsLayer, opencodeLayer, statePersistenceLayer)),
 );
-const sessionRuntimeLayer = SessionRuntimeLayer.pipe(Layer.provide(sessionDependenciesLayer));
-const channelDependenciesLayer = Layer.mergeAll(
-  baseLayer,
-  uiLayer,
-  opencodeLayer,
-  statePersistenceLayer,
-  sessionRuntimeLayer,
+const channelRuntimeLayer = ChannelRuntimeLayer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      baseLayer,
+      InfoCardsLayer,
+      opencodeLayer,
+      statePersistenceLayer,
+      sessionRuntimeLayer,
+    ),
+  ),
 );
-const channelRuntimeLayer = ChannelRuntimeLayer.pipe(Layer.provide(channelDependenciesLayer));
-const startupDependenciesLayer = Layer.mergeAll(baseLayer, channelRuntimeLayer);
-const toolBridgeLayer = ToolBridgeLayer.pipe(
-  Layer.provide(Layer.mergeAll(baseLayer, sessionRuntimeLayer)),
-);
-const discordBotLayer = DiscordBotLayer.pipe(Layer.provide(startupDependenciesLayer));
 
 const appLayer = Layer.mergeAll(
   baseLayer,
-  uiLayer,
+  sandboxLayer,
+  InfoCardsLayer,
   opencodeLayer,
   statePersistenceLayer,
   sessionRuntimeLayer,
   channelRuntimeLayer,
-  toolBridgeLayer,
-  discordBotLayer,
-);
+  ToolBridgeLayer.pipe(Layer.provide(Layer.mergeAll(baseLayer, sessionRuntimeLayer))),
+  DiscordBotLayer.pipe(Layer.provide(Layer.mergeAll(baseLayer, channelRuntimeLayer))),
+).pipe(Layer.provideMerge(BunServices.layer));
 
 const program = Effect.gen(function* () {
   const logger = yield* Logger;

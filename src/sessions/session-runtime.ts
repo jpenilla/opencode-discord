@@ -1,8 +1,5 @@
-import { mkdir, rm } from "node:fs/promises";
-import { resolve } from "node:path";
-
 import type { Interaction, Message, SendableChannels } from "discord.js";
-import { Effect, FiberSet, Layer, Queue, Ref, ServiceMap } from "effect";
+import { Effect, FiberSet, FileSystem, Layer, Path, Queue, Ref, ServiceMap } from "effect";
 
 import { AppConfig } from "@/config.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
@@ -48,8 +45,12 @@ import {
   type ChannelSettings,
   type PersistedChannelSettings,
 } from "@/state/channel-settings.ts";
-import { sessionRootDir, sessionWorkdirFromRoot } from "@/state/paths.ts";
-import { resolveStatePaths } from "@/state/paths.ts";
+import {
+  resolveStatePaths,
+  sessionPathsForChannel,
+  sessionPathsFromRoot,
+  type SessionPaths,
+} from "@/state/paths.ts";
 import {
   ChannelSettingsPersistence,
   SessionPersistence,
@@ -98,27 +99,35 @@ export type RunInterruptRequestResult =
 
 type SessionRuntimeShape = {
   readLoadedChannelActivity: (channelId: string) => Effect.Effect<ChannelActivity, unknown>;
-  readRestoredChannelActivity: (channelId: string) => Effect.Effect<ChannelActivity, unknown>;
+  readRestoredChannelActivity: (
+    channelId: string,
+  ) => Effect.Effect<ChannelActivity, unknown, FileSystem.FileSystem | Path.Path>;
   getActiveRunBySessionId: (sessionId: string) => Effect.Effect<ActiveRun | null, unknown>;
   queueMessageRunRequest: (
     message: Message,
     request: RunRequest,
     reason: string,
-  ) => Effect.Effect<QueuedMessageRunRequest, unknown>;
+  ) => Effect.Effect<QueuedMessageRunRequest, unknown, FileSystem.FileSystem | Path.Path>;
   routeQuestionInteraction: (interaction: Interaction) => Effect.Effect<void, unknown>;
   invalidate: (channelId: string, reason: string) => Effect.Effect<boolean, unknown>;
   updateLoadedChannelSettings: (
     channelId: string,
     settings: ChannelSettings,
   ) => Effect.Effect<void>;
-  requestRunInterrupt: (channelId: string) => Effect.Effect<RunInterruptRequestResult, unknown>;
+  requestRunInterrupt: (
+    channelId: string,
+  ) => Effect.Effect<RunInterruptRequestResult, unknown, FileSystem.FileSystem | Path.Path>;
   startCompaction: (
     channelId: string,
     channel: SendableChannels,
-  ) => Effect.Effect<IdleCompactionWorkflowStartResult, unknown>;
+  ) => Effect.Effect<IdleCompactionWorkflowStartResult, unknown, FileSystem.FileSystem | Path.Path>;
   requestCompactionInterrupt: (
     channelId: string,
-  ) => Effect.Effect<IdleCompactionWorkflowInterruptResult, unknown>;
+  ) => Effect.Effect<
+    IdleCompactionWorkflowInterruptResult,
+    unknown,
+    FileSystem.FileSystem | Path.Path
+  >;
   shutdown: () => Effect.Effect<void, unknown>;
 };
 
@@ -149,16 +158,8 @@ export class SessionRunAccess extends ServiceMap.Service<SessionRunAccess, Sessi
 
 type SessionLifecycleDeps = {
   stateRef: Ref.Ref<SessionRegistryState>;
-  createOpencodeSession: (
-    workdir: string,
-    title: string,
-    systemPromptAppend?: string,
-  ) => Effect.Effect<SessionHandle, unknown>;
-  attachOpencodeSession: (
-    workdir: string,
-    sessionId: string,
-    systemPromptAppend?: string,
-  ) => Effect.Effect<SessionHandle, unknown>;
+  createOpencodeSession: OpencodeServiceShape["createSession"];
+  attachOpencodeSession: OpencodeServiceShape["attachSession"];
   getPersistedSession: (
     channelId: string,
   ) => Effect.Effect<PersistedChannelSession | null, unknown>;
@@ -172,43 +173,21 @@ type SessionLifecycleDeps = {
   ) => Effect.Effect<void, unknown>;
   deletePersistedSession: (channelId: string) => Effect.Effect<void, unknown>;
   isSessionHealthy: OpencodeServiceShape["isHealthy"];
-  startWorker: (session: ChannelSession) => Effect.Effect<void, unknown>;
+  startWorker: (
+    session: ChannelSession,
+  ) => Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path>;
   logger: LoggerShape;
   sessionInstructions: string;
   triggerPhrase: string;
   channelSettingsDefaults: ChannelSettings;
   idleTimeoutMs?: number;
-  sessionsRootDir: string;
+  createSessionPaths: (channelId: string) => Effect.Effect<SessionPaths, unknown>;
   isSessionBusy?: (session: ChannelSession) => Effect.Effect<boolean, unknown>;
-  createSessionPaths?: (channelId: string) => Effect.Effect<SessionPaths, unknown>;
-  deleteSessionRoot?: (rootDir: string) => Effect.Effect<void, unknown>;
+  deleteSessionRoot: (rootDir: string) => Effect.Effect<void, unknown>;
 };
-
-type SessionPaths = {
-  rootDir: string;
-  workdir: string;
-};
-
-const defaultCreateSessionPaths = (sessionsRootDir: string, channelId: string) =>
-  Effect.promise(async () => {
-    const rootDir = sessionRootDir(sessionsRootDir, channelId);
-    const workdir = sessionWorkdirFromRoot(rootDir);
-    await mkdir(workdir, { recursive: true });
-    return {
-      rootDir,
-      workdir,
-    };
-  });
-
-const defaultDeleteSessionRoot = (rootDir: string) =>
-  Effect.promise(() => rm(resolve(rootDir), { recursive: true, force: true })).pipe(Effect.ignore);
 
 export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
   const sessionGate = createKeyedSingleflight<string>();
-  const createSessionPaths =
-    deps.createSessionPaths ??
-    ((channelId: string) => defaultCreateSessionPaths(deps.sessionsRootDir, channelId));
-  const deleteSessionRoot = deps.deleteSessionRoot ?? defaultDeleteSessionRoot;
   const loadChannelSettings = (channelId: string) =>
     deps
       .getPersistedChannelSettings(channelId)
@@ -330,10 +309,10 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     );
   };
 
-  const withSessionGate = <A>(
+  const withSessionGate = <A, R>(
     channelId: string,
-    task: Effect.Effect<A, unknown>,
-  ): Effect.Effect<A, unknown> => sessionGate.waitAndRetry(channelId, task);
+    task: Effect.Effect<A, unknown, R>,
+  ): Effect.Effect<A, unknown, R> => sessionGate.waitAndRetry(channelId, task);
 
   const touchSessionActivity = (session: ChannelSession, at = Date.now()) =>
     Effect.gen(function* () {
@@ -356,7 +335,7 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     options?: {
       removePersistedOnFailure?: boolean;
     },
-  ): Effect.Effect<ChannelSession, unknown> =>
+  ): Effect.Effect<ChannelSession, unknown, FileSystem.FileSystem | Path.Path> =>
     Effect.gen(function* () {
       yield* deps.upsertPersistedSession(toPersistedSession(session));
       yield* putSession(session);
@@ -416,7 +395,7 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     logReason?: string;
     removePersistedOnActivationFailure?: boolean;
     deleteNewRootOnFailure?: boolean;
-  }): Effect.Effect<ChannelSession, unknown> =>
+  }): Effect.Effect<ChannelSession, unknown, FileSystem.FileSystem | Path.Path> =>
     Effect.gen(function* () {
       const sessionCreateSpec = buildSessionCreateSpec({
         channelId: input.channelId,
@@ -457,41 +436,45 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     }).pipe(
       Effect.onError(() =>
         input.deleteNewRootOnFailure
-          ? deleteSessionRoot(input.rootDir).pipe(Effect.ignore)
+          ? deps.deleteSessionRoot(input.rootDir).pipe(Effect.ignore)
           : Effect.void,
       ),
     );
 
-  const createSession = (message: Message): Effect.Effect<ChannelSession, unknown> =>
+  const createSession = (
+    message: Message,
+  ): Effect.Effect<ChannelSession, unknown, FileSystem.FileSystem | Path.Path> =>
     Effect.gen(function* () {
-      const systemPromptAppend = buildSessionSystemAppend({
-        message,
-        additionalInstructions: deps.sessionInstructions,
-      });
-      const { rootDir, workdir } = yield* createSessionPaths(message.channelId);
-      const channelSettings = yield* loadChannelSettings(message.channelId);
-      const now = Date.now();
+      const { rootDir, workdir } = yield* deps.createSessionPaths(message.channelId);
+      return yield* Effect.gen(function* () {
+        const systemPromptAppend = buildSessionSystemAppend({
+          message,
+          additionalInstructions: deps.sessionInstructions,
+        });
+        const channelSettings = yield* loadChannelSettings(message.channelId);
+        const now = Date.now();
 
-      return yield* createSessionAt({
-        channelId: message.channelId,
-        rootDir,
-        systemPromptAppend,
-        workdir,
-        channelSettings,
-        createdAt: now,
-        lastActivityAt: now,
-        removePersistedOnActivationFailure: true,
-        deleteNewRootOnFailure: true,
-      });
+        return yield* createSessionAt({
+          channelId: message.channelId,
+          rootDir,
+          systemPromptAppend,
+          workdir,
+          channelSettings,
+          createdAt: now,
+          lastActivityAt: now,
+          removePersistedOnActivationFailure: true,
+          deleteNewRootOnFailure: false,
+        });
+      }).pipe(Effect.onError(() => deps.deleteSessionRoot(rootDir).pipe(Effect.ignore)));
     });
 
   const attachPersistedSession = (
     channelId: string,
     persisted: PersistedChannelSession,
     lastActivityAt = Date.now(),
-  ): Effect.Effect<ChannelSession, unknown> =>
+  ): Effect.Effect<ChannelSession, unknown, FileSystem.FileSystem | Path.Path> =>
     Effect.gen(function* () {
-      const workdir = sessionWorkdirFromRoot(persisted.rootDir);
+      const { workdir } = sessionPathsFromRoot(persisted.rootDir);
       const channelSettings = yield* loadChannelSettings(channelId);
 
       const opencodeSession = yield* deps.attachOpencodeSession(
@@ -519,10 +502,10 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
       return session;
     });
 
-  const withExistingOrGatedSession = <A>(
+  const withExistingOrGatedSession = <A, R>(
     channelId: string,
-    onMissing: () => Effect.Effect<A, unknown>,
-  ): Effect.Effect<ChannelSession | A, unknown> =>
+    onMissing: () => Effect.Effect<A, unknown, R>,
+  ): Effect.Effect<ChannelSession | A, unknown, R> =>
     Effect.gen(function* () {
       const existing = yield* getSession(channelId);
       if (existing) {
@@ -547,7 +530,9 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
   const unloadSession = (session: ChannelSession) =>
     deleteSession(session).pipe(Effect.andThen(closeSessionResources(session)));
 
-  const restoreOrCreateSession = (message: Message): Effect.Effect<ChannelSession, unknown> =>
+  const restoreOrCreateSession = (
+    message: Message,
+  ): Effect.Effect<ChannelSession, unknown, FileSystem.FileSystem | Path.Path> =>
     Effect.gen(function* () {
       const persisted = yield* deps.getPersistedSession(message.channelId);
       if (!persisted) {
@@ -573,7 +558,7 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
       return yield* createSessionAt({
         channelId: message.channelId,
         rootDir: persisted.rootDir,
-        workdir: sessionWorkdirFromRoot(persisted.rootDir),
+        workdir: sessionPathsFromRoot(persisted.rootDir).workdir,
         systemPromptAppend: persisted.systemPromptAppend,
         channelSettings: yield* loadChannelSettings(message.channelId),
         createdAt: persisted.createdAt,
@@ -584,12 +569,16 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
       });
     });
 
-  const createOrGetSession = (message: Message): Effect.Effect<ChannelSession, unknown> =>
+  const createOrGetSession = (
+    message: Message,
+  ): Effect.Effect<ChannelSession, unknown, FileSystem.FileSystem | Path.Path> =>
     withExistingOrGatedSession(message.channelId, () => restoreOrCreateSession(message)).pipe(
       Effect.map((session) => session as ChannelSession),
     );
 
-  const getOrRestoreSession = (channelId: string): Effect.Effect<ChannelSession | null, unknown> =>
+  const getOrRestoreSession = (
+    channelId: string,
+  ): Effect.Effect<ChannelSession | null, unknown, FileSystem.FileSystem | Path.Path> =>
     withExistingOrGatedSession(channelId, () =>
       deps
         .getPersistedSession(channelId)
@@ -604,7 +593,7 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     session: ChannelSession,
     message: Message,
     reason: string,
-  ): Effect.Effect<ChannelSession, unknown> =>
+  ): Effect.Effect<ChannelSession, unknown, FileSystem.FileSystem | Path.Path> =>
     withSessionGate(
       message.channelId,
       Effect.gen(function* () {
@@ -648,7 +637,7 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     message: Message,
     reason: string,
     allowBusySession = true,
-  ): Effect.Effect<ChannelSession, unknown> =>
+  ): Effect.Effect<ChannelSession, unknown, FileSystem.FileSystem | Path.Path> =>
     Effect.gen(function* () {
       if (allowBusySession && session.activeRun) {
         return session;
@@ -722,7 +711,7 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
           yield* deps.logger.info("invalidated persisted channel session", {
             channelId,
             sessionId: persisted.opencodeSessionId,
-            workdir: sessionWorkdirFromRoot(persisted.rootDir),
+            workdir: sessionPathsFromRoot(persisted.rootDir).workdir,
             reason,
           });
         }
@@ -765,6 +754,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
   Effect.gen(function* () {
     const logger = yield* Logger;
     const config = yield* AppConfig;
+    const fs = yield* FileSystem.FileSystem;
     const infoCards = yield* InfoCards;
     const opencode = yield* OpencodeService;
     const eventQueue = yield* OpencodeEventQueue;
@@ -825,7 +815,15 @@ export const SessionRuntimeLayer = Layer.unwrap(
       triggerPhrase: config.triggerPhrase,
       channelSettingsDefaults,
       idleTimeoutMs: config.sessionIdleTimeoutMs,
-      sessionsRootDir: statePaths.sessionsRootDir,
+      createSessionPaths: (channelId) =>
+        Effect.gen(function* () {
+          const sessionPaths = sessionPathsForChannel(statePaths.sessionsRootDir, channelId);
+          const { workdir } = sessionPaths;
+          yield* fs.makeDirectory(workdir, { recursive: true });
+          return sessionPaths;
+        }),
+      deleteSessionRoot: (rootDir) =>
+        fs.remove(rootDir, { recursive: true, force: true }).pipe(Effect.ignore),
       isSessionBusy,
     });
     const {
@@ -1019,7 +1017,9 @@ export const SessionRuntimeLayer = Layer.unwrap(
     const drainQueuedRunRequestsForShutdown = (session: ChannelSession) =>
       Queue.clear(session.queue).pipe(Effect.asVoid);
 
-    const worker = (session: ChannelSession): Effect.Effect<never> =>
+    const worker = (
+      session: ChannelSession,
+    ): Effect.Effect<never, never, FileSystem.FileSystem | Path.Path> =>
       Effect.forever(
         takeQueuedRunBatch(session.queue).pipe(
           Effect.flatMap((requests) =>
@@ -1083,9 +1083,9 @@ export const SessionRuntimeLayer = Layer.unwrap(
         ),
       );
 
-    const readChannelActivity = (
-      sessionEffect: Effect.Effect<ChannelSession | null | undefined, unknown>,
-    ): Effect.Effect<ChannelActivity, unknown> =>
+    const readChannelActivity = <R>(
+      sessionEffect: Effect.Effect<ChannelSession | null | undefined, unknown, R>,
+    ): Effect.Effect<ChannelActivity, unknown, R> =>
       sessionEffect.pipe(
         Effect.flatMap((session) =>
           !session

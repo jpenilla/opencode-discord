@@ -1,7 +1,5 @@
-import { mkdir } from "node:fs/promises";
-
 import { Database } from "bun:sqlite";
-import { Effect, Layer, ServiceMap } from "effect";
+import { Effect, FileSystem, Layer, ServiceMap } from "effect";
 
 import { AppConfig } from "@/config.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
@@ -109,10 +107,11 @@ const StateStoreLayer = Layer.effect(
   StateStore,
   Effect.gen(function* () {
     const config = yield* AppConfig;
+    const fs = yield* FileSystem.FileSystem;
     const statePaths = resolveStatePaths(config.stateDir);
 
-    yield* Effect.promise(() => mkdir(statePaths.rootDir, { recursive: true }));
-    yield* Effect.promise(() => mkdir(statePaths.sessionsRootDir, { recursive: true }));
+    yield* fs.makeDirectory(statePaths.rootDir, { recursive: true });
+    yield* fs.makeDirectory(statePaths.sessionsRootDir, { recursive: true });
 
     const db = yield* Effect.acquireRelease(
       Effect.sync(() => {

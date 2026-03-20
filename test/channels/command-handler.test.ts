@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { BunServices } from "@effect/platform-bun";
 import {
   ChannelType,
   type ChatInputCommandInteraction,
@@ -41,6 +42,9 @@ import { Logger, type LoggerShape } from "@/util/logging.ts";
 import { getRef } from "../support/fixtures.ts";
 import { failTest } from "../support/errors.ts";
 import { unsafeStub } from "../support/stub.ts";
+
+const runEffect = <A, E = never, R = never>(effect: Effect.Effect<A, E, R>): Promise<A> =>
+  Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer)) as Effect.Effect<A, E, never>);
 
 const makeConfig = (defaults: {
   showThinking: boolean;
@@ -96,40 +100,34 @@ const makeCommandsLayer = (deps: {
   );
 
 const makeHarness = async (options?: HarnessOptions) => {
-  const replies = await Effect.runPromise(Ref.make<string[]>([]));
-  const defers = await Effect.runPromise(Ref.make(0));
-  const edits = await Effect.runPromise(Ref.make<string[]>([]));
-  const compactionUpdates = await Effect.runPromise(
-    Ref.make<Array<{ title: string; body: string }>>([]),
-  );
-  const upsertedInfoCards = await Effect.runPromise(
-    Ref.make<Array<{ title: string; body: string }>>([]),
-  );
-  const typingStopCount = await Effect.runPromise(Ref.make(0));
-  const idleCardRef = await Effect.runPromise(Ref.make<Message | null>(null));
-  const idleCompactionActive = await Effect.runPromise(
-    Ref.make(options?.hasIdleCompaction ?? false),
-  );
-  const idleInterruptRequested = await Effect.runPromise(Ref.make(false));
-  const persistedSettings = await Effect.runPromise(
+  const replies = await runEffect(Ref.make<string[]>([]));
+  const defers = await runEffect(Ref.make(0));
+  const edits = await runEffect(Ref.make<string[]>([]));
+  const compactionUpdates = await runEffect(Ref.make<Array<{ title: string; body: string }>>([]));
+  const upsertedInfoCards = await runEffect(Ref.make<Array<{ title: string; body: string }>>([]));
+  const typingStopCount = await runEffect(Ref.make(0));
+  const idleCardRef = await runEffect(Ref.make<Message | null>(null));
+  const idleCompactionActive = await runEffect(Ref.make(options?.hasIdleCompaction ?? false));
+  const idleInterruptRequested = await runEffect(Ref.make(false));
+  const persistedSettings = await runEffect(
     Ref.make<Map<string, PersistedChannelSettings>>(new Map()),
   );
-  const invalidatedSessions = await Effect.runPromise(
+  const invalidatedSessions = await runEffect(
     Ref.make<Array<{ channelId: string; reason: string }>>([]),
   );
-  const warnings = await Effect.runPromise(Ref.make<string[]>([]));
-  const compactStarted = await Effect.runPromise(Deferred.make<void, never>());
-  const compactFinish = await Effect.runPromise(Deferred.make<void, never>());
-  const compactUpdated = await Effect.runPromise(Deferred.make<void, never>());
-  const pendingQuestionCheckCount = await Effect.runPromise(Ref.make(0));
-  const promptState = await Effect.runPromise(createPromptState());
+  const warnings = await runEffect(Ref.make<string[]>([]));
+  const compactStarted = await runEffect(Deferred.make<void, never>());
+  const compactFinish = await runEffect(Deferred.make<void, never>());
+  const compactUpdated = await runEffect(Deferred.make<void, never>());
+  const pendingQuestionCheckCount = await runEffect(Ref.make(0));
+  const promptState = await runEffect(createPromptState());
   const channelSettingsDefaults = {
     showThinking: true,
     showCompactionSummaries: true,
   } as const;
 
   if (options?.initialChannelSettings) {
-    await Effect.runPromise(
+    await runEffect(
       Ref.set(
         persistedSettings,
         new Map([[options.initialChannelSettings.channelId, options.initialChannelSettings]]),
@@ -137,9 +135,9 @@ const makeHarness = async (options?: HarnessOptions) => {
     );
   }
 
-  const sessionQueue = await Effect.runPromise(Queue.unbounded<RunRequest>());
+  const sessionQueue = await runEffect(Queue.unbounded<RunRequest>());
   if (options?.hasQueuedWork) {
-    await Effect.runPromise(Queue.offer(sessionQueue, {} as RunRequest));
+    await runEffect(Queue.offer(sessionQueue, {} as RunRequest));
   }
 
   const activeRun: ActiveRun = {
@@ -164,7 +162,7 @@ const makeHarness = async (options?: HarnessOptions) => {
     typing: {
       pause: async () => {},
       resume: () => {},
-      stop: () => Effect.runPromise(Ref.update(typingStopCount, (count) => count + 1)),
+      stop: () => runEffect(Ref.update(typingStopCount, (count) => count + 1)),
     },
     finalizeProgress: () => Effect.void,
     questionOutcome: noQuestionOutcome(),
@@ -199,9 +197,7 @@ const makeHarness = async (options?: HarnessOptions) => {
     activeRun: (options?.hasActiveRun ?? false) ? activeRun : null,
   };
 
-  const sessionRef = await Effect.runPromise(
-    Ref.make((options?.hasSession ?? true) ? session : null),
-  );
+  const sessionRef = await runEffect(Ref.make((options?.hasSession ?? true) ? session : null));
 
   const infoCards: InfoCardsShape = {
     send: () => Effect.succeed(unsafeStub<Message>({ id: "info-cards-send" })),
@@ -273,7 +269,7 @@ const makeHarness = async (options?: HarnessOptions) => {
         yield* Deferred.succeed(compactStarted, undefined);
 
         yield* Effect.sync(() => {
-          void Effect.runPromise(
+          void runEffect(
             Deferred.await(compactFinish).pipe(
               Effect.flatMap(() =>
                 Ref.update(compactionUpdates, (current) => [
@@ -502,14 +498,14 @@ const makeHarness = async (options?: HarnessOptions) => {
     isChatInputCommand: () => true,
     reply: ({ content }: { content?: string }) => {
       interaction.replied = true;
-      return Effect.runPromise(Ref.update(replies, (current) => [...current, content ?? ""]));
+      return runEffect(Ref.update(replies, (current) => [...current, content ?? ""]));
     },
     deferReply: () => {
       interaction.deferred = true;
-      return Effect.runPromise(Ref.update(defers, (count) => count + 1));
+      return runEffect(Ref.update(defers, (count) => count + 1));
     },
     editReply: ({ content }: { content?: string }) =>
-      Effect.runPromise(Ref.update(edits, (current) => [...current, content ?? ""])),
+      runEffect(Ref.update(edits, (current) => [...current, content ?? ""])),
   });
 
   return {
@@ -540,7 +536,7 @@ const runInteraction = async (
   commandName: string,
 ) => {
   harness.interaction.commandName = commandName;
-  await Effect.runPromise(harness.runtime.handleInteraction(harness.interaction));
+  await runEffect(harness.runtime.handleInteraction(harness.interaction));
   return harness;
 };
 
@@ -557,7 +553,7 @@ describe("createCommandHandler", () => {
 
   test("starts compaction, posts the idle card, and clears it after completion", async () => {
     const harness = await runInteraction(await makeHarness(), "compact");
-    await Effect.runPromise(Deferred.await(harness.compactStarted));
+    await runEffect(Deferred.await(harness.compactStarted));
     expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.upsertedInfoCards)).toEqual([
       {
@@ -571,8 +567,8 @@ describe("createCommandHandler", () => {
       "Started session compaction. I'll post updates in this channel.",
     ]);
 
-    await Effect.runPromise(Deferred.succeed(harness.compactFinish, undefined));
-    await Effect.runPromise(Deferred.await(harness.compactUpdated));
+    await runEffect(Deferred.succeed(harness.compactFinish, undefined));
+    await runEffect(Deferred.await(harness.compactUpdated));
 
     expect(await getRef(harness.compactionUpdates)).toContainEqual({
       title: "🗜️ Session compacted",
@@ -615,10 +611,8 @@ describe("createCommandHandler", () => {
     const harness = await makeHarness({
       interruptResult: "failure",
     });
-    await Effect.runPromise(
-      Ref.set(harness.idleCardRef, unsafeStub<Message>({ id: "compaction-card" })),
-    );
-    await Effect.runPromise(Ref.set(harness.idleCompactionActive, true));
+    await runEffect(Ref.set(harness.idleCardRef, unsafeStub<Message>({ id: "compaction-card" })));
+    await runEffect(Ref.set(harness.idleCompactionActive, true));
 
     await runInteraction(harness, "interrupt");
     expect(await getRef(harness.idleInterruptRequested)).toBe(false);
@@ -682,9 +676,9 @@ describe("createCommandHandler", () => {
     });
 
     harness.interaction.commandName = "new-session";
-    await expect(
-      Effect.runPromise(harness.runtime.handleInteraction(harness.interaction)),
-    ).rejects.toThrow("invalidate failed");
+    await expect(runEffect(harness.runtime.handleInteraction(harness.interaction))).rejects.toThrow(
+      "invalidate failed",
+    );
 
     expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.replies)).toEqual([]);

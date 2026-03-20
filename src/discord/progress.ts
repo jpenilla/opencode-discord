@@ -1,10 +1,4 @@
-import type { PatchPart } from "@opencode-ai/sdk/v2";
 import type { SessionStatus } from "@opencode-ai/sdk/v2";
-
-export const formatPatchUpdated = (part: PatchPart) =>
-  part.files.length === 0
-    ? "## 🧩 Patch updated"
-    : `## 🧩 Patch updated\n- Files touched: ${part.files.length}`;
 
 export const formatSessionStatus = (status: SessionStatus) => {
   switch (status.type) {

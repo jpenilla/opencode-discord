@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Effect, FileSystem, Path } from "effect";
 
 import { AppConfig } from "@/config.ts";
 import { CommandContext } from "@/discord/command-context.ts";
@@ -17,7 +17,11 @@ export type GuildCommandDependencies =
 export type GuildCommand = {
   name: string;
   description: string;
-  execute: Effect.Effect<void, unknown, CommandContext | GuildCommandDependencies>;
+  execute: Effect.Effect<
+    void,
+    unknown,
+    CommandContext | GuildCommandDependencies | FileSystem.FileSystem | Path.Path
+  >;
 };
 
 type GuildCommandDefinitionInput<TName extends string, TDescription extends string> = {

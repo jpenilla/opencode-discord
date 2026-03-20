@@ -2,7 +2,6 @@ import type { Message, SendableChannels } from "discord.js";
 import type {
   CompactionPart,
   EventSessionCompacted,
-  PatchPart,
   SessionStatus,
   ToolPart,
 } from "@opencode-ai/sdk/v2";
@@ -72,7 +71,6 @@ export const currentPromptReplyTargetMessage = (
 
 export type RunProgressEvent =
   | { type: "run-finalizing"; ack: Deferred<void>; reason?: RunFinalizationReason }
-  | { type: "patch-updated"; part: PatchPart }
   | { type: "reasoning-completed"; partId: string; text: string }
   | { type: "session-compacting"; part: CompactionPart }
   | { type: "session-compacted"; compacted: EventSessionCompacted["properties"] }

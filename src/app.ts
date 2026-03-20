@@ -7,7 +7,8 @@ import {
   MessageFlags,
   type Guild,
 } from "discord.js";
-import { Effect, Layer, Redacted } from "effect";
+import { BunServices } from "@effect/platform-bun";
+import { Effect, Layer, Redacted, Path, FileSystem } from "effect";
 
 import { AppConfig } from "@/config.ts";
 import { ChannelRuntime } from "@/channels/channel-runtime.ts";
@@ -28,6 +29,9 @@ export const DiscordBotLayer = Layer.effectDiscard(
     const config = yield* AppConfig;
     const logger = yield* Logger;
     const channels = yield* ChannelRuntime;
+    const runForkWithServices = <E>(
+      effect: Effect.Effect<void, E, Path.Path | FileSystem.FileSystem>,
+    ) => Effect.runFork(effect.pipe(Effect.provide(BunServices.layer)));
 
     const client = new Client({
       intents: [
@@ -80,7 +84,7 @@ export const DiscordBotLayer = Layer.effectDiscard(
     });
 
     client.on(Events.MessageCreate, (message) => {
-      Effect.runFork(
+      runForkWithServices(
         Effect.gen(function* () {
           if (!message.inGuild()) {
             return;
@@ -130,7 +134,7 @@ export const DiscordBotLayer = Layer.effectDiscard(
     });
 
     client.on(Events.InteractionCreate, (interaction) => {
-      Effect.runFork(
+      runForkWithServices(
         channels.handleInteraction(interaction).pipe(
           Effect.catch((error) => {
             const formattedError = formatError(error);

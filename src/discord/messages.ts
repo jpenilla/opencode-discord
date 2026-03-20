@@ -157,18 +157,18 @@ export const sendFinalResponse = async (input: { message: Message; text: string 
   });
 };
 
-export const sendProgressUpdate = async (input: { message: Message; text: string }) => {
-  if (!input.message.channel.isSendable()) {
+export const sendProgressUpdate = async (message: Message, text: string) => {
+  if (!message.channel.isSendable()) {
     return;
   }
 
-  const chunks = splitOutgoingText(input.message, input.text, { trim: true });
+  const chunks = splitOutgoingText(message, text, { trim: true });
   if (chunks.length === 0) {
     return;
   }
 
   await sendChunks(chunks, async (chunk) => {
-    await (input.message.channel as SendableChannels).send({
+    await (message.channel as SendableChannels).send({
       content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
       allowedMentions: { parse: ["users", "roles", "everyone"] },
       flags: MessageFlags.SuppressNotifications,

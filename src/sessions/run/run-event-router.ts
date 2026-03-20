@@ -59,14 +59,6 @@ const toProgressEvent = (event: Event): RunProgressEvent | null => {
     };
   }
 
-  const patchPart = getUpdatedPartByType(event, "patch");
-  if (patchPart) {
-    return {
-      type: "patch-updated",
-      part: patchPart,
-    };
-  }
-
   const sessionStatus = getEventByType(event, "session.status")?.properties;
   if (sessionStatus) {
     return {

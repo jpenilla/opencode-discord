@@ -1,15 +1,18 @@
 import type { ToolPart } from "@opencode-ai/sdk/v2";
 
-import type { ResolvedSandboxBackend } from "@/sandbox/backend.ts";
-
-export type ToolCardPathContext = {
-  workdir: string;
-  backend: ResolvedSandboxBackend;
-};
-
 export type MetaField = {
   label: string;
   value: string;
+};
+
+export type ToolCardPathDisplay = {
+  displayPath: (path: string) => string;
+  formatPathSummaryLine: (path: string) => string;
+  extractPatchFiles: (value: string) => {
+    add: string[];
+    modify: string[];
+    remove: string[];
+  };
 };
 
 export type ToolCardLine =
@@ -38,8 +41,8 @@ export type ToolCardLine =
 
 export type FormatterInput = {
   part: ToolPart;
-  pathContext: ToolCardPathContext;
   input: Record<string, unknown>;
+  pathDisplay: ToolCardPathDisplay;
 };
 
 export type ToolInputFormatter = (input: FormatterInput) => ToolCardLine[];

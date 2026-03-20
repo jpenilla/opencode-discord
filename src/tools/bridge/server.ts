@@ -1,8 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdir, rm } from "node:fs/promises";
-import { dirname } from "node:path";
-
-import { Cause, Effect, Layer, Redacted } from "effect";
+import { Cause, Effect, FileSystem, Layer, Path, Redacted } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
 import { SessionRunAccess, type SessionRunAccessShape } from "@/sessions/session-runtime.ts";
@@ -138,11 +135,13 @@ const closeServer = (server: ReturnType<typeof createServer>) =>
 export const ToolBridgeLayer = Layer.effectDiscard(
   Effect.gen(function* () {
     const config = yield* AppConfig;
+    const fs = yield* FileSystem.FileSystem;
     const logger = yield* Logger;
+    const path = yield* Path.Path;
     const sessions = yield* SessionRunAccess;
 
-    yield* Effect.promise(() => mkdir(dirname(config.toolBridgeSocketPath), { recursive: true }));
-    yield* Effect.promise(() => rm(config.toolBridgeSocketPath, { force: true }));
+    yield* fs.makeDirectory(path.dirname(config.toolBridgeSocketPath), { recursive: true });
+    yield* fs.remove(config.toolBridgeSocketPath, { force: true });
 
     yield* Effect.acquireRelease(
       Effect.sync(() =>
@@ -164,9 +163,7 @@ export const ToolBridgeLayer = Layer.effectDiscard(
         Effect.all(
           [
             closeServer(server).pipe(Effect.ignore),
-            Effect.promise(() => rm(config.toolBridgeSocketPath, { force: true })).pipe(
-              Effect.ignore,
-            ),
+            fs.remove(config.toolBridgeSocketPath, { force: true }).pipe(Effect.ignore),
           ],
           { discard: true },
         ),

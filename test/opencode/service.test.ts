@@ -1,11 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import type { GlobalEvent, PermissionRequest } from "@opencode-ai/sdk/v2";
+import { BunServices } from "@effect/platform-bun";
 import { Deferred, Effect, Fiber, Queue, Redacted } from "effect";
 
-import type { AppConfigShape } from "@/config.ts";
+import { AppConfig, type AppConfigShape } from "@/config.ts";
+import { OpencodeEventQueue } from "@/opencode/events.ts";
 import { summarizeOpencodeEventForLog, summarizePermissionForLog } from "@/opencode/log-summary.ts";
-import { makeOpencodeService, type SessionHandle } from "@/opencode/service.ts";
-import type { LoggerShape } from "@/util/logging.ts";
+import {
+  OpencodeClientFactory,
+  makeOpencodeService,
+  type SessionHandle,
+} from "@/opencode/service.ts";
+import { SandboxBackend } from "@/sandbox/common.ts";
+import { Logger, type LoggerShape } from "@/util/logging.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const makeConfig = (): AppConfigShape => ({
@@ -33,6 +40,9 @@ const logger: LoggerShape = {
   warn: () => Effect.void,
   error: () => Effect.void,
 };
+
+const runEffect = <A, E = never, R = never>(effect: Effect.Effect<A, E, R>): Promise<A> =>
+  Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer)) as Effect.Effect<A, E, never>);
 
 const ok = <A>(data: A) => ({ data });
 const emptyEventStream = () => ({
@@ -76,45 +86,62 @@ const makeClient = (overrides: TestClientOverrides = {}) =>
     }),
   });
 
-const makeRuntime = (
-  input: {
-    createClient?: () => SessionHandle["client"];
-    launchServer?: () => Promise<{ url: string; backend: "unsafe-dev"; close: () => void }>;
-  } = {},
-) => ({
-  createClient: input.createClient ?? (() => makeClient()),
-  launchServer:
-    input.launchServer ??
-    (async () => ({
-      url: "http://opencode.invalid",
-      backend: "unsafe-dev" as const,
-      close: () => {},
-    })),
-  probeExecutables: () => ({
-    backend: "unsafe-dev" as const,
-    opencodeBin: "opencode",
-    bwrapBin: "bwrap",
-  }),
-  stageConfigDir: async () => ({
-    configDir: "/tmp/opencode-config",
-    cleanup: async () => {},
-  }),
-});
+const makeSandbox =
+  (
+    input: {
+      launchServer?: (workdir: string) => Promise<{
+        url: string;
+        backend: "unsafe-dev";
+        directory?: string;
+        close: () => void;
+      }>;
+    } = {},
+  ) =>
+  ({ workdir }: { workdir: string }) =>
+    Effect.acquireRelease(
+      Effect.promise(() =>
+        (
+          input.launchServer ??
+          (async () => ({
+            url: "http://opencode.invalid",
+            backend: "unsafe-dev" as const,
+            directory: workdir,
+            close: () => {},
+          }))
+        )(workdir),
+      ),
+      (server) =>
+        Effect.sync(() => {
+          server.close();
+        }),
+    ).pipe(
+      Effect.map((server) => ({
+        backend: server.backend,
+        url: server.url,
+        directory: server.directory ?? workdir,
+      })),
+    );
 
 const makeService = (input: {
   logger?: LoggerShape;
   eventQueue?: Queue.Queue<GlobalEvent>;
-  runtime?: Parameters<typeof makeRuntime>[0];
+  createClient?: () => SessionHandle["client"];
+  sandbox?: Parameters<typeof makeSandbox>[0];
 }) =>
   Effect.flatMap(
     input.eventQueue ? Effect.succeed(input.eventQueue) : Queue.unbounded<GlobalEvent>(),
     (eventQueue) =>
-      makeOpencodeService({
-        config: makeConfig(),
-        eventQueue,
-        logger: input.logger ?? logger,
-        runtime: makeRuntime(input.runtime),
-      }),
+      makeOpencodeService.pipe(
+        Effect.provideService(AppConfig, makeConfig()),
+        Effect.provideService(OpencodeEventQueue, eventQueue),
+        Effect.provideService(Logger, input.logger ?? logger),
+        Effect.provideService(OpencodeClientFactory, {
+          create: () => (input.createClient ?? (() => makeClient()))(),
+        }),
+        Effect.provideService(SandboxBackend, {
+          startSession: makeSandbox(input.sandbox),
+        }),
+      ),
   );
 
 describe("opencode log summaries", () => {
@@ -246,7 +273,7 @@ describe("makeOpencodeService", () => {
     let abortSeen = false;
     let serverClosed = false;
 
-    await Effect.runPromise(
+    await runEffect(
       Effect.scoped(
         Effect.gen(function* () {
           const eventQueue = yield* Queue.unbounded<GlobalEvent>();
@@ -254,38 +281,36 @@ describe("makeOpencodeService", () => {
 
           const service = yield* makeService({
             eventQueue,
-            runtime: {
-              createClient: () =>
-                makeClient({
-                  global: {
-                    event: async ({ signal }: { signal: AbortSignal }) => {
-                      signal.addEventListener(
-                        "abort",
-                        () => {
-                          abortSeen = true;
-                        },
-                        { once: true },
-                      );
+            createClient: () =>
+              makeClient({
+                global: {
+                  event: async ({ signal }: { signal: AbortSignal }) => {
+                    signal.addEventListener(
+                      "abort",
+                      () => {
+                        abortSeen = true;
+                      },
+                      { once: true },
+                    );
 
-                      return {
-                        stream: {
-                          async *[Symbol.asyncIterator]() {
-                            yield* [];
-                            await new Promise(() => {});
-                          },
+                    return {
+                      stream: {
+                        async *[Symbol.asyncIterator]() {
+                          yield* [];
+                          await new Promise(() => {});
                         },
-                      };
-                    },
+                      },
+                    };
                   },
-                  session: {
-                    create: async () => {
-                      await Effect.runPromise(
-                        Deferred.succeed(createStarted, undefined).pipe(Effect.ignore),
-                      );
-                      return await new Promise(() => {});
-                    },
+                },
+                session: {
+                  create: async () => {
+                    await runEffect(Deferred.succeed(createStarted, undefined).pipe(Effect.ignore));
+                    return await new Promise(() => {});
                   },
-                }),
+                },
+              }),
+            sandbox: {
               launchServer: async () => ({
                 url: "http://opencode.invalid",
                 backend: "unsafe-dev",
@@ -323,7 +348,7 @@ describe("makeOpencodeService", () => {
       },
     });
 
-    await Effect.runPromise(
+    await runEffect(
       Effect.scoped(
         Effect.gen(function* () {
           const eventQueue = yield* Queue.unbounded<GlobalEvent>();
@@ -335,44 +360,42 @@ describe("makeOpencodeService", () => {
 
           const service = yield* makeService({
             eventQueue,
-            runtime: {
-              createClient: () =>
-                makeClient({
-                  global: {
-                    event: async ({ signal }: { signal: AbortSignal }) => {
-                      signal.addEventListener(
-                        "abort",
-                        () => {
-                          abortSeen = true;
-                          pendingNext?.({ done: true, value: undefined });
-                        },
-                        { once: true },
-                      );
+            createClient: () =>
+              makeClient({
+                global: {
+                  event: async ({ signal }: { signal: AbortSignal }) => {
+                    signal.addEventListener(
+                      "abort",
+                      () => {
+                        abortSeen = true;
+                        pendingNext?.({ done: true, value: undefined });
+                      },
+                      { once: true },
+                    );
 
-                      return {
-                        stream: {
-                          [Symbol.asyncIterator]: () => ({
-                            next: async () => {
-                              await Effect.runPromise(
-                                Deferred.succeed(streamStarted, undefined).pipe(Effect.ignore),
-                              );
-                              if (firstPull) {
-                                firstPull = false;
-                                return await Effect.runPromise(Deferred.await(firstEvent));
-                              }
-                              return await new Promise<IteratorResult<GlobalEvent, undefined>>(
-                                (resolve) => {
-                                  pendingNext = resolve;
-                                },
-                              );
-                            },
-                          }),
-                        },
-                      };
-                    },
+                    return {
+                      stream: {
+                        [Symbol.asyncIterator]: () => ({
+                          next: async () => {
+                            await runEffect(
+                              Deferred.succeed(streamStarted, undefined).pipe(Effect.ignore),
+                            );
+                            if (firstPull) {
+                              firstPull = false;
+                              return await runEffect(Deferred.await(firstEvent));
+                            }
+                            return await new Promise<IteratorResult<GlobalEvent, undefined>>(
+                              (resolve) => {
+                                pendingNext = resolve;
+                              },
+                            );
+                          },
+                        }),
+                      },
+                    };
                   },
-                }),
-            },
+                },
+              }),
           });
 
           const session = yield* service.createSession("/tmp/workdir", "Session", undefined);
@@ -391,7 +414,7 @@ describe("makeOpencodeService", () => {
   test("does not warn when closing a session aborts a rejecting event stream", async () => {
     const warnings: Array<{ message: string; fields?: Record<string, unknown> }> = [];
 
-    await Effect.runPromise(
+    await runEffect(
       Effect.scoped(
         Effect.gen(function* () {
           const eventQueue = yield* Queue.unbounded<GlobalEvent>();
@@ -408,39 +431,37 @@ describe("makeOpencodeService", () => {
                 }),
               error: () => Effect.void,
             },
-            runtime: {
-              createClient: () =>
-                makeClient({
-                  global: {
-                    event: async ({ signal }: { signal: AbortSignal }) => {
-                      signal.addEventListener(
-                        "abort",
-                        () => {
-                          rejectNext?.(new DOMException("Aborted", "AbortError"));
-                        },
-                        { once: true },
-                      );
+            createClient: () =>
+              makeClient({
+                global: {
+                  event: async ({ signal }: { signal: AbortSignal }) => {
+                    signal.addEventListener(
+                      "abort",
+                      () => {
+                        rejectNext?.(new DOMException("Aborted", "AbortError"));
+                      },
+                      { once: true },
+                    );
 
-                      return {
-                        stream: {
-                          [Symbol.asyncIterator]: () => ({
-                            next: async () => {
-                              await Effect.runPromise(
-                                Deferred.succeed(streamStarted, undefined).pipe(Effect.ignore),
-                              );
-                              return await new Promise<IteratorResult<GlobalEvent, undefined>>(
-                                (_resolve, reject) => {
-                                  rejectNext = reject;
-                                },
-                              );
-                            },
-                          }),
-                        },
-                      };
-                    },
+                    return {
+                      stream: {
+                        [Symbol.asyncIterator]: () => ({
+                          next: async () => {
+                            await runEffect(
+                              Deferred.succeed(streamStarted, undefined).pipe(Effect.ignore),
+                            );
+                            return await new Promise<IteratorResult<GlobalEvent, undefined>>(
+                              (_resolve, reject) => {
+                                rejectNext = reject;
+                              },
+                            );
+                          },
+                        }),
+                      },
+                    };
                   },
-                }),
-            },
+                },
+              }),
           });
 
           const session = yield* service.createSession("/tmp/workdir", "Session", undefined);
@@ -455,22 +476,51 @@ describe("makeOpencodeService", () => {
     ).toEqual([]);
   });
 
+  test("closes the sandbox session when bootstrap fails after startup", async () => {
+    let serverClosed = false;
+
+    await expect(
+      runEffect(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const service = yield* makeService({
+              createClient: () => {
+                throw new Error("client init failed");
+              },
+              sandbox: {
+                launchServer: async () => ({
+                  url: "http://opencode.invalid",
+                  backend: "unsafe-dev",
+                  close: () => {
+                    serverClosed = true;
+                  },
+                }),
+              },
+            });
+
+            yield* service.createSession("/tmp/workdir", "Session", undefined);
+          }),
+        ),
+      ),
+    ).rejects.toThrow("client init failed");
+
+    expect(serverClosed).toBe(true);
+  });
+
   test("surfaces SDK result errors through the Effect failure channel", async () => {
-    await Effect.runPromise(
+    await runEffect(
       Effect.scoped(
         Effect.gen(function* () {
           const service = yield* makeService({
-            runtime: {
-              createClient: () =>
-                makeClient({
-                  session: {
-                    abort: async () => ({
-                      data: false,
-                      error: "already stopped",
-                    }),
-                  },
-                }),
-            },
+            createClient: () =>
+              makeClient({
+                session: {
+                  abort: async () => ({
+                    data: false,
+                    error: "already stopped",
+                  }),
+                },
+              }),
           });
           const session = yield* service.createSession("/tmp/workdir", "Session", undefined);
 
