@@ -16,12 +16,6 @@ import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
 import type { ChannelSettings } from "@/state/channel-settings.ts";
 import type { PendingPrompt } from "@/sessions/run/prompt-state.ts";
 
-export type SessionCreateSpec = {
-  workdir: string;
-  title: string;
-  systemPromptAppend?: string;
-};
-
 export type RunRequest = {
   message: Message;
   prompt: string;
@@ -93,34 +87,6 @@ export type ChannelSession = {
   activeRun: ActiveRun | null;
 };
 
-export const setSessionActiveRun = (session: ChannelSession, activeRun: ActiveRun | null) => {
-  session.activeRun = activeRun;
-  return session;
-};
-
-export const setSessionLastActivityAt = (session: ChannelSession, at: number) => {
-  session.lastActivityAt = at;
-  return session;
-};
-
-export const setSessionChannelSettings = (
-  session: ChannelSession,
-  channelSettings: ChannelSettings,
-) => {
-  session.channelSettings = channelSettings;
-  return session;
-};
-
-export const setSessionProgressContext = (input: {
-  session: ChannelSession;
-  channel: SendableChannels | null;
-  mentionContext?: Message | null;
-}) => {
-  input.session.progressChannel = input.channel;
-  input.session.progressMentionContext = input.mentionContext ?? null;
-  return input.session;
-};
-
 export const resetActivePromptTracking = (
   activeRun: Pick<
     ActiveRun,
@@ -139,13 +105,3 @@ export const resetActivePromptTracking = (
   activeRun.assistantMessageParentIds.clear();
   activeRun.observedToolCallIds.clear();
 };
-
-export const buildSessionCreateSpec = (input: {
-  channelId: string;
-  workdir: string;
-  systemPromptAppend?: string;
-}): SessionCreateSpec => ({
-  workdir: input.workdir,
-  title: `Discord #${input.channelId}`,
-  systemPromptAppend: input.systemPromptAppend,
-});

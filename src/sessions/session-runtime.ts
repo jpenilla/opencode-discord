@@ -27,21 +27,13 @@ import {
 import {
   makeQuestionRuntime,
   type QuestionRuntime,
+  type RoutedQuestionSignals,
   type QuestionWorkflowEvent,
 } from "@/sessions/question/question-runtime.ts";
 import { enqueueRunRequest, type RunRequestDestination } from "@/sessions/request-routing.ts";
 import { executeRunBatch } from "@/sessions/run/run-executor.ts";
 import { takeQueuedRunBatch } from "@/sessions/run/run-batch.ts";
-import {
-  buildSessionCreateSpec,
-  setSessionActiveRun,
-  setSessionChannelSettings,
-  setSessionLastActivityAt,
-  setSessionProgressContext,
-  type ActiveRun,
-  type ChannelSession,
-  type RunRequest,
-} from "@/sessions/session.ts";
+import { type ActiveRun, type ChannelSession, type RunRequest } from "@/sessions/session.ts";
 import { createSessionShutdown } from "@/sessions/session-shutdown.ts";
 import {
   defaultChannelSettings,
@@ -261,14 +253,10 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     lastActivityAt: session.lastActivityAt,
   });
 
-  const putSession = (session: ChannelSession) => registryState.updateSession(session);
-
-  const deleteSession = (session: ChannelSession) => registryState.deleteSession(session);
-
   const setActiveRun = (session: ChannelSession, activeRun: ActiveRun | null) =>
-    Effect.sync(() => setSessionActiveRun(session, activeRun)).pipe(
-      Effect.andThen(registryState.updateSession(session)),
-    );
+    Effect.sync(() => {
+      session.activeRun = activeRun;
+    }).pipe(Effect.andThen(registryState.updateSession(session)));
 
   const replaceSessionHandle = (
     session: ChannelSession,
@@ -294,12 +282,9 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
 
   const touchSessionActivity = (session: ChannelSession, at = Date.now()) =>
     Effect.gen(function* () {
-      setSessionLastActivityAt(session, at);
+      session.lastActivityAt = at;
       yield* deps.touchPersistedSession(session.channelId, at);
     });
-
-  const touchAndReturnSession = (session: ChannelSession) =>
-    touchSessionActivity(session).pipe(Effect.as(session));
 
   const isSessionBusy = (session: ChannelSession) =>
     session.activeRun
@@ -316,13 +301,13 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
   ): Effect.Effect<ChannelSession, unknown, FileSystem.FileSystem | Path.Path> =>
     Effect.gen(function* () {
       yield* deps.upsertPersistedSession(toPersistedSession(session));
-      yield* putSession(session);
+      yield* registryState.updateSession(session);
       yield* deps.startWorker(session);
       return session;
     }).pipe(
       Effect.onError(() =>
         Effect.gen(function* () {
-          yield* deleteSession(session);
+          yield* registryState.deleteSession(session);
           yield* session.opencode.close().pipe(Effect.ignore);
           if (options?.removePersistedOnFailure) {
             yield* deps.deletePersistedSession(session.channelId).pipe(Effect.ignore);
@@ -375,16 +360,10 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     deleteNewRootOnFailure?: boolean;
   }): Effect.Effect<ChannelSession, unknown, FileSystem.FileSystem | Path.Path> =>
     Effect.gen(function* () {
-      const sessionCreateSpec = buildSessionCreateSpec({
-        channelId: input.channelId,
-        workdir: input.workdir,
-        systemPromptAppend: input.systemPromptAppend,
-      });
-
       const opencodeSession = yield* deps.createOpencodeSession(
-        sessionCreateSpec.workdir,
-        sessionCreateSpec.title,
-        sessionCreateSpec.systemPromptAppend,
+        input.workdir,
+        `Discord #${input.channelId}`,
+        input.systemPromptAppend,
       );
       const session = yield* buildSession({
         channelId: input.channelId,
@@ -487,14 +466,16 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     Effect.gen(function* () {
       const existing = yield* getSession(channelId);
       if (existing) {
-        return yield* touchAndReturnSession(existing);
+        return yield* touchSessionActivity(existing).pipe(Effect.as(existing));
       }
 
       return yield* withSessionGate(
         channelId,
         Effect.gen(function* () {
           const current = yield* getSession(channelId);
-          return current ? yield* touchAndReturnSession(current) : yield* onMissing();
+          return current
+            ? yield* touchSessionActivity(current).pipe(Effect.as(current))
+            : yield* onMissing();
         }),
       );
     });
@@ -506,7 +487,7 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     );
 
   const unloadSession = (session: ChannelSession) =>
-    deleteSession(session).pipe(Effect.andThen(closeSessionResources(session)));
+    registryState.deleteSession(session).pipe(Effect.andThen(closeSessionResources(session)));
 
   const restoreOrCreateSession = (
     message: Message,
@@ -585,15 +566,10 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
         }
 
         const previous = current.opencode;
-        const sessionCreateSpec = buildSessionCreateSpec({
-          channelId: message.channelId,
-          workdir: current.workdir,
-          systemPromptAppend: current.systemPromptAppend,
-        });
         const replacement = yield* deps.createOpencodeSession(
-          sessionCreateSpec.workdir,
-          sessionCreateSpec.title,
-          sessionCreateSpec.systemPromptAppend,
+          current.workdir,
+          `Discord #${message.channelId}`,
+          current.systemPromptAppend,
         );
         yield* replaceSessionHandle(current, replacement);
         yield* deps.upsertPersistedSession(toPersistedSession(current));
@@ -722,12 +698,6 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
   } as const;
 };
 
-const createSessionRuntimeState = (): SessionRegistryState => ({
-  sessionsByChannelId: new Map(),
-  sessionsBySessionId: new Map(),
-  activeRunsBySessionId: new Map(),
-});
-
 export const SessionRuntimeLayer = Layer.unwrap(
   Effect.gen(function* () {
     const logger = yield* Logger;
@@ -737,7 +707,11 @@ export const SessionRuntimeLayer = Layer.unwrap(
     const opencode = yield* OpencodeService;
     const eventQueue = yield* OpencodeEventQueue;
     const statePersistence = yield* StatePersistence;
-    const stateRef = yield* Ref.make(createSessionRuntimeState());
+    const stateRef = yield* Ref.make<SessionRegistryState>({
+      sessionsByChannelId: new Map(),
+      sessionsBySessionId: new Map(),
+      activeRunsBySessionId: new Map(),
+    });
     const shutdownStartedRef = yield* Ref.make(false);
     const questionTypingPausedRef = yield* Ref.make(new Set<string>());
     const fiberSet = yield* FiberSet.make();
@@ -878,27 +852,20 @@ export const SessionRuntimeLayer = Layer.unwrap(
         Effect.andThen(reconcileQuestionTypingForSession(sessionId)),
       );
 
-    const handleQuestionEvent = (
-      event: {
-        sessionId: string;
-      } & QuestionWorkflowEvent,
+    const handleRoutedQuestionSignals = (
+      effect: Effect.Effect<RoutedQuestionSignals | null, unknown>,
     ) =>
-      Effect.gen(function* () {
-        const routed = yield* questions.handleEvent(event);
-        if (!routed) {
-          return;
-        }
-        yield* applyQuestionWorkflowSignals(routed.sessionId, routed.signals);
-      });
+      effect.pipe(
+        Effect.flatMap((routed) =>
+          !routed ? Effect.void : applyQuestionWorkflowSignals(routed.sessionId, routed.signals),
+        ),
+      );
+
+    const handleQuestionEvent = (event: { sessionId: string } & QuestionWorkflowEvent) =>
+      handleRoutedQuestionSignals(questions.handleEvent(event));
 
     const routeQuestionInteraction = (interaction: Interaction) =>
-      Effect.gen(function* () {
-        const routed = yield* questions.routeInteraction(interaction);
-        if (!routed) {
-          return;
-        }
-        yield* applyQuestionWorkflowSignals(routed.sessionId, routed.signals);
-      });
+      handleRoutedQuestionSignals(questions.routeInteraction(interaction));
 
     const serviceLayer = Layer.mergeAll(
       Layer.succeed(Logger, logger),
@@ -1021,9 +988,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
       );
 
     const startShutdown = (): Effect.Effect<boolean> =>
-      Ref.modify(shutdownStartedRef, (started): readonly [boolean, boolean] =>
-        started ? [false, true] : [true, true],
-      );
+      Ref.modify(shutdownStartedRef, (started): readonly [boolean, boolean] => [!started, true]);
 
     const shutdown = createSessionShutdown({
       startShutdown,
@@ -1121,6 +1086,17 @@ export const SessionRuntimeLayer = Layer.unwrap(
         );
       });
 
+    const withRestoredSession = <A>(
+      channelId: string,
+      onPresent: (
+        session: ChannelSession,
+      ) => Effect.Effect<A, unknown, FileSystem.FileSystem | Path.Path>,
+      onMissing: () => Effect.Effect<A>,
+    ): Effect.Effect<A, unknown, FileSystem.FileSystem | Path.Path> =>
+      getOrRestoreSession(channelId).pipe(
+        Effect.flatMap((session) => (session ? onPresent(session) : onMissing())),
+      );
+
     const sessionRuntime = {
       readLoadedChannelActivity: (channelId) => readChannelActivity(getSession(channelId)),
       readRestoredChannelActivity: (channelId) =>
@@ -1129,11 +1105,10 @@ export const SessionRuntimeLayer = Layer.unwrap(
       queueMessageRunRequest: (message, request, reason) =>
         Effect.gen(function* () {
           const session = yield* getUsableSession(message, reason);
-          setSessionProgressContext({
-            session,
-            channel: message.channel.isSendable() ? (message.channel as SendableChannels) : null,
-            mentionContext: message,
-          });
+          session.progressChannel = message.channel.isSendable()
+            ? (message.channel as SendableChannels)
+            : null;
+          session.progressMentionContext = message;
           const destination = yield* enqueueRunRequest(session, request);
           return {
             sessionId: session.opencode.sessionId,
@@ -1148,56 +1123,42 @@ export const SessionRuntimeLayer = Layer.unwrap(
           Effect.flatMap((session) =>
             !session
               ? Effect.void
-              : Effect.sync(() => setSessionChannelSettings(session, settings)),
+              : Effect.sync(() => {
+                  session.channelSettings = settings;
+                }),
           ),
         ),
       requestRunInterrupt: (channelId) =>
-        getOrRestoreSession(channelId).pipe(
-          Effect.flatMap((session) =>
-            !session
-              ? Effect.succeed(interruptFailure("no session for channel"))
-              : requestSessionRunInterrupt(session),
-          ),
+        withRestoredSession(channelId, requestSessionRunInterrupt, () =>
+          Effect.succeed(interruptFailure("no session for channel")),
         ),
       startCompaction: (channelId, channel) =>
-        getOrRestoreSession(channelId).pipe(
-          Effect.flatMap((session) =>
-            !session
-              ? Effect.succeed({
-                  type: "rejected",
-                  message: "No OpenCode session exists in this channel yet.",
-                } satisfies IdleCompactionWorkflowStartResult)
-              : Effect.sync(() => setSessionProgressContext({ session, channel })).pipe(
-                  Effect.andThen(idleCompaction.start({ session, channel })),
-                ),
-          ),
+        withRestoredSession(
+          channelId,
+          (session) =>
+            Effect.sync(() => {
+              session.progressChannel = channel;
+              session.progressMentionContext = null;
+            }).pipe(Effect.andThen(idleCompaction.start({ session, channel }))),
+          () =>
+            Effect.succeed({
+              type: "rejected",
+              message: "No OpenCode session exists in this channel yet.",
+            } satisfies IdleCompactionWorkflowStartResult),
         ),
       requestCompactionInterrupt: (channelId) =>
-        getOrRestoreSession(channelId).pipe(
-          Effect.flatMap((session) =>
-            !session
-              ? Effect.succeed({
-                  type: "failed",
-                  message: "No active OpenCode run or compaction is running in this channel.",
-                } satisfies IdleCompactionWorkflowInterruptResult)
-              : idleCompaction.requestInterrupt({ session }),
-          ),
+        withRestoredSession(
+          channelId,
+          (session) => idleCompaction.requestInterrupt({ session }),
+          () =>
+            Effect.succeed({
+              type: "failed",
+              message: "No active OpenCode run or compaction is running in this channel.",
+            } satisfies IdleCompactionWorkflowInterruptResult),
         ),
       shutdown,
     } satisfies SessionRuntimeShape;
 
-    return Layer.succeed(SessionRuntime, {
-      readLoadedChannelActivity: sessionRuntime.readLoadedChannelActivity,
-      readRestoredChannelActivity: sessionRuntime.readRestoredChannelActivity,
-      getActiveRunBySessionId: sessionRuntime.getActiveRunBySessionId,
-      queueMessageRunRequest: sessionRuntime.queueMessageRunRequest,
-      routeQuestionInteraction: sessionRuntime.routeQuestionInteraction,
-      invalidate: sessionRuntime.invalidate,
-      updateLoadedChannelSettings: sessionRuntime.updateLoadedChannelSettings,
-      requestRunInterrupt: sessionRuntime.requestRunInterrupt,
-      startCompaction: sessionRuntime.startCompaction,
-      requestCompactionInterrupt: sessionRuntime.requestCompactionInterrupt,
-      shutdown: sessionRuntime.shutdown,
-    } satisfies SessionRuntimeShape);
+    return Layer.succeed(SessionRuntime, sessionRuntime);
   }),
 );

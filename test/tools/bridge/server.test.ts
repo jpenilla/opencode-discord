@@ -185,16 +185,15 @@ const makeHandlerInput = (input: {
   } as const;
 };
 
-const runBridgeRequest = (
-  input: {
-    request?: IncomingMessage;
-    pathname?: string;
-    activeRun?: ActiveRun | null;
-    loggedErrors?: Array<Record<string, unknown>>;
-    configBridgeToken?: string;
-  } = {},
-) => {
+type BridgeRequestInput = Parameters<typeof makeHandlerInput>[0];
+
+const runBridgeRequest = (input: BridgeRequestInput = {}) => {
   return Effect.runPromise(handleToolBridgeRequest(makeHandlerInput(input)));
+};
+
+const runLoggedBridgeRequest = async (input: BridgeRequestInput = {}) => {
+  const loggedErrors: Array<Record<string, unknown>> = [];
+  return { response: await runBridgeRequest({ ...input, loggedErrors }), loggedErrors };
 };
 
 const expectPromptResponse = <A, E>(effect: Effect.Effect<A, E>, onTimeout: string) =>
@@ -209,6 +208,9 @@ const expectPromptResponse = <A, E>(effect: Effect.Effect<A, E>, onTimeout: stri
       );
     }),
   );
+
+const runPromptBridgeRequest = (input: BridgeRequestInput, onTimeout: string) =>
+  expectPromptResponse(handleToolBridgeRequest(makeHandlerInput(input)), onTimeout);
 
 const expectBridgeRequestErrorLog = (
   loggedErrors: Array<Record<string, unknown>>,
@@ -265,11 +267,7 @@ describe("handleToolBridgeRequest", () => {
     },
   ]) {
     test(scenario.name, async () => {
-      const loggedErrors: Array<Record<string, unknown>> = [];
-      const response = await runBridgeRequest({
-        ...scenario.input,
-        loggedErrors,
-      });
+      const { response, loggedErrors } = await runLoggedBridgeRequest(scenario.input);
       expect(response).toEqual(scenario.expected);
       expect(loggedErrors).toHaveLength(0);
     });
@@ -304,14 +302,12 @@ describe("handleToolBridgeRequest", () => {
   ]) {
     test(scenario.name, async () => {
       let sendCalls = 0;
-      const loggedErrors: Array<Record<string, unknown>> = [];
-      const response = await runBridgeRequest({
+      const { response, loggedErrors } = await runLoggedBridgeRequest({
         request: scenario.request,
         activeRun: makeActiveRun(async (payload) => {
           sendCalls += 1;
           return scenario.send(payload);
         }),
-        loggedErrors,
       });
 
       expect(sendCalls).toBe(1);
@@ -401,40 +397,38 @@ describe("handleToolBridgeRequest", () => {
   test("returns a bridge failure when the request stream aborts before Discord finishes consuming the upload", async () => {
     let nextCalls = 0;
 
-    const response = await expectPromptResponse(
-      handleToolBridgeRequest(
-        makeHandlerInput({
-          request: makeDefaultUploadRequest({
-            requestFactory: () => ({
-              next: async () => {
-                nextCalls += 1;
-                if (nextCalls === 1) {
-                  return {
-                    done: false,
-                    value: Buffer.from("chunk-1"),
-                  };
-                }
+    const response = await runPromptBridgeRequest(
+      {
+        request: makeDefaultUploadRequest({
+          requestFactory: () => ({
+            next: async () => {
+              nextCalls += 1;
+              if (nextCalls === 1) {
+                return {
+                  done: false,
+                  value: Buffer.from("chunk-1"),
+                };
+              }
 
-                throw new Error("request stream failed");
-              },
-            }),
-          }),
-          activeRun: makeActiveRun(async (payload: MessageCreateOptions) => {
-            const attachment = (
-              payload.files?.[0] as { attachment?: NodeJS.ReadableStream } | undefined
-            )?.attachment;
-            if (!attachment) {
-              throw new Error("missing attachment stream");
-            }
-
-            await new Promise<void>((resolve, reject) => {
-              attachment.once("end", resolve);
-              attachment.once("error", reject);
-              attachment.resume?.();
-            });
+              throw new Error("request stream failed");
+            },
           }),
         }),
-      ),
+        activeRun: makeActiveRun(async (payload: MessageCreateOptions) => {
+          const attachment = (
+            payload.files?.[0] as { attachment?: NodeJS.ReadableStream } | undefined
+          )?.attachment;
+          if (!attachment) {
+            throw new Error("missing attachment stream");
+          }
+
+          await new Promise<void>((resolve, reject) => {
+            attachment.once("end", resolve);
+            attachment.once("error", reject);
+            attachment.resume?.();
+          });
+        }),
+      },
       "request stream failure did not return promptly",
     );
 
@@ -443,47 +437,45 @@ describe("handleToolBridgeRequest", () => {
   });
 
   test("returns a bridge failure when Discord closes a backpressured attachment stream", async () => {
-    const response = await expectPromptResponse(
-      handleToolBridgeRequest(
-        makeHandlerInput({
-          request: makeDefaultUploadRequest({ chunks: [Buffer.alloc(1024 * 1024, 1)] }),
-          activeRun: makeActiveRun(async (payload: MessageCreateOptions) => {
-            const attachment = (
-              payload.files?.[0] as
-                | {
-                    attachment?: NodeJS.ReadableStream & {
-                      destroy: () => void;
-                      writableNeedDrain?: boolean;
-                    };
-                  }
-                | undefined
-            )?.attachment;
-            if (!attachment) {
-              throw new Error("missing attachment stream");
-            }
-
-            await new Promise<void>((resolve, reject) => {
-              const started = Date.now();
-              const poll = () => {
-                if (attachment.writableNeedDrain) {
-                  attachment.destroy();
-                  resolve();
-                  return;
+    const response = await runPromptBridgeRequest(
+      {
+        request: makeDefaultUploadRequest({ chunks: [Buffer.alloc(1024 * 1024, 1)] }),
+        activeRun: makeActiveRun(async (payload: MessageCreateOptions) => {
+          const attachment = (
+            payload.files?.[0] as
+              | {
+                  attachment?: NodeJS.ReadableStream & {
+                    destroy: () => void;
+                    writableNeedDrain?: boolean;
+                  };
                 }
+              | undefined
+          )?.attachment;
+          if (!attachment) {
+            throw new Error("missing attachment stream");
+          }
 
-                if (Date.now() - started > 500) {
-                  reject(new Error("attachment stream never entered backpressure"));
-                  return;
-                }
+          await new Promise<void>((resolve, reject) => {
+            const started = Date.now();
+            const poll = () => {
+              if (attachment.writableNeedDrain) {
+                attachment.destroy();
+                resolve();
+                return;
+              }
 
-                setTimeout(poll, 1);
-              };
+              if (Date.now() - started > 500) {
+                reject(new Error("attachment stream never entered backpressure"));
+                return;
+              }
 
-              poll();
-            });
-          }),
+              setTimeout(poll, 1);
+            };
+
+            poll();
+          });
         }),
-      ),
+      },
       "destroyed backpressured attachment stream did not return promptly",
     );
 

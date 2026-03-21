@@ -62,6 +62,9 @@ export const makeSessionStatusEvent = (
     },
   });
 
+export const makeSessionIdleEvent = (sessionId = "session-1"): Event =>
+  makeSessionStatusEvent(sessionId, "idle");
+
 export const makeSessionCompactedEvent = (sessionId = "session-1"): Event =>
   unsafeStub<Event>({
     type: "session.compacted",

@@ -15,13 +15,8 @@ import {
   takeProgressBatch,
 } from "@/sessions/run/progress.ts";
 import type { ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
+import { cardText, makePostedMessage, makeSendableChannel } from "../../support/discord.ts";
 import { unsafeStub } from "../../support/stub.ts";
-
-const cardText = (payload: MessageCreateOptions | MessageEditOptions) =>
-  String(
-    (payload as { components?: Array<{ components?: Array<{ data?: { content?: string } }> }> })
-      .components?.[0]?.components?.[0]?.data?.content ?? "",
-  );
 
 const makeHarness = async (showThinking = true) => {
   const sentPayloads = await Effect.runPromise(
@@ -32,14 +27,14 @@ const makeHarness = async (showThinking = true) => {
   );
   const nextMessageId = await Effect.runPromise(Ref.make(0));
 
-  const makePostedMessage = (): Message =>
-    unsafeStub<Message>({
-      id: `card-${Effect.runSync(Ref.updateAndGet(nextMessageId, (count) => count + 1))}`,
-      edit: (payload: MessageEditOptions): Promise<Message> =>
-        Effect.runPromise(Ref.update(editedPayloads, (current) => [...current, payload])).then(() =>
-          makePostedMessage(),
-        ),
-    });
+  const nextPostedMessage = (): Message => {
+    const id = `card-${Effect.runSync(Ref.updateAndGet(nextMessageId, (count) => count + 1))}`;
+    return makePostedMessage(id, (payload: MessageEditOptions) =>
+      Effect.runPromise(Ref.update(editedPayloads, (current) => [...current, payload])).then(() =>
+        nextPostedMessage(),
+      ),
+    );
+  };
 
   const sourceMessage = unsafeStub<Message>({
     id: "source-message",
@@ -51,11 +46,10 @@ const makeHarness = async (showThinking = true) => {
     inGuild: () => false,
     member: null,
     guild: null,
-    channel: unsafeStub({
-      isSendable: () => true,
+    channel: makeSendableChannel({
       send: (payload: MessageCreateOptions) =>
         Effect.runPromise(Ref.update(sentPayloads, (current) => [...current, payload])).then(() =>
-          makePostedMessage(),
+          nextPostedMessage(),
         ),
     }),
   });

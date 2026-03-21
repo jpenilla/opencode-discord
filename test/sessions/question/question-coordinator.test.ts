@@ -12,9 +12,10 @@ import {
 import { makeQuestionRuntime } from "@/sessions/question/question-runtime.ts";
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
 import { formatError } from "@/util/errors.ts";
+import { makePostedMessage, makeRecordedComponentInteraction } from "../../support/discord.ts";
 import { getRef, makeMessage, makeSilentLogger } from "../../support/fixtures.ts";
 import { failTest } from "../../support/errors.ts";
-import { appendRef, runTestEffect } from "../../support/runtime.ts";
+import { appendRef, makeRef, runTestEffect } from "../../support/runtime.ts";
 import { makeTestActiveRun, makeTestSession } from "../../support/session.ts";
 import { unsafeStub } from "../../support/stub.ts";
 
@@ -30,7 +31,6 @@ const makeRequest = (id = "req-1") =>
     ],
   });
 
-const makeRef = <A>(value: A) => runTestEffect(Ref.make(value));
 const staleStateMessage =
   "Another user updated this question prompt before your action was applied. Review the latest card and try again.";
 
@@ -55,11 +55,11 @@ const makeHarness = async (options?: {
   const questionPostStarted = await runTestEffect(Deferred.make<void>());
   const allowQuestionPost = await runTestEffect(Deferred.make<void>());
 
-  const questionMessage: Message = makeMessage({
-    id: "question-message",
-    edit: (payload: MessageEditOptions): Promise<Message> =>
+  const questionMessage: Message = makePostedMessage(
+    "question-message",
+    (payload: MessageEditOptions) =>
       runTestEffect(appendRef(editedPayloads, payload)).then(() => questionMessage),
-  });
+  );
 
   const makeReplyTargetMessage = (id: string) =>
     makeMessage({
@@ -171,38 +171,6 @@ const makeHarness = async (options?: {
     shutdown: () => rawRuntime.shutdownSession(session.opencode.sessionId),
   };
 
-  const makeInteraction = (
-    kind: "button" | "select" | "modal",
-    input: {
-      customId: string;
-      userId?: string;
-      messageId?: string;
-      values?: string[];
-      value?: string;
-    },
-  ) =>
-    unsafeStub<Interaction>({
-      customId: input.customId,
-      values: input.values,
-      user: { id: input.userId ?? "owner" },
-      message: { id: input.messageId ?? questionMessage.id },
-      replied: false,
-      deferred: false,
-      isButton: () => kind === "button",
-      isStringSelectMenu: () => kind === "select",
-      isModalSubmit: () => kind === "modal",
-      isChatInputCommand: () => false,
-      reply: (payload: { content?: string | null }) =>
-        runTestEffect(appendRef(interactionReplies, payload)),
-      update: () => Promise.resolve(questionMessage),
-      followUp: () => Promise.resolve(questionMessage),
-      showModal: () => Promise.resolve(),
-      deferUpdate: () => Promise.resolve(),
-      fields: {
-        getTextInputValue: () => input.value ?? "",
-      },
-    });
-
   return {
     runtime,
     session,
@@ -221,15 +189,33 @@ const makeHarness = async (options?: {
     typingResumeCount,
     typingStopCount,
     makeButtonInteraction: (input: { customId: string; userId?: string; messageId?: string }) =>
-      makeInteraction("button", input),
+      makeRecordedComponentInteraction("button", {
+        ...input,
+        onReply: (payload) =>
+          runTestEffect(appendRef(interactionReplies, payload as { content?: string | null })),
+        update: () => Promise.resolve(questionMessage),
+        followUp: () => Promise.resolve(questionMessage),
+      }) as Interaction,
     makeSelectInteraction: (input: {
       customId: string;
       values: string[];
       userId?: string;
       messageId?: string;
-    }) => makeInteraction("select", input),
+    }) =>
+      makeRecordedComponentInteraction("select", {
+        ...input,
+        onReply: (payload) =>
+          runTestEffect(appendRef(interactionReplies, payload as { content?: string | null })),
+        update: () => Promise.resolve(questionMessage),
+      }) as Interaction,
     makeModalInteraction: (input: { customId: string; value: string; userId?: string }) =>
-      makeInteraction("modal", input),
+      makeRecordedComponentInteraction("modal", {
+        ...input,
+        messageId: questionMessage.id,
+        onReply: (payload) =>
+          runTestEffect(appendRef(interactionReplies, payload as { content?: string | null })),
+        followUp: () => Promise.resolve(questionMessage),
+      }) as Interaction,
   };
 };
 

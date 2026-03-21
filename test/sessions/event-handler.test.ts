@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { Deferred, Effect, Exit, Option, Queue, Ref } from "effect";
+import { Deferred, Effect, Exit, Option, Ref } from "effect";
 
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
 import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import { createEventHandler } from "@/sessions/event-handler.ts";
-import { beginPendingPrompt, createPromptState } from "@/sessions/run/prompt-state.ts";
-import { type ActiveRun, type ChannelSession, type RunProgressEvent } from "@/sessions/session.ts";
+import { beginPendingPrompt } from "@/sessions/run/prompt-state.ts";
+import { type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
 import {
   makeAssistantMessageUpdatedEvent,
   makeQuestionAskedEvent,
@@ -17,13 +17,11 @@ import {
   makeToolEvent,
   makeUserMessageUpdatedEvent,
 } from "../support/opencode-events.ts";
-import { getRef, makeMessage, makeSessionHandle, makeSilentLogger } from "../support/fixtures.ts";
+import { getRef, makeSessionHandle, makeSilentLogger } from "../support/fixtures.ts";
 import { failTest } from "../support/errors.ts";
-import { appendRef } from "../support/runtime.ts";
-import { makeTestActiveRun, makeTestSession } from "../support/session.ts";
+import { appendRef, clearQueue, makeRef, takeAll } from "../support/runtime.ts";
+import { makeTestSessionState } from "../support/session.ts";
 import { unsafeStub } from "../support/stub.ts";
-
-const makeRef = <A>(value: A) => Effect.runPromise(Ref.make(value));
 
 const beginPendingRun = async () => {
   const state = await makeSession(true);
@@ -40,28 +38,21 @@ const finalReply = (messageId: string): PromptResult => ({
 
 const readFinalReply = (_session: SessionHandle, messageId: string) =>
   Effect.succeed(finalReply(messageId));
-const takeAll = <A>(queue: Queue.Dequeue<A>) => Effect.runPromise(Queue.takeAll(queue));
-const clearQueue = <A>(queue: Queue.Dequeue<A>) => Effect.runPromise(Queue.clear(queue));
 const expectPending = async <A, E>(completion: Deferred.Deferred<A, E>) => {
   expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
 };
 
 const makeSession = async (withActiveRun: boolean, showCompactionSummaries = true) => {
-  const activeRunState = withActiveRun ? await makeTestActiveRun() : null;
-  const activeRun = activeRunState?.activeRun ?? null;
-  const progressQueue =
-    activeRunState?.progressQueue ?? (await Effect.runPromise(Queue.unbounded<RunProgressEvent>()));
-  const promptState = activeRun?.promptState ?? (await Effect.runPromise(createPromptState()));
-  const session = makeTestSession({
-    opencode: makeSessionHandle(),
-    channelSettings: {
-      showThinking: true,
-      showCompactionSummaries,
+  return makeTestSessionState({
+    withActiveRun,
+    session: {
+      opencode: makeSessionHandle(),
+      channelSettings: {
+        showThinking: true,
+        showCompactionSummaries,
+      },
     },
-    activeRun,
   });
-
-  return { session, activeRun, progressQueue, promptState };
 };
 
 const noopIdleCompactionWorkflow = {
@@ -183,7 +174,7 @@ describe("createEventHandler", () => {
 
     await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent()));
 
-    expect(await Effect.runPromise(Queue.takeAll(progressQueue))).toEqual([
+    expect(await takeAll(progressQueue)).toEqual([
       {
         type: "session-status",
         status: { type: "busy" },
