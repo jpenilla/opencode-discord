@@ -15,7 +15,6 @@ import { createCommandHandler } from "@/channels/command-handler.ts";
 import { AppConfig, type AppConfigShape } from "@/config.ts";
 import { InfoCards, type InfoCardsShape } from "@/discord/info-card.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
-import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import {
   type IdleCompactionWorkflowShape,
   type IdleCompactionWorkflowInterruptResult,
@@ -26,22 +25,25 @@ import {
   SessionRuntime,
   type SessionRuntimeShape,
 } from "@/sessions/session-runtime.ts";
-import {
-  noQuestionOutcome,
-  type ActiveRun,
-  type ChannelSession,
-  type RunRequest,
-} from "@/sessions/session.ts";
+import { type ActiveRun, type ChannelSession, type RunRequest } from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import { StatePersistence, type StatePersistenceShape } from "@/state/persistence.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
-import { getRef } from "../support/fixtures.ts";
+import { getRef, makeMessage, makeSessionHandle } from "../support/fixtures.ts";
 import { makeTestConfig } from "../support/config.ts";
 import { failTest } from "../support/errors.ts";
 import { appendRef, runTestEffect } from "../support/runtime.ts";
+import { makeTestActiveRun, makeTestSession } from "../support/session.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const runEffect = runTestEffect;
+const makeRef = <A>(value: A) => runEffect(Ref.make(value));
+const updateMapRef = <K, V>(ref: Ref.Ref<Map<K, V>>, update: (current: Map<K, V>) => void) =>
+  Ref.update(ref, (current) => {
+    const next = new Map(current);
+    update(next);
+    return next;
+  });
 
 const makeConfig = (defaults: {
   showThinking: boolean;
@@ -84,27 +86,22 @@ const makeCommandsLayer = (deps: {
   );
 
 const makeHarness = async (options?: HarnessOptions) => {
-  const replies = await runEffect(Ref.make<string[]>([]));
-  const defers = await runEffect(Ref.make(0));
-  const edits = await runEffect(Ref.make<string[]>([]));
-  const compactionUpdates = await runEffect(Ref.make<Array<{ title: string; body: string }>>([]));
-  const upsertedInfoCards = await runEffect(Ref.make<Array<{ title: string; body: string }>>([]));
-  const typingStopCount = await runEffect(Ref.make(0));
-  const idleCardRef = await runEffect(Ref.make<Message | null>(null));
-  const idleCompactionActive = await runEffect(Ref.make(options?.hasIdleCompaction ?? false));
-  const idleInterruptRequested = await runEffect(Ref.make(false));
-  const persistedSettings = await runEffect(
-    Ref.make<Map<string, PersistedChannelSettings>>(new Map()),
-  );
-  const invalidatedSessions = await runEffect(
-    Ref.make<Array<{ channelId: string; reason: string }>>([]),
-  );
-  const warnings = await runEffect(Ref.make<string[]>([]));
+  const replies = await makeRef<string[]>([]);
+  const defers = await makeRef(0);
+  const edits = await makeRef<string[]>([]);
+  const compactionUpdates = await makeRef<Array<{ title: string; body: string }>>([]);
+  const upsertedInfoCards = await makeRef<Array<{ title: string; body: string }>>([]);
+  const typingStopCount = await makeRef(0);
+  const idleCardRef = await makeRef<Message | null>(null);
+  const idleCompactionActive = await makeRef(options?.hasIdleCompaction ?? false);
+  const idleInterruptRequested = await makeRef(false);
+  const persistedSettings = await makeRef<Map<string, PersistedChannelSettings>>(new Map());
+  const invalidatedSessions = await makeRef<Array<{ channelId: string; reason: string }>>([]);
+  const warnings = await makeRef<string[]>([]);
   const compactStarted = await runEffect(Deferred.make<void, never>());
   const compactFinish = await runEffect(Deferred.make<void, never>());
   const compactUpdated = await runEffect(Deferred.make<void, never>());
-  const pendingQuestionCheckCount = await runEffect(Ref.make(0));
-  const promptState = await runEffect(createPromptState());
+  const pendingQuestionCheckCount = await makeRef(0);
   const channelSettingsDefaults = {
     showThinking: true,
     showCompactionSummaries: true,
@@ -124,49 +121,24 @@ const makeHarness = async (options?: HarnessOptions) => {
     await runEffect(Queue.offer(sessionQueue, {} as RunRequest));
   }
 
-  const activeRun: ActiveRun = {
-    originMessage: unsafeStub<Message>({
+  const { activeRun } = await makeTestActiveRun({
+    originMessage: makeMessage({
       id: "discord-message",
       channelId: "channel-1",
       channel: { id: "channel-1" },
-      attachments: new Map(),
     }),
-    workdir: "/home/opencode/workspace",
-    attachmentMessagesById: new Map(),
-    currentPromptContext: null,
-    previousPromptMessageIds: new Set<string>(),
-    currentPromptMessageIds: new Set<string>(),
-    currentPromptUserMessageId: null,
-    assistantMessageParentIds: new Map<string, string>(),
-    observedToolCallIds: new Set<string>(),
-    progressQueue: {} as ActiveRun["progressQueue"],
-    promptState,
-    followUpQueue: {} as ActiveRun["followUpQueue"],
-    acceptFollowUps: {} as ActiveRun["acceptFollowUps"],
     typing: {
       pause: async () => {},
       resume: () => {},
       stop: () => runEffect(Ref.update(typingStopCount, (count) => count + 1)),
     },
-    finalizeProgress: () => Effect.void,
-    questionOutcome: noQuestionOutcome(),
-    interruptRequested: false,
-    interruptSource: null,
-  };
+  });
 
-  const session: ChannelSession = {
-    channelId: "channel-1",
-    opencode: {
+  const session: ChannelSession = makeTestSession({
+    opencode: makeSessionHandle({
       sessionId: "session-1",
       client: {} as never,
-      workdir: "/home/opencode/workspace",
-      backend: "bwrap",
-      close: () => Effect.void,
-    },
-    rootDir: "/tmp/session-root",
-    workdir: "/home/opencode/workspace",
-    createdAt: Date.now(),
-    lastActivityAt: Date.now(),
+    }),
     channelSettings: {
       showThinking:
         options?.initialChannelSettings?.showThinking ?? channelSettingsDefaults.showThinking,
@@ -174,12 +146,9 @@ const makeHarness = async (options?: HarnessOptions) => {
         options?.initialChannelSettings?.showCompactionSummaries ??
         channelSettingsDefaults.showCompactionSummaries,
     },
-    progressChannel: null,
-    progressMentionContext: null,
-    emittedCompactionSummaryMessageIds: new Set<string>(),
     queue: sessionQueue,
     activeRun: (options?.hasActiveRun ?? false) ? activeRun : null,
-  };
+  });
 
   const sessionRef = await runEffect(Ref.make((options?.hasSession ?? true) ? session : null));
 
@@ -225,11 +194,7 @@ const makeHarness = async (options?: HarnessOptions) => {
     getChannelSettings: (channelId: string) =>
       Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(channelId) ?? null)),
     upsertChannelSettings: (settings: PersistedChannelSettings) =>
-      Ref.update(persistedSettings, (current) => {
-        const next = new Map(current);
-        next.set(settings.channelId, settings);
-        return next;
-      }),
+      updateMapRef(persistedSettings, (current) => current.set(settings.channelId, settings)),
   };
 
   const idleCompactionWorkflow: IdleCompactionWorkflowShape = {
