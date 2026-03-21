@@ -494,14 +494,25 @@ const runInteraction = async (
   return harness;
 };
 
+const expectDeferredEdit = async (
+  harness: Awaited<ReturnType<typeof makeHarness>>,
+  expectedEdit: string,
+) => {
+  expect(await getRef(harness.defers)).toBe(1);
+  expect(await getRef(harness.replies)).toEqual([]);
+  expect(await getRef(harness.edits)).toEqual([expectedEdit]);
+};
+
+const freshSessionMessage =
+  "Cleared this channel's current OpenCode session. The next triggered message here will start a new session with fresh chat history. Workspace files were left in place.";
+
 describe("createCommandHandler", () => {
   test("rejects unhealthy compact requests after deferring", async () => {
     const harness = await runInteraction(await makeHarness({ sessionHealthy: false }), "compact");
-    expect(await getRef(harness.defers)).toBe(1);
-    expect(await getRef(harness.replies)).toEqual([]);
-    expect(await getRef(harness.edits)).toEqual([
+    await expectDeferredEdit(
+      harness,
       "This channel session is unavailable right now. Send a normal message to recreate it.",
-    ]);
+    );
     expect(await getRef(harness.upsertedInfoCards)).toEqual([]);
   });
 
@@ -516,10 +527,10 @@ describe("createCommandHandler", () => {
       },
     ]);
     expect((await getRef(harness.idleCardRef))?.id).toBe("🗜️ Compacting session-channel-1");
-    expect(await getRef(harness.replies)).toEqual([]);
-    expect(await getRef(harness.edits)).toEqual([
+    await expectDeferredEdit(
+      harness,
       "Started session compaction. I'll post updates in this channel.",
-    ]);
+    );
 
     await runEffect(Deferred.succeed(harness.compactFinish, undefined));
     await runEffect(Deferred.await(harness.compactUpdated));
@@ -543,8 +554,7 @@ describe("createCommandHandler", () => {
       const harness = await runInteraction(await makeHarness(scenario.options), "interrupt");
       expect(harness.activeRun.interruptRequested).toBe(scenario.expectActiveRunInterrupted);
       expect(await getRef(harness.typingStopCount)).toBe(0);
-      expect(await getRef(harness.replies)).toEqual([]);
-      expect(await getRef(harness.edits)).toEqual([scenario.expectedEdit]);
+      await expectDeferredEdit(harness, scenario.expectedEdit);
     });
   }
 
@@ -557,8 +567,7 @@ describe("createCommandHandler", () => {
       "interrupt",
     );
     expect(harness.activeRun.interruptRequested).toBe(false);
-    expect(await getRef(harness.replies)).toEqual([]);
-    expect(await getRef(harness.edits)).toEqual([QUESTION_PENDING_INTERRUPT_MESSAGE]);
+    await expectDeferredEdit(harness, QUESTION_PENDING_INTERRUPT_MESSAGE);
   });
 
   test("restores the compaction card when interrupting compaction fails", async () => {
@@ -581,15 +590,14 @@ describe("createCommandHandler", () => {
       },
     ]);
     expect((await getRef(harness.idleCardRef))?.id).toBe("compaction-card");
-    expect(await getRef(harness.replies)).toEqual([]);
-    expect(await getRef(harness.edits)).toEqual([
+    await expectDeferredEdit(
+      harness,
       formatErrorResponse("## ❌ Failed to interrupt compaction", "interrupt failed"),
-    ]);
+    );
   });
 
   test("clears the channel session for the next triggered message", async () => {
     const harness = await runInteraction(await makeHarness({ hasSession: false }), "new-session");
-    expect(await getRef(harness.defers)).toBe(1);
     expect(await getRef(harness.invalidatedSessions)).toEqual([
       {
         channelId: "channel-1",
@@ -602,10 +610,7 @@ describe("createCommandHandler", () => {
         body: "The next triggered message in this channel will start a new OpenCode session with fresh chat history. Workspace files were left in place.",
       },
     ]);
-    expect(await getRef(harness.replies)).toEqual([]);
-    expect(await getRef(harness.edits)).toEqual([
-      "Cleared this channel's current OpenCode session. The next triggered message here will start a new session with fresh chat history. Workspace files were left in place.",
-    ]);
+    await expectDeferredEdit(harness, freshSessionMessage);
   });
 
   test("logs and still replies when the fresh session info card cannot be posted", async () => {
@@ -616,10 +621,7 @@ describe("createCommandHandler", () => {
       }),
       "new-session",
     );
-    expect(await getRef(harness.defers)).toBe(1);
-    expect(await getRef(harness.edits)).toEqual([
-      "Cleared this channel's current OpenCode session. The next triggered message here will start a new session with fresh chat history. Workspace files were left in place.",
-    ]);
+    await expectDeferredEdit(harness, freshSessionMessage);
     expect(await getRef(harness.warnings)).toEqual(["failed to post fresh session info card"]);
   });
 
@@ -634,11 +636,10 @@ describe("createCommandHandler", () => {
       "invalidate failed",
     );
 
-    expect(await getRef(harness.defers)).toBe(1);
-    expect(await getRef(harness.replies)).toEqual([]);
-    expect(await getRef(harness.edits)).toEqual([
+    await expectDeferredEdit(
+      harness,
       "An unexpected error occurred while processing this command.",
-    ]);
+    );
   });
 
   test("rechecks busy state when /new-session loses the invalidate race", async () => {
@@ -649,9 +650,7 @@ describe("createCommandHandler", () => {
       }),
       "new-session",
     );
-    expect(await getRef(harness.defers)).toBe(1);
-    expect(await getRef(harness.replies)).toEqual([]);
-    expect(await getRef(harness.edits)).toEqual([QUESTION_PENDING_NEW_SESSION_MESSAGE]);
+    await expectDeferredEdit(harness, QUESTION_PENDING_NEW_SESSION_MESSAGE);
     expect(await getRef(harness.invalidatedSessions)).toEqual([]);
   });
 
