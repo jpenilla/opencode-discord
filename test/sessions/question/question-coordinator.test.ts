@@ -13,9 +13,9 @@ import { makeQuestionRuntime } from "@/sessions/question/question-runtime.ts";
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
 import { formatError } from "@/util/errors.ts";
 import { makePostedMessage, makeRecordedComponentInteraction } from "../../support/discord.ts";
-import { getRef, makeMessage, makeSilentLogger } from "../../support/fixtures.ts";
+import { makeMessage, makeSilentLogger } from "../../support/fixtures.ts";
 import { failTest } from "../../support/errors.ts";
-import { appendRef, makeRef, runTestEffect } from "../../support/runtime.ts";
+import { makeRef, runTestEffect } from "../../support/runtime.ts";
 import { makeTestActiveRun, makeTestSession } from "../../support/session.ts";
 import { unsafeStub } from "../../support/stub.ts";
 
@@ -34,31 +34,35 @@ const makeRequest = (id = "req-1") =>
 const staleStateMessage =
   "Another user updated this question prompt before your action was applied. Review the latest card and try again.";
 
+const push = <A>(values: A[], value: A) => {
+  values.push(value);
+  return value;
+};
+
 const makeHarness = async (options?: {
   postQuestionResult?: "success" | "failure";
   rejectResult?: "success" | "failure";
   blockQuestionPost?: boolean;
   replyTargetId?: string;
 }) => {
-  const postedPayloads = await makeRef<MessageCreateOptions[]>([]);
-  const editedPayloads = await makeRef<MessageEditOptions[]>([]);
-  const interactionReplies = await makeRef<Array<{ content?: string | null }>>([]);
-  const sentQuestionUiFailures = await makeRef<string[]>([]);
-  const questionReplyTargetIds = await makeRef<string[]>([]);
-  const questionUiFailureTargetIds = await makeRef<string[]>([]);
-  const replyCalls = await makeRef<string[]>([]);
-  const rejectCalls = await makeRef<string[]>([]);
-  const typingPauseCount = await makeRef(0);
-  const typingResumeCount = await makeRef(0);
-  const typingStopCount = await makeRef(0);
+  const postedPayloads: MessageCreateOptions[] = [];
+  const editedPayloads: MessageEditOptions[] = [];
+  const interactionReplies: Array<{ content?: string | null }> = [];
+  const sentQuestionUiFailures: string[] = [];
+  const questionReplyTargetIds: string[] = [];
+  const questionUiFailureTargetIds: string[] = [];
+  const replyCalls: string[] = [];
+  const rejectCalls: string[] = [];
+  let typingPauseCount = 0;
+  let typingResumeCount = 0;
+  let typingStopCount = 0;
   const typingPausedRef = await makeRef(false);
   const questionPostStarted = await runTestEffect(Deferred.make<void>());
   const allowQuestionPost = await runTestEffect(Deferred.make<void>());
 
   const questionMessage: Message = makePostedMessage(
     "question-message",
-    (payload: MessageEditOptions) =>
-      runTestEffect(appendRef(editedPayloads, payload)).then(() => questionMessage),
+    async (payload: MessageEditOptions) => push(editedPayloads, payload) && questionMessage,
   );
 
   const makeReplyTargetMessage = (id: string) =>
@@ -66,21 +70,18 @@ const makeHarness = async (options?: {
       id,
       channelId: "channel-1",
       author: { id: "owner", tag: "owner#0001" },
-      reply: (payload: MessageCreateOptions) =>
-        runTestEffect(appendRef(questionReplyTargetIds, id)).then(() =>
-          runTestEffect(appendRef(postedPayloads, payload)).then(async () => {
-            if (options?.blockQuestionPost) {
-              await runTestEffect(
-                Deferred.succeed(questionPostStarted, undefined).pipe(Effect.ignore),
-              );
-              await runTestEffect(Deferred.await(allowQuestionPost));
-            }
-            if (options?.postQuestionResult === "failure") {
-              throw new Error("post failed");
-            }
-            return questionMessage;
-          }),
-        ),
+      reply: async (payload: MessageCreateOptions) => {
+        push(questionReplyTargetIds, id);
+        push(postedPayloads, payload);
+        if (options?.blockQuestionPost) {
+          await runTestEffect(Deferred.succeed(questionPostStarted, undefined).pipe(Effect.ignore));
+          await runTestEffect(Deferred.await(allowQuestionPost));
+        }
+        if (options?.postQuestionResult === "failure") {
+          throw new Error("post failed");
+        }
+        return questionMessage;
+      },
     });
 
   const originMessage = makeReplyTargetMessage("origin-message");
@@ -98,11 +99,15 @@ const makeHarness = async (options?: {
       requestMessages: [replyTargetMessage],
     },
     typing: {
-      pause: () => Effect.runPromise(Ref.update(typingPauseCount, (count) => count + 1)),
-      resume: () => {
-        void Effect.runPromise(Ref.update(typingResumeCount, (count) => count + 1));
+      pause: async () => {
+        typingPauseCount += 1;
       },
-      stop: () => Effect.runPromise(Ref.update(typingStopCount, (count) => count + 1)),
+      resume: () => {
+        typingResumeCount += 1;
+      },
+      stop: async () => {
+        typingStopCount += 1;
+      },
     },
   });
 
@@ -117,21 +122,32 @@ const makeHarness = async (options?: {
   const rawRuntime = await runTestEffect(
     makeQuestionRuntime({
       getSessionContext: () => Ref.get(sessionContextRef),
-      replyToQuestion: (_opencode, requestId) => appendRef(replyCalls, requestId),
+      replyToQuestion: (_opencode, requestId) =>
+        Effect.sync(() => {
+          replyCalls.push(requestId);
+        }),
       rejectQuestion: (_opencode, requestId) =>
-        appendRef(rejectCalls, requestId).pipe(
+        Effect.sync(() => {
+          rejectCalls.push(requestId);
+        }).pipe(
           Effect.flatMap(() =>
             options?.rejectResult === "failure" ? failTest("reject failed") : Effect.void,
           ),
         ),
       sendQuestionUiFailure: (message, error) =>
-        appendRef(questionUiFailureTargetIds, message.id).pipe(
-          Effect.andThen(appendRef(sentQuestionUiFailures, String(error))),
-        ),
+        Effect.sync(() => {
+          questionUiFailureTargetIds.push(message.id);
+          sentQuestionUiFailures.push(String(error));
+        }),
       logger: makeSilentLogger(),
       formatError,
     }),
   );
+
+  const recordInteractionReply = (payload: unknown) =>
+    Promise.resolve(push(interactionReplies, payload as { content?: string | null })).then(
+      () => undefined,
+    );
 
   const reconcileTyping = () =>
     rawRuntime.hasPendingQuestions(session.opencode.sessionId).pipe(
@@ -185,14 +201,13 @@ const makeHarness = async (options?: {
     questionUiFailureTargetIds,
     replyCalls,
     rejectCalls,
-    typingPauseCount,
-    typingResumeCount,
-    typingStopCount,
+    readTypingPauseCount: () => typingPauseCount,
+    readTypingResumeCount: () => typingResumeCount,
+    readTypingStopCount: () => typingStopCount,
     makeButtonInteraction: (input: { customId: string; userId?: string; messageId?: string }) =>
       makeRecordedComponentInteraction("button", {
         ...input,
-        onReply: (payload) =>
-          runTestEffect(appendRef(interactionReplies, payload as { content?: string | null })),
+        onReply: recordInteractionReply,
         update: () => Promise.resolve(questionMessage),
         followUp: () => Promise.resolve(questionMessage),
       }) as Interaction,
@@ -204,16 +219,14 @@ const makeHarness = async (options?: {
     }) =>
       makeRecordedComponentInteraction("select", {
         ...input,
-        onReply: (payload) =>
-          runTestEffect(appendRef(interactionReplies, payload as { content?: string | null })),
+        onReply: recordInteractionReply,
         update: () => Promise.resolve(questionMessage),
       }) as Interaction,
     makeModalInteraction: (input: { customId: string; value: string; userId?: string }) =>
       makeRecordedComponentInteraction("modal", {
         ...input,
         messageId: questionMessage.id,
-        onReply: (payload) =>
-          runTestEffect(appendRef(interactionReplies, payload as { content?: string | null })),
+        onReply: recordInteractionReply,
         followUp: () => Promise.resolve(questionMessage),
       }) as Interaction,
   };
@@ -238,9 +251,9 @@ describe("makeQuestionRuntime", () => {
     await ask(harness);
     await ask(harness);
 
-    expect((await getRef(harness.postedPayloads)).length).toBe(1);
-    expect(await getRef(harness.questionReplyTargetIds)).toEqual(["origin-message"]);
-    expect(await getRef(harness.typingPauseCount)).toBe(1);
+    expect(harness.postedPayloads).toHaveLength(1);
+    expect(harness.questionReplyTargetIds).toEqual(["origin-message"]);
+    expect(harness.readTypingPauseCount()).toBe(1);
 
     await Effect.runPromise(
       harness.runtime.routeEvent({
@@ -251,8 +264,8 @@ describe("makeQuestionRuntime", () => {
       }),
     );
 
-    expect((await getRef(harness.editedPayloads)).length).toBe(1);
-    expect(await getRef(harness.typingResumeCount)).toBe(1);
+    expect(harness.editedPayloads).toHaveLength(1);
+    expect(harness.readTypingResumeCount()).toBe(1);
   });
 
   test("sends a UI failure reply when posting the question and rejecting it both fail", async () => {
@@ -264,10 +277,10 @@ describe("makeQuestionRuntime", () => {
 
     await ask(harness);
 
-    expect(await getRef(harness.rejectCalls)).toEqual([harness.request.id]);
-    expect(await getRef(harness.sentQuestionUiFailures)).toEqual(["post failed"]);
-    expect(await getRef(harness.questionUiFailureTargetIds)).toEqual(["follow-up-message"]);
-    expect(await getRef(harness.typingStopCount)).toBe(1);
+    expect(harness.rejectCalls).toEqual([harness.request.id]);
+    expect(harness.sentQuestionUiFailures).toEqual(["post failed"]);
+    expect(harness.questionUiFailureTargetIds).toEqual(["follow-up-message"]);
+    expect(harness.readTypingStopCount()).toBe(1);
     expect(harness.activeRun.questionOutcome).toEqual({
       _tag: "ui-failure",
       message: "post failed",
@@ -289,8 +302,8 @@ describe("makeQuestionRuntime", () => {
       ),
     );
 
-    expect(await getRef(harness.interactionReplies)).toEqual([]);
-    expect(await getRef(harness.replyCalls)).toEqual([harness.request.id]);
+    expect(harness.interactionReplies).toEqual([]);
+    expect(harness.replyCalls).toEqual([harness.request.id]);
   });
 
   test("expires question batches for a session and treats later interactions as expired", async () => {
@@ -308,10 +321,8 @@ describe("makeQuestionRuntime", () => {
       ),
     );
 
-    expect((await getRef(harness.editedPayloads)).length).toBe(1);
-    expect((await getRef(harness.interactionReplies))[0]?.content).toBe(
-      "This question prompt has expired.",
-    );
+    expect(harness.editedPayloads).toHaveLength(1);
+    expect(harness.interactionReplies[0]?.content).toBe("This question prompt has expired.");
   });
 
   test("shows a late question card and clears interruptRequested once the question wins the race", async () => {
@@ -321,9 +332,9 @@ describe("makeQuestionRuntime", () => {
     await ask(harness);
 
     expect(harness.activeRun.interruptRequested).toBe(false);
-    expect(await getRef(harness.rejectCalls)).toEqual([]);
-    expect(await getRef(harness.postedPayloads)).toHaveLength(1);
-    expect(await getRef(harness.editedPayloads)).toHaveLength(0);
+    expect(harness.rejectCalls).toEqual([]);
+    expect(harness.postedPayloads).toHaveLength(1);
+    expect(harness.editedPayloads).toHaveLength(0);
   });
 
   test("anchors question cards to the current prompt reply target", async () => {
@@ -331,7 +342,7 @@ describe("makeQuestionRuntime", () => {
 
     await ask(harness);
 
-    expect(await getRef(harness.questionReplyTargetIds)).toEqual(["follow-up-message"]);
+    expect(harness.questionReplyTargetIds).toEqual(["follow-up-message"]);
   });
 
   test("expires a submitting batch if the session disappears before the reply RPC starts", async () => {
@@ -347,7 +358,7 @@ describe("makeQuestionRuntime", () => {
       ),
     );
 
-    expect(await getRef(harness.replyCalls)).toEqual([]);
+    expect(harness.replyCalls).toEqual([]);
     expect(
       await Effect.runPromise(harness.runtime.rawRuntime.hasPendingQuestions("session-1")),
     ).toBe(false);
@@ -359,7 +370,7 @@ describe("makeQuestionRuntime", () => {
     await ask(harness);
     await Effect.runPromise(harness.runtime.shutdown());
 
-    const edits = await getRef(harness.editedPayloads);
+    const edits = harness.editedPayloads;
     expect(edits).toHaveLength(1);
     expect(JSON.stringify(edits[0])).toContain("Questions expired");
     expect(JSON.stringify(edits[0])).toContain(
@@ -387,7 +398,7 @@ describe("makeQuestionRuntime", () => {
       ),
     );
 
-    expect((await getRef(harness.interactionReplies)).at(-1)?.content).toBe(staleStateMessage);
+    expect(harness.interactionReplies.at(-1)?.content).toBe(staleStateMessage);
   });
 
   test("replies with a stale-state error for modal submissions from an old version", async () => {
@@ -412,7 +423,7 @@ describe("makeQuestionRuntime", () => {
       ),
     );
 
-    expect((await getRef(harness.interactionReplies)).at(-1)?.content).toBe(staleStateMessage);
+    expect(harness.interactionReplies.at(-1)?.content).toBe(staleStateMessage);
   });
 
   test("shuts down open questions per session and ignores later question events", async () => {
@@ -427,19 +438,17 @@ describe("makeQuestionRuntime", () => {
 
     await Effect.runPromise(harness.runtime.shutdown());
 
-    expect(await getRef(harness.rejectCalls)).toEqual([harness.request.id]);
+    expect(harness.rejectCalls).toEqual([harness.request.id]);
     expect(await Effect.runPromise(harness.runtime.rawRuntime.hasPendingQuestionsAnywhere())).toBe(
       false,
     );
-    expect(await getRef(harness.postedPayloads)).toHaveLength(1);
-    expect(await getRef(harness.editedPayloads)).toHaveLength(1);
-    expect(JSON.stringify((await getRef(harness.editedPayloads))[0])).toContain(
-      "Questions expired",
-    );
+    expect(harness.postedPayloads).toHaveLength(1);
+    expect(harness.editedPayloads).toHaveLength(1);
+    expect(JSON.stringify(harness.editedPayloads[0])).toContain("Questions expired");
 
     const lateResult = await ask(harness, makeRequest("req-2"));
 
     expect(lateResult).toBeNull();
-    expect(await getRef(harness.rejectCalls)).toEqual([harness.request.id]);
+    expect(harness.rejectCalls).toEqual([harness.request.id]);
   });
 });

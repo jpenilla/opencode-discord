@@ -16,23 +16,19 @@ import {
 } from "@/sessions/run/progress.ts";
 import type { ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
 import { cardText, makePostedMessage, makeSendableChannel } from "../../support/discord.ts";
+import { makeDeferred, runTestEffect } from "../../support/runtime.ts";
 import { unsafeStub } from "../../support/stub.ts";
 
 const makeHarness = async (showThinking = true) => {
-  const sentPayloads = await Effect.runPromise(
-    Ref.make<Array<MessageCreateOptions | MessageEditOptions>>([]),
-  );
-  const editedPayloads = await Effect.runPromise(
-    Ref.make<Array<MessageCreateOptions | MessageEditOptions>>([]),
-  );
-  const nextMessageId = await Effect.runPromise(Ref.make(0));
+  const sentPayloads: Array<MessageCreateOptions | MessageEditOptions> = [];
+  const editedPayloads: Array<MessageCreateOptions | MessageEditOptions> = [];
+  let nextMessageId = 0;
 
   const nextPostedMessage = (): Message => {
-    const id = `card-${Effect.runSync(Ref.updateAndGet(nextMessageId, (count) => count + 1))}`;
+    nextMessageId += 1;
+    const id = `card-${nextMessageId}`;
     return makePostedMessage(id, (payload: MessageEditOptions) =>
-      Effect.runPromise(Ref.update(editedPayloads, (current) => [...current, payload])).then(() =>
-        nextPostedMessage(),
-      ),
+      Promise.resolve(editedPayloads.push(payload)).then(() => nextPostedMessage()),
     );
   };
 
@@ -48,9 +44,7 @@ const makeHarness = async (showThinking = true) => {
     guild: null,
     channel: makeSendableChannel({
       send: (payload: MessageCreateOptions) =>
-        Effect.runPromise(Ref.update(sentPayloads, (current) => [...current, payload])).then(() =>
-          nextPostedMessage(),
-        ),
+        Promise.resolve(sentPayloads.push(payload)).then(() => nextPostedMessage()),
     }),
   });
 
@@ -144,7 +138,7 @@ const runWorkerScenario = async <A>(input: {
   afterEvents?: (queue: Queue.Queue<RunProgressEvent>) => Effect.Effect<void>;
   collect: (harness: Awaited<ReturnType<typeof makeHarness>>) => Effect.Effect<A, never, never>;
 }) =>
-  Effect.runPromise(
+  runTestEffect(
     Effect.scoped(
       Effect.gen(function* () {
         const queue = yield* Queue.unbounded<RunProgressEvent>();
@@ -161,10 +155,7 @@ const runWorkerScenario = async <A>(input: {
   );
 
 const collectCards = (harness: Awaited<ReturnType<typeof makeHarness>>) =>
-  Effect.all({
-    sent: Ref.get(harness.sentPayloads),
-    edited: Ref.get(harness.editedPayloads),
-  });
+  Effect.succeed({ sent: harness.sentPayloads, edited: harness.editedPayloads });
 
 const finalizeEvent = (ack: Deferred.Deferred<void>, reason?: "interrupted"): RunProgressEvent => ({
   type: "run-finalizing",
@@ -176,7 +167,7 @@ const awaitAck = (ack: Deferred.Deferred<void>) => Deferred.await(ack);
 
 const runFinalizationScenario = async (reason: "interrupted") => {
   const harness = await makeHarness();
-  const ack = await Effect.runPromise(Deferred.make<void>());
+  const ack = await makeDeferred<void>();
 
   return runWorkerScenario({
     harness,
@@ -198,12 +189,12 @@ const runFinalizationScenario = async (reason: "interrupted") => {
 
 describe("takeProgressBatch", () => {
   test("blocks until the first event arrives and preserves queued overflow for the next drain", async () => {
-    const queue = await Effect.runPromise(Queue.unbounded<RunProgressEvent>());
+    const queue = await runTestEffect(Queue.unbounded<RunProgressEvent>());
     const events = Array.from({ length: maxProgressBatchSize + 5 }, (_, index) =>
       makeReasoningCompletedEvent(index + 1),
     );
 
-    const { firstBatch, secondBatch } = await Effect.runPromise(
+    const { firstBatch, secondBatch } = await runTestEffect(
       Effect.scoped(
         Effect.gen(function* () {
           const fiber = yield* takeProgressBatch(queue).pipe(
@@ -238,7 +229,7 @@ describe("takeProgressBatch", () => {
 describe("runProgressWorker", () => {
   test("ignores session-compacted without an active compaction in this worker", async () => {
     const harness = await makeHarness();
-    const ack = await Effect.runPromise(Deferred.make<void>());
+    const ack = await makeDeferred<void>();
 
     const result = await runWorkerScenario({
       harness,
@@ -273,8 +264,8 @@ describe("runProgressWorker", () => {
 
   test("ignores a late session-compacted event after interrupted compaction finalization", async () => {
     const harness = await makeHarness();
-    const firstAck = await Effect.runPromise(Deferred.make<void>());
-    const secondAck = await Effect.runPromise(Deferred.make<void>());
+    const firstAck = await makeDeferred<void>();
+    const secondAck = await makeDeferred<void>();
 
     const result = await runWorkerScenario({
       harness,
@@ -324,7 +315,7 @@ describe("runProgressWorker", () => {
 
   test("sends completed thinking messages when enabled for the channel", async () => {
     const harness = await makeHarness(true);
-    const ack = await Effect.runPromise(Deferred.make<void>());
+    const ack = await makeDeferred<void>();
 
     const result = await runWorkerScenario({
       harness,
@@ -337,7 +328,7 @@ describe("runProgressWorker", () => {
         finalizeEvent(ack),
       ],
       afterEvents: () => awaitAck(ack),
-      collect: (currentHarness) => Ref.get(currentHarness.sentPayloads),
+      collect: (currentHarness) => Effect.succeed(currentHarness.sentPayloads),
     });
 
     expect(result.map((payload) => payload.content)).toContain("*🧠 planning the change*");
@@ -345,7 +336,7 @@ describe("runProgressWorker", () => {
 
   test("suppresses completed thinking messages when disabled for the channel", async () => {
     const harness = await makeHarness(false);
-    const ack = await Effect.runPromise(Deferred.make<void>());
+    const ack = await makeDeferred<void>();
 
     const result = await runWorkerScenario({
       harness,
@@ -358,7 +349,7 @@ describe("runProgressWorker", () => {
         finalizeEvent(ack),
       ],
       afterEvents: () => awaitAck(ack),
-      collect: (currentHarness) => Ref.get(currentHarness.sentPayloads),
+      collect: (currentHarness) => Effect.succeed(currentHarness.sentPayloads),
     });
 
     expect(result.map((payload) => payload.content)).not.toContain("*🧠 planning the change*");
@@ -366,7 +357,7 @@ describe("runProgressWorker", () => {
 
   test("uses updated channel settings during an active run", async () => {
     const harness = await makeHarness(true);
-    const ack = await Effect.runPromise(Deferred.make<void>());
+    const ack = await makeDeferred<void>();
 
     const result = await runWorkerScenario({
       harness,
@@ -379,7 +370,7 @@ describe("runProgressWorker", () => {
           };
         }),
       afterEvents: () => awaitAck(ack),
-      collect: (currentHarness) => Ref.get(currentHarness.sentPayloads),
+      collect: (currentHarness) => Effect.succeed(currentHarness.sentPayloads),
     });
 
     expect(result.map((payload) => payload.content)).not.toContain("*🧠 thinking 1*");
@@ -387,7 +378,7 @@ describe("runProgressWorker", () => {
 
   test("ignores later terminal updates once a tool call is already terminal", async () => {
     const harness = await makeHarness();
-    const ack = await Effect.runPromise(Deferred.make<void>());
+    const ack = await makeDeferred<void>();
 
     const result = await runWorkerScenario({
       harness,
