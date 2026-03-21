@@ -20,6 +20,13 @@ const makeInitialRequests = (message: Message): NonEmptyRunRequestBatch => [
 ];
 
 const runExecutorEffect = runTestEffect;
+const makeRef = <A>(value: A) => runTestEffect(Ref.make(value));
+const get = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
+const makeRunInput = (messageId = "m-1") => {
+  const session = makeTestSession();
+  const responseMessage = makeRunMessage(messageId);
+  return { session, initialRequests: makeInitialRequests(responseMessage) };
+};
 
 const makeRuntime = async (options?: {
   promptResult?: PromptResult;
@@ -27,10 +34,10 @@ const makeRuntime = async (options?: {
   progressBehavior?: "ack" | "exit";
   configureActiveRun?: (activeRun: ActiveRun) => void;
 }) => {
-  const calls = await runTestEffect(Ref.make<string[]>([]));
-  const finalResponseMessageIds = await runTestEffect(Ref.make<string[]>([]));
-  const questionUiFailureMessageIds = await runTestEffect(Ref.make<string[]>([]));
-  const runFailureMessageIds = await runTestEffect(Ref.make<string[]>([]));
+  const calls = await makeRef<string[]>([]);
+  const finalResponseMessageIds = await makeRef<string[]>([]);
+  const questionUiFailureMessageIds = await makeRef<string[]>([]);
+  const runFailureMessageIds = await makeRef<string[]>([]);
   const record = (entry: string) => appendRef(calls, entry);
 
   return {
@@ -141,14 +148,12 @@ const makeRuntime = async (options?: {
 
 describe("executeRunBatch", () => {
   test("runs a successful batch through progress finalization and final reply", async () => {
-    const session = makeTestSession();
-    const responseMessage = makeRunMessage("m-1");
-    const initialRequests = makeInitialRequests(responseMessage);
+    const { session, initialRequests } = makeRunInput();
     const { runtime, calls } = await makeRuntime();
 
     await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
-    expect(await Effect.runPromise(Ref.get(calls))).toEqual([
+    expect(await get(calls)).toEqual([
       "typing:start",
       "setActiveRun:active",
       "runPrompts",
@@ -164,7 +169,7 @@ describe("executeRunBatch", () => {
   });
 
   test("sends the final Discord reply against the current prompt reply target", async () => {
-    const session = makeTestSession();
+    const { session } = makeRunInput();
     const originMessage = makeRunMessage("trigger-message");
     const replyTargetMessage = makeRunMessage("follow-up-message");
     const initialRequests = makeInitialRequests(originMessage);
@@ -185,15 +190,11 @@ describe("executeRunBatch", () => {
 
     await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
-    expect(await Effect.runPromise(Ref.get(finalResponseMessageIds))).toEqual([
-      "follow-up-message",
-    ]);
+    expect(await get(finalResponseMessageIds)).toEqual(["follow-up-message"]);
   });
 
   test("sends the question UI failure reply for empty transcripts with an unnotified UI failure", async () => {
-    const session = makeTestSession();
-    const responseMessage = makeRunMessage("m-1");
-    const initialRequests = makeInitialRequests(responseMessage);
+    const { session, initialRequests } = makeRunInput();
     const replyTargetMessage = makeRunMessage("question-target");
     const { runtime, calls, questionUiFailureMessageIds } = await makeRuntime({
       promptResult: { messageId: "msg-1", transcript: "" },
@@ -214,18 +215,14 @@ describe("executeRunBatch", () => {
 
     await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
-    const seen = await Effect.runPromise(Ref.get(calls));
+    const seen = await get(calls);
     expect(seen).toContain("sendQuestionUiFailure:question failed");
     expect(seen.some((entry) => entry.startsWith("sendFinalResponse:"))).toBe(false);
-    expect(await Effect.runPromise(Ref.get(questionUiFailureMessageIds))).toEqual([
-      "question-target",
-    ]);
+    expect(await get(questionUiFailureMessageIds)).toEqual(["question-target"]);
   });
 
   test("sends a run failure and triggers health recovery after non-interrupt errors", async () => {
-    const session = makeTestSession();
-    const responseMessage = makeRunMessage("m-1");
-    const initialRequests = makeInitialRequests(responseMessage);
+    const { session, initialRequests } = makeRunInput();
     const replyTargetMessage = makeRunMessage("failure-target");
     const { runtime, calls, runFailureMessageIds } = await makeRuntime({
       promptFailure: new Error("boom"),
@@ -241,7 +238,7 @@ describe("executeRunBatch", () => {
 
     await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
-    expect(await Effect.runPromise(Ref.get(calls))).toEqual([
+    expect(await get(calls)).toEqual([
       "typing:start",
       "setActiveRun:active",
       "runPrompts",
@@ -253,13 +250,11 @@ describe("executeRunBatch", () => {
       "setActiveRun:null",
       "ensureSessionHealthAfterFailure",
     ]);
-    expect(await Effect.runPromise(Ref.get(runFailureMessageIds))).toEqual(["failure-target"]);
+    expect(await get(runFailureMessageIds)).toEqual(["failure-target"]);
   });
 
   test("suppresses run failure and health recovery when the run was intentionally interrupted", async () => {
-    const session = makeTestSession();
-    const responseMessage = makeRunMessage("m-1");
-    const initialRequests = makeInitialRequests(responseMessage);
+    const { session, initialRequests } = makeRunInput();
     const { runtime, calls } = await makeRuntime({
       promptFailure: new Error("interrupted"),
       configureActiveRun: (activeRun) => {
@@ -269,7 +264,7 @@ describe("executeRunBatch", () => {
 
     await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
-    expect(await Effect.runPromise(Ref.get(calls))).toEqual([
+    expect(await get(calls)).toEqual([
       "typing:start",
       "setActiveRun:active",
       "runPrompts",
@@ -284,9 +279,7 @@ describe("executeRunBatch", () => {
   });
 
   test("clears a stale interrupt request when the run still completes successfully", async () => {
-    const session = makeTestSession();
-    const responseMessage = makeRunMessage("m-1");
-    const initialRequests = makeInitialRequests(responseMessage);
+    const { session, initialRequests } = makeRunInput();
     const { runtime, calls } = await makeRuntime({
       configureActiveRun: (activeRun) => {
         activeRun.interruptRequested = true;
@@ -295,7 +288,7 @@ describe("executeRunBatch", () => {
 
     await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
-    expect(await Effect.runPromise(Ref.get(calls))).toEqual([
+    expect(await get(calls)).toEqual([
       "typing:start",
       "setActiveRun:active",
       "runPrompts",
@@ -311,16 +304,14 @@ describe("executeRunBatch", () => {
   });
 
   test("warns when the progress worker already exited before finalization", async () => {
-    const session = makeTestSession();
-    const responseMessage = makeRunMessage("m-1");
-    const initialRequests = makeInitialRequests(responseMessage);
+    const { session, initialRequests } = makeRunInput();
     const { runtime, calls } = await makeRuntime({
       progressBehavior: "exit",
     });
 
     await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
-    expect(await Effect.runPromise(Ref.get(calls))).toEqual([
+    expect(await get(calls)).toEqual([
       "progress:exit",
       "typing:start",
       "setActiveRun:active",
@@ -340,8 +331,8 @@ describe("executeRunBatch", () => {
     const originMessage = makeRunMessage("trigger-message");
     const followUpMessage = makeRunMessage("follow-up-message");
     const initialRequests = makeInitialRequests(originMessage);
-    const calls = await Effect.runPromise(Ref.make<string[]>([]));
-    const finalResponseMessageIds = await Effect.runPromise(Ref.make<string[]>([]));
+    const calls = await makeRef<string[]>([]);
+    const finalResponseMessageIds = await makeRef<string[]>([]);
     const record = (entry: string) => appendRef(calls, entry);
 
     const runtime = {
@@ -384,10 +375,7 @@ describe("executeRunBatch", () => {
 
     await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
-    expect(await Effect.runPromise(Ref.get(finalResponseMessageIds))).toEqual([
-      "trigger-message",
-      "follow-up-message",
-    ]);
+    expect(await get(finalResponseMessageIds)).toEqual(["trigger-message", "follow-up-message"]);
   });
 
   test("sends replies in order across multiple chained follow-up rounds", async () => {
@@ -396,7 +384,7 @@ describe("executeRunBatch", () => {
     const followUpMessageOne = makeRunMessage("follow-up-message-1");
     const followUpMessageTwo = makeRunMessage("follow-up-message-2");
     const initialRequests = makeInitialRequests(originMessage);
-    const finalResponseMessageIds = await Effect.runPromise(Ref.make<string[]>([]));
+    const finalResponseMessageIds = await makeRef<string[]>([]);
 
     const runtime = {
       ...(await makeRuntime()).runtime,
@@ -444,7 +432,7 @@ describe("executeRunBatch", () => {
 
     await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 
-    expect(await Effect.runPromise(Ref.get(finalResponseMessageIds))).toEqual([
+    expect(await get(finalResponseMessageIds)).toEqual([
       "trigger-message:first reply",
       "follow-up-message-1:second reply",
       "follow-up-message-2:third reply",
