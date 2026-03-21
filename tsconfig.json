@@ -22,7 +22,7 @@
           "missedPipeableOpportunity": "suggestion",
           "missingEffectContext": "error",
           "missingEffectServiceDependency": "warning",
-          "nodeBuiltinImport": "suggestion",
+          "nodeBuiltinImport": "message",
           "schemaUnionOfLiterals": "suggestion",
           "serviceNotAsClass": "message",
         },

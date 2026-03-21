@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ChannelType } from "discord.js";
-import { Deferred, Effect, Ref } from "effect";
+import { Data, Deferred, Effect, Ref } from "effect";
 
 import type { SessionHandle } from "@/opencode/service.ts";
 import { createSessionRegistry, type SessionRegistryState } from "@/sessions/session-runtime.ts";
@@ -59,6 +59,11 @@ const makeState = (): SessionRegistryState => ({
 const logger = makeSilentLogger();
 
 const runEffect = runTestEffect;
+
+class SettingsUnavailable extends Data.TaggedError("SettingsUnavailable")<{
+  readonly message: string;
+}> {}
+
 const appendClosed = (closed: Ref.Ref<string[]>, sessionId: string) => {
   Effect.runSync(appendRef(closed, sessionId));
 };
@@ -249,11 +254,12 @@ describe("createSessionRegistry", () => {
 
   test("cleans the new session root when setup fails before activation", async () => {
     const { lifecycle, removedRoots, started } = await makeHarness({
-      getPersistedChannelSettings: () => Effect.fail(new Error("settings unavailable")),
+      getPersistedChannelSettings: () =>
+        Effect.fail(new SettingsUnavailable({ message: "settings unavailable" })),
     });
 
     await expect(
-      runEffect(lifecycle.createOrGetSession(makeRegistryMessage("channel-fail"))),
+      lifecycle.createOrGetSession(makeRegistryMessage("channel-fail")).pipe(runEffect),
     ).rejects.toThrow("settings unavailable");
 
     expect(await readRef(removedRoots)).toEqual(["/tmp/session-root-1"]);

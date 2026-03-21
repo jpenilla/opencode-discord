@@ -34,14 +34,13 @@ describe("consumeServerUrlOutput", () => {
 describe("SandboxBackendLayer", () => {
   test("fails fast when the opencode binary is missing", async () => {
     await expect(
-      runEffect(
-        Layer.build(
-          SandboxBackendLayer.pipe(
-            Layer.provide(
-              Layer.succeed(AppConfig, makeConfig({ opencodeBin: "/definitely/missing/opencode" })),
-            ),
-          ),
-        ).pipe(Effect.scoped),
+      SandboxBackendLayer.pipe(
+        Layer.provide(
+          Layer.succeed(AppConfig, makeConfig({ opencodeBin: "/definitely/missing/opencode" })),
+        ),
+        Layer.build,
+        Effect.scoped,
+        runEffect,
       ),
     ).rejects.toThrow("opencode binary not found");
   });
