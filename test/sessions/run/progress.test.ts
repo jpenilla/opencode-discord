@@ -143,41 +143,63 @@ const reasoningIds = (events: ReadonlyArray<RunProgressEvent>) =>
     return event.partId;
   });
 
-const runFinalizationScenario = async (reason: "interrupted") => {
-  const harness = await makeHarness();
-
-  const result = await Effect.runPromise(
+const runWorkerScenario = async <A>(input: {
+  harness: Awaited<ReturnType<typeof makeHarness>>;
+  events: RunProgressEvent[];
+  beforeEvents?: (queue: Queue.Queue<RunProgressEvent>) => Effect.Effect<void>;
+  afterEvents?: (queue: Queue.Queue<RunProgressEvent>) => Effect.Effect<void>;
+  collect: (harness: Awaited<ReturnType<typeof makeHarness>>) => Effect.Effect<A, never, never>;
+}) =>
+  Effect.runPromise(
     Effect.scoped(
       Effect.gen(function* () {
         const queue = yield* Queue.unbounded<RunProgressEvent>();
-        const worker = yield* startProgressWorker(harness, queue);
+        const worker = yield* startProgressWorker(input.harness, queue);
 
-        const ack = yield* Deferred.make<void>();
-        yield* Queue.offer(queue, {
-          type: "tool-updated",
-          part: makeToolPart("running"),
-        });
-        yield* Queue.offer(queue, {
-          type: "session-compacting",
-          part: makeCompactionPart(),
-        });
-        yield* Queue.offer(queue, {
-          type: "run-finalizing",
-          ack,
-          reason,
-        });
-        yield* Deferred.await(ack);
+        yield* input.beforeEvents?.(queue) ?? Effect.void;
+        yield* Queue.offerAll(queue, input.events);
+        yield* input.afterEvents?.(queue) ?? Effect.void;
         yield* Fiber.interrupt(worker);
 
-        return {
-          sent: yield* Ref.get(harness.sentPayloads),
-          edited: yield* Ref.get(harness.editedPayloads),
-        };
+        return yield* input.collect(input.harness);
       }),
     ).pipe(Effect.provide(BunServices.layer)),
   );
 
-  return result;
+const collectCards = (harness: Awaited<ReturnType<typeof makeHarness>>) =>
+  Effect.all({
+    sent: Ref.get(harness.sentPayloads),
+    edited: Ref.get(harness.editedPayloads),
+  });
+
+const finalizeEvent = (ack: Deferred.Deferred<void>, reason?: "interrupted"): RunProgressEvent => ({
+  type: "run-finalizing",
+  ack,
+  reason,
+});
+
+const awaitAck = (ack: Deferred.Deferred<void>) => Deferred.await(ack);
+
+const runFinalizationScenario = async (reason: "interrupted") => {
+  const harness = await makeHarness();
+  const ack = await Effect.runPromise(Deferred.make<void>());
+
+  return runWorkerScenario({
+    harness,
+    events: [
+      {
+        type: "tool-updated",
+        part: makeToolPart("running"),
+      },
+      {
+        type: "session-compacting",
+        part: makeCompactionPart(),
+      },
+      finalizeEvent(ack, reason),
+    ],
+    afterEvents: () => awaitAck(ack),
+    collect: collectCards,
+  });
 };
 
 describe("takeProgressBatch", () => {
@@ -222,34 +244,22 @@ describe("takeProgressBatch", () => {
 describe("runProgressWorker", () => {
   test("ignores session-compacted without an active compaction in this worker", async () => {
     const harness = await makeHarness();
+    const ack = await Effect.runPromise(Deferred.make<void>());
 
-    const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* startProgressWorker(harness, queue);
-
-          const ack = yield* Deferred.make<void>();
-          yield* Queue.offer(queue, {
-            type: "session-compacted",
-            compacted: {
-              sessionID: "session-1",
-            },
-          });
-          yield* Queue.offer(queue, {
-            type: "run-finalizing",
-            ack,
-          });
-          yield* Deferred.await(ack);
-          yield* Fiber.interrupt(worker);
-
-          return {
-            sent: yield* Ref.get(harness.sentPayloads),
-            edited: yield* Ref.get(harness.editedPayloads),
-          };
-        }),
-      ).pipe(Effect.provide(BunServices.layer)),
-    );
+    const result = await runWorkerScenario({
+      harness,
+      events: [
+        {
+          type: "session-compacted",
+          compacted: {
+            sessionID: "session-1",
+          },
+        },
+        finalizeEvent(ack),
+      ],
+      afterEvents: () => awaitAck(ack),
+      collect: collectCards,
+    });
 
     expect(result.sent.map(cardText)).toEqual([]);
     expect(result.edited.map(cardText)).toEqual([]);
@@ -269,45 +279,35 @@ describe("runProgressWorker", () => {
 
   test("ignores a late session-compacted event after interrupted compaction finalization", async () => {
     const harness = await makeHarness();
+    const firstAck = await Effect.runPromise(Deferred.make<void>());
+    const secondAck = await Effect.runPromise(Deferred.make<void>());
 
-    const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* startProgressWorker(harness, queue);
-
-          const firstAck = yield* Deferred.make<void>();
-          const secondAck = yield* Deferred.make<void>();
-          yield* Queue.offer(queue, {
-            type: "session-compacting",
-            part: makeCompactionPart(),
-          });
-          yield* Queue.offer(queue, {
-            type: "run-finalizing",
-            ack: firstAck,
-            reason: "interrupted",
-          });
-          yield* Deferred.await(firstAck);
-          yield* Queue.offer(queue, {
-            type: "session-compacted",
-            compacted: {
-              sessionID: "session-1",
-            },
-          });
-          yield* Queue.offer(queue, {
-            type: "run-finalizing",
-            ack: secondAck,
-          });
-          yield* Deferred.await(secondAck);
-          yield* Fiber.interrupt(worker);
-
-          return {
-            sent: yield* Ref.get(harness.sentPayloads),
-            edited: yield* Ref.get(harness.editedPayloads),
-          };
-        }),
-      ).pipe(Effect.provide(BunServices.layer)),
-    );
+    const result = await runWorkerScenario({
+      harness,
+      events: [
+        {
+          type: "session-compacting",
+          part: makeCompactionPart(),
+        },
+        finalizeEvent(firstAck, "interrupted"),
+      ],
+      afterEvents: (queue) =>
+        awaitAck(firstAck).pipe(
+          Effect.andThen(
+            Queue.offerAll(queue, [
+              {
+                type: "session-compacted",
+                compacted: {
+                  sessionID: "session-1",
+                },
+              },
+              finalizeEvent(secondAck),
+            ]),
+          ),
+          Effect.andThen(awaitAck(secondAck)),
+        ),
+      collect: collectCards,
+    });
 
     expect(result.sent.map(cardText)).toContain(
       "**🗜️ Compacting session**\nOpenCode is summarizing earlier context for this session.",
@@ -330,131 +330,91 @@ describe("runProgressWorker", () => {
 
   test("sends completed thinking messages when enabled for the channel", async () => {
     const harness = await makeHarness(true);
+    const ack = await Effect.runPromise(Deferred.make<void>());
 
-    const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* startProgressWorker(harness, queue);
-
-          const ack = yield* Deferred.make<void>();
-          yield* Queue.offer(queue, {
-            type: "reasoning-completed",
-            partId: "reasoning-1",
-            text: "planning the change",
-          });
-          yield* Queue.offer(queue, {
-            type: "run-finalizing",
-            ack,
-          });
-          yield* Deferred.await(ack);
-          yield* Fiber.interrupt(worker);
-
-          return yield* Ref.get(harness.sentPayloads);
-        }),
-      ).pipe(Effect.provide(BunServices.layer)),
-    );
+    const result = await runWorkerScenario({
+      harness,
+      events: [
+        {
+          type: "reasoning-completed",
+          partId: "reasoning-1",
+          text: "planning the change",
+        },
+        finalizeEvent(ack),
+      ],
+      afterEvents: () => awaitAck(ack),
+      collect: (currentHarness) => Ref.get(currentHarness.sentPayloads),
+    });
 
     expect(result.map((payload) => payload.content)).toContain("*🧠 planning the change*");
   });
 
   test("suppresses completed thinking messages when disabled for the channel", async () => {
     const harness = await makeHarness(false);
+    const ack = await Effect.runPromise(Deferred.make<void>());
 
-    const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* startProgressWorker(harness, queue);
-
-          const ack = yield* Deferred.make<void>();
-          yield* Queue.offer(queue, {
-            type: "reasoning-completed",
-            partId: "reasoning-1",
-            text: "planning the change",
-          });
-          yield* Queue.offer(queue, {
-            type: "run-finalizing",
-            ack,
-          });
-          yield* Deferred.await(ack);
-          yield* Fiber.interrupt(worker);
-
-          return yield* Ref.get(harness.sentPayloads);
-        }),
-      ).pipe(Effect.provide(BunServices.layer)),
-    );
+    const result = await runWorkerScenario({
+      harness,
+      events: [
+        {
+          type: "reasoning-completed",
+          partId: "reasoning-1",
+          text: "planning the change",
+        },
+        finalizeEvent(ack),
+      ],
+      afterEvents: () => awaitAck(ack),
+      collect: (currentHarness) => Ref.get(currentHarness.sentPayloads),
+    });
 
     expect(result.map((payload) => payload.content)).not.toContain("*🧠 planning the change*");
   });
 
   test("uses updated channel settings during an active run", async () => {
     const harness = await makeHarness(true);
+    const ack = await Effect.runPromise(Deferred.make<void>());
 
-    const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* startProgressWorker(harness, queue);
-
+    const result = await runWorkerScenario({
+      harness,
+      events: [makeReasoningCompletedEvent(1), finalizeEvent(ack)],
+      beforeEvents: () =>
+        Effect.sync(() => {
           harness.session.channelSettings = {
             ...harness.session.channelSettings,
             showThinking: false,
           };
-
-          const ack = yield* Deferred.make<void>();
-          yield* Queue.offer(queue, makeReasoningCompletedEvent(1));
-          yield* Queue.offer(queue, {
-            type: "run-finalizing",
-            ack,
-          });
-          yield* Deferred.await(ack);
-          yield* Fiber.interrupt(worker);
-
-          return yield* Ref.get(harness.sentPayloads);
         }),
-      ).pipe(Effect.provide(BunServices.layer)),
-    );
+      afterEvents: () => awaitAck(ack),
+      collect: (currentHarness) => Ref.get(currentHarness.sentPayloads),
+    });
 
     expect(result.map((payload) => payload.content)).not.toContain("*🧠 thinking 1*");
   });
 
   test("ignores later terminal updates once a tool call is already terminal", async () => {
     const harness = await makeHarness();
+    const ack = await Effect.runPromise(Deferred.make<void>());
 
-    const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const queue = yield* Queue.unbounded<RunProgressEvent>();
-          const worker = yield* startProgressWorker(harness, queue);
-
-          const ack = yield* Deferred.make<void>();
-          yield* Queue.offer(queue, {
-            type: "tool-updated",
-            part: makeToolPart("completed", {
-              title: "Print cwd",
-            }),
-          });
-          yield* Queue.offer(queue, {
-            type: "tool-updated",
-            part: makeToolPart("error", {
-              title: "This terminal update should be ignored",
-            }),
-          });
-          yield* Queue.offer(queue, {
-            type: "run-finalizing",
-            ack,
-          });
-          yield* Deferred.await(ack);
-          yield* Fiber.interrupt(worker);
-
-          return {
-            sent: yield* Ref.get(harness.sentPayloads),
-            edited: yield* Ref.get(harness.editedPayloads),
-          };
-        }),
-      ).pipe(Effect.provide(BunServices.layer)),
-    );
+    const result = await runWorkerScenario({
+      harness,
+      events: [
+        {
+          type: "tool-updated",
+          part: makeToolPart("completed", {
+            title: "Print cwd",
+          }),
+        },
+        {
+          type: "tool-updated",
+          part: makeToolPart("error", {
+            title: "This terminal update should be ignored",
+          }),
+        },
+        finalizeEvent(ack),
+      ],
+      afterEvents: () => awaitAck(ack),
+      collect: collectCards,
+    });
 
     expect(result.sent.map(cardText)).toEqual([
       "**💻 ✅ `bash` Completed in 0.00s**\n`pwd`\nPrint cwd",

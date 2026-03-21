@@ -31,6 +31,8 @@ const makeRequest = (id = "req-1") =>
   });
 
 const makeRef = <A>(value: A) => runTestEffect(Ref.make(value));
+const staleStateMessage =
+  "Another user updated this question prompt before your action was applied. Review the latest card and try again.";
 
 const makeHarness = async (options?: {
   postQuestionResult?: "success" | "failure";
@@ -232,23 +234,23 @@ const makeHarness = async (options?: {
 };
 
 describe("makeQuestionRuntime", () => {
+  const ask = (harness: Awaited<ReturnType<typeof makeHarness>>, request = harness.request) =>
+    Effect.runPromise(
+      harness.runtime.routeEvent({
+        type: "asked",
+        sessionId: harness.session.opencode.sessionId,
+        request,
+      }),
+    );
+
+  const questionId = (harness: Awaited<ReturnType<typeof makeHarness>>, suffix: string) =>
+    `ocq:${harness.request.id}:0:${suffix}`;
+
   test("posts a question batch once and resumes typing after a reply event", async () => {
     const harness = await makeHarness();
 
-    await Effect.runPromise(
-      harness.runtime.routeEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
-    await Effect.runPromise(
-      harness.runtime.routeEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
+    await ask(harness);
+    await ask(harness);
 
     expect((await getRef(harness.postedPayloads)).length).toBe(1);
     expect(await getRef(harness.questionReplyTargetIds)).toEqual(["origin-message"]);
@@ -274,13 +276,7 @@ describe("makeQuestionRuntime", () => {
       replyTargetId: "follow-up-message",
     });
 
-    await Effect.runPromise(
-      harness.runtime.routeEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
+    await ask(harness);
 
     expect(await getRef(harness.rejectCalls)).toEqual([harness.request.id]);
     expect(await getRef(harness.sentQuestionUiFailures)).toEqual(["post failed"]);
@@ -296,18 +292,12 @@ describe("makeQuestionRuntime", () => {
   test("allows question interactions from other users", async () => {
     const harness = await makeHarness();
 
-    await Effect.runPromise(
-      harness.runtime.routeEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
+    await ask(harness);
 
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
-          customId: `ocq:${harness.request.id}:0:submit`,
+          customId: questionId(harness, "submit"),
           userId: "intruder",
         }),
       ),
@@ -320,20 +310,14 @@ describe("makeQuestionRuntime", () => {
   test("expires question batches for a session and treats later interactions as expired", async () => {
     const harness = await makeHarness();
 
-    await Effect.runPromise(
-      harness.runtime.routeEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
+    await ask(harness);
     await Effect.runPromise(
       harness.runtime.terminateForSession(harness.session.opencode.sessionId),
     );
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
-          customId: `ocq:${harness.request.id}:0:submit`,
+          customId: questionId(harness, "submit"),
         }),
       ),
     );
@@ -348,13 +332,7 @@ describe("makeQuestionRuntime", () => {
     const harness = await makeHarness();
     harness.activeRun.interruptRequested = true;
 
-    await Effect.runPromise(
-      harness.runtime.routeEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
+    await ask(harness);
 
     expect(harness.activeRun.interruptRequested).toBe(false);
     expect(await getRef(harness.rejectCalls)).toEqual([]);
@@ -365,13 +343,7 @@ describe("makeQuestionRuntime", () => {
   test("anchors question cards to the current prompt reply target", async () => {
     const harness = await makeHarness({ replyTargetId: "follow-up-message" });
 
-    await Effect.runPromise(
-      harness.runtime.routeEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
+    await ask(harness);
 
     expect(await getRef(harness.questionReplyTargetIds)).toEqual(["follow-up-message"]);
   });
@@ -379,18 +351,12 @@ describe("makeQuestionRuntime", () => {
   test("expires a submitting batch if the session disappears before the reply RPC starts", async () => {
     const harness = await makeHarness();
 
-    await Effect.runPromise(
-      harness.runtime.routeEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
+    await ask(harness);
     await Effect.runPromise(Ref.set(harness.sessionContextRef, null));
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
-          customId: `ocq:${harness.request.id}:0:submit`,
+          customId: questionId(harness, "submit"),
         }),
       ),
     );
@@ -404,13 +370,7 @@ describe("makeQuestionRuntime", () => {
   test("renders shutdown-expired questions immediately when shutdown begins", async () => {
     const harness = await makeHarness();
 
-    await Effect.runPromise(
-      harness.runtime.routeEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
+    await ask(harness);
     await Effect.runPromise(harness.runtime.shutdown());
 
     const edits = await getRef(harness.editedPayloads);
@@ -424,48 +384,34 @@ describe("makeQuestionRuntime", () => {
   test("replies with a stale-state error after a newer page action wins", async () => {
     const harness = await makeHarness();
 
-    await Effect.runPromise(
-      harness.runtime.routeEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
+    await ask(harness);
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
-          customId: `ocq:${harness.request.id}:0:question-next`,
+          customId: questionId(harness, "question-next"),
         }),
       ),
     );
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeButtonInteraction({
-          customId: `ocq:${harness.request.id}:0:question-prev`,
+          customId: questionId(harness, "question-prev"),
           userId: "intruder",
         }),
       ),
     );
 
-    expect((await getRef(harness.interactionReplies)).at(-1)?.content).toBe(
-      "Another user updated this question prompt before your action was applied. Review the latest card and try again.",
-    );
+    expect((await getRef(harness.interactionReplies)).at(-1)?.content).toBe(staleStateMessage);
   });
 
   test("replies with a stale-state error for modal submissions from an old version", async () => {
     const harness = await makeHarness();
 
-    await Effect.runPromise(
-      harness.runtime.routeEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
+    await ask(harness);
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeSelectInteraction({
-          customId: `ocq:${harness.request.id}:0:select:0`,
+          customId: questionId(harness, "select:0"),
           values: ["Yes"],
         }),
       ),
@@ -473,28 +419,20 @@ describe("makeQuestionRuntime", () => {
     await Effect.runPromise(
       harness.runtime.handleInteraction(
         harness.makeModalInteraction({
-          customId: `ocq:${harness.request.id}:0:modal:0`,
+          customId: questionId(harness, "modal:0"),
           value: "Other",
           userId: "intruder",
         }),
       ),
     );
 
-    expect((await getRef(harness.interactionReplies)).at(-1)?.content).toBe(
-      "Another user updated this question prompt before your action was applied. Review the latest card and try again.",
-    );
+    expect((await getRef(harness.interactionReplies)).at(-1)?.content).toBe(staleStateMessage);
   });
 
   test("shuts down open questions per session and ignores later question events", async () => {
     const harness = await makeHarness();
 
-    const firstResult = await Effect.runPromise(
-      harness.runtime.routeEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: harness.request,
-      }),
-    );
+    const firstResult = await ask(harness);
 
     expect(firstResult).not.toBeNull();
     expect(await Effect.runPromise(harness.runtime.rawRuntime.hasPendingQuestionsAnywhere())).toBe(
@@ -513,13 +451,7 @@ describe("makeQuestionRuntime", () => {
       "Questions expired",
     );
 
-    const lateResult = await Effect.runPromise(
-      harness.runtime.routeEvent({
-        type: "asked",
-        sessionId: harness.session.opencode.sessionId,
-        request: makeRequest("req-2"),
-      }),
-    );
+    const lateResult = await ask(harness, makeRequest("req-2"));
 
     expect(lateResult).toBeNull();
     expect(await getRef(harness.rejectCalls)).toEqual([harness.request.id]);
