@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { BunServices } from "@effect/platform-bun";
 import { ChannelType } from "discord.js";
 import { Deferred, Effect, Fiber, Ref } from "effect";
 
@@ -11,6 +10,7 @@ import type { PersistedChannelSession } from "@/state/persistence.ts";
 import { sessionPathsFromRoot } from "@/state/paths.ts";
 import { makeMessage, makeSilentLogger } from "../support/fixtures.ts";
 import { failTest } from "../support/errors.ts";
+import { appendRef, runTestEffect } from "../support/runtime.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const makeRegistryMessage = (channelId = "channel-1") =>
@@ -50,8 +50,17 @@ const makeState = (): SessionRegistryState => ({
 
 const logger = makeSilentLogger();
 
-const runEffect = <A, E = never, R = never>(effect: Effect.Effect<A, E, R>): Promise<A> =>
-  Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer)) as Effect.Effect<A, E, never>);
+const runEffect = runTestEffect;
+const makeRef = <A>(value: A) => runEffect(Ref.make(value));
+const updateMapRef = <K, V>(ref: Ref.Ref<Map<K, V>>, update: (current: Map<K, V>) => void) =>
+  Ref.update(ref, (current) => {
+    const next = new Map(current);
+    update(next);
+    return next;
+  });
+const appendClosed = (closed: Ref.Ref<string[]>, sessionId: string) => {
+  Effect.runSync(appendRef(closed, sessionId));
+};
 
 const makeHarness = async (options?: {
   createOpencodeSession?: (input: {
@@ -65,19 +74,17 @@ const makeHarness = async (options?: {
     channelId: string,
   ) => Effect.Effect<PersistedChannelSettings | null, unknown>;
 }) => {
-  const stateRef = await runEffect(Ref.make(makeState()));
-  const created = await runEffect(
-    Ref.make<Array<{ workdir: string; title: string; systemPromptAppend?: string }>>([]),
-  );
-  const started = await runEffect(Ref.make<string[]>([]));
-  const removedRoots = await runEffect(Ref.make<string[]>([]));
-  const closed = await runEffect(Ref.make<string[]>([]));
-  const nextRoot = await runEffect(Ref.make(0));
-  const nextSession = await runEffect(Ref.make(0));
-  const persisted = await runEffect(Ref.make<Map<string, PersistedChannelSession>>(new Map()));
-  const persistedSettings = await runEffect(
-    Ref.make<Map<string, PersistedChannelSettings>>(new Map()),
-  );
+  const stateRef = await makeRef(makeState());
+  const created = await makeRef<
+    Array<{ workdir: string; title: string; systemPromptAppend?: string }>
+  >([]);
+  const started = await makeRef<string[]>([]);
+  const removedRoots = await makeRef<string[]>([]);
+  const closed = await makeRef<string[]>([]);
+  const nextRoot = await makeRef(0);
+  const nextSession = await makeRef(0);
+  const persisted = await makeRef<Map<string, PersistedChannelSession>>(new Map());
+  const persistedSettings = await makeRef<Map<string, PersistedChannelSettings>>(new Map());
 
   const createSessionPaths = (_channelId: string) =>
     Ref.modify(nextRoot, (current): readonly [PersistedChannelSession["rootDir"], number] => {
@@ -96,14 +103,14 @@ const makeHarness = async (options?: {
     systemPromptAppend?: string;
   }) =>
     Effect.gen(function* () {
-      yield* Ref.update(created, (current) => [...current, { workdir, title, systemPromptAppend }]);
+      yield* appendRef(created, { workdir, title, systemPromptAppend });
       const index = yield* Ref.modify(nextSession, (current): readonly [number, number] => {
         const next = current + 1;
         return [next, next];
       });
-      return makeHandle(`session-${index}`, workdir, (sessionId) => {
-        Effect.runSync(Ref.update(closed, (current) => [...current, sessionId]));
-      });
+      return makeHandle(`session-${index}`, workdir, (sessionId) =>
+        appendClosed(closed, sessionId),
+      );
     });
 
   const lifecycle = createSessionRegistry({
@@ -116,40 +123,27 @@ const makeHarness = async (options?: {
       }),
     attachOpencodeSession: (workdir, sessionId) =>
       Effect.succeed(
-        makeHandle(sessionId, workdir, (closedSessionId) => {
-          Effect.runSync(Ref.update(closed, (current) => [...current, closedSessionId]));
-        }),
+        makeHandle(sessionId, workdir, (closedSessionId) => appendClosed(closed, closedSessionId)),
       ),
     getPersistedSession: (channelId) =>
       Ref.get(persisted).pipe(Effect.map((current) => current.get(channelId) ?? null)),
     upsertPersistedSession: (session) =>
-      Ref.update(persisted, (current) => {
-        const next = new Map(current);
-        next.set(session.channelId, session);
-        return next;
-      }),
+      updateMapRef(persisted, (current) => current.set(session.channelId, session)),
     getPersistedChannelSettings:
       options?.getPersistedChannelSettings ??
       ((channelId) =>
         Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(channelId) ?? null))),
     touchPersistedSession: (channelId, lastActivityAt) =>
-      Ref.update(persisted, (current) => {
-        const next = new Map(current);
-        const session = next.get(channelId);
+      updateMapRef(persisted, (current) => {
+        const session = current.get(channelId);
         if (session) {
-          next.set(channelId, { ...session, lastActivityAt });
+          current.set(channelId, { ...session, lastActivityAt });
         }
-        return next;
       }),
     deletePersistedSession: (channelId) =>
-      Ref.update(persisted, (current) => {
-        const next = new Map(current);
-        next.delete(channelId);
-        return next;
-      }),
+      updateMapRef(persisted, (current) => current.delete(channelId)),
     isSessionHealthy: options?.isSessionHealthy ?? (() => Effect.succeed(true)),
-    startWorker: (session) =>
-      Ref.update(started, (current) => [...current, session.opencode.sessionId]),
+    startWorker: (session) => appendRef(started, session.opencode.sessionId),
     logger,
     sessionInstructions: "",
     triggerPhrase: "hey opencode",
@@ -163,7 +157,7 @@ const makeHarness = async (options?: {
         : Effect.succeed(false),
     idleTimeoutMs: 30 * 60 * 1_000,
     createSessionPaths,
-    deleteSessionRoot: (rootDir) => Ref.update(removedRoots, (current) => [...current, rootDir]),
+    deleteSessionRoot: (rootDir) => appendRef(removedRoots, rootDir),
   });
 
   return {
@@ -194,7 +188,7 @@ describe("createSessionRegistry", () => {
           yield* Deferred.succeed(createStarted, undefined).pipe(Effect.ignore);
           yield* Deferred.await(releaseCreate);
           return makeHandle(`session-${count}`, workdir, (sessionId) => {
-            Effect.runSync(Ref.update(closed, (current) => [...current, sessionId]));
+            Effect.runSync(appendRef(closed, sessionId));
           });
         }),
     });
@@ -277,9 +271,7 @@ describe("createSessionRegistry", () => {
     const healthChecks = await runEffect(Ref.make<string[]>([]));
     const { lifecycle } = await makeHarness({
       isSessionHealthy: (session) =>
-        Ref.update(healthChecks, (current) => [...current, session.sessionId]).pipe(
-          Effect.as(true),
-        ),
+        appendRef(healthChecks, session.sessionId).pipe(Effect.as(true)),
     });
     const message = makeRegistryMessage("channel-busy");
     const session = await runEffect(lifecycle.createOrGetSession(message));
@@ -309,7 +301,7 @@ describe("createSessionRegistry", () => {
             yield* Deferred.await(releaseRecreate);
           }
           return makeHandle(`session-${count}`, workdir, (sessionId) => {
-            Effect.runSync(Ref.update(closed, (current) => [...current, sessionId]));
+            Effect.runSync(appendRef(closed, sessionId));
           });
         }),
       isSessionHealthy: (session) => Effect.succeed(session.sessionId !== "session-1"),
@@ -383,7 +375,7 @@ describe("createSessionRegistry", () => {
           yield* Deferred.succeed(createStarted, undefined).pipe(Effect.ignore);
           yield* Deferred.await(releaseCreate);
           return makeHandle("session-race", workdir, (sessionId) => {
-            Effect.runSync(Ref.update(closed, (current) => [...current, sessionId]));
+            Effect.runSync(appendRef(closed, sessionId));
           });
         }),
     });

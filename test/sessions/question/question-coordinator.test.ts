@@ -10,16 +10,12 @@ import {
   type QuestionWorkflowSignal,
 } from "@/sessions/question/question-run-state.ts";
 import { makeQuestionRuntime } from "@/sessions/question/question-runtime.ts";
-import { createPromptState } from "@/sessions/run/prompt-state.ts";
-import { noQuestionOutcome, type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
+import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
 import { formatError } from "@/util/errors.ts";
-import {
-  getRef,
-  makeMessage,
-  makeSessionHandle,
-  makeSilentLogger,
-} from "../../support/fixtures.ts";
+import { getRef, makeMessage, makeSilentLogger } from "../../support/fixtures.ts";
 import { failTest } from "../../support/errors.ts";
+import { appendRef, runTestEffect } from "../../support/runtime.ts";
+import { makeTestActiveRun, makeTestSession } from "../../support/session.ts";
 import { unsafeStub } from "../../support/stub.ts";
 
 const makeRequest = (id = "req-1") =>
@@ -34,36 +30,33 @@ const makeRequest = (id = "req-1") =>
     ],
   });
 
+const makeRef = <A>(value: A) => runTestEffect(Ref.make(value));
+
 const makeHarness = async (options?: {
   postQuestionResult?: "success" | "failure";
   rejectResult?: "success" | "failure";
   blockQuestionPost?: boolean;
   replyTargetId?: string;
 }) => {
-  const postedPayloads = await Effect.runPromise(Ref.make<MessageCreateOptions[]>([]));
-  const editedPayloads = await Effect.runPromise(Ref.make<MessageEditOptions[]>([]));
-  const interactionReplies = await Effect.runPromise(
-    Ref.make<Array<{ content?: string | null }>>([]),
-  );
-  const sentQuestionUiFailures = await Effect.runPromise(Ref.make<string[]>([]));
-  const questionReplyTargetIds = await Effect.runPromise(Ref.make<string[]>([]));
-  const questionUiFailureTargetIds = await Effect.runPromise(Ref.make<string[]>([]));
-  const replyCalls = await Effect.runPromise(Ref.make<string[]>([]));
-  const rejectCalls = await Effect.runPromise(Ref.make<string[]>([]));
-  const typingPauseCount = await Effect.runPromise(Ref.make(0));
-  const typingResumeCount = await Effect.runPromise(Ref.make(0));
-  const typingStopCount = await Effect.runPromise(Ref.make(0));
-  const typingPausedRef = await Effect.runPromise(Ref.make(false));
-  const promptState = await Effect.runPromise(createPromptState());
-  const questionPostStarted = await Effect.runPromise(Deferred.make<void>());
-  const allowQuestionPost = await Effect.runPromise(Deferred.make<void>());
+  const postedPayloads = await makeRef<MessageCreateOptions[]>([]);
+  const editedPayloads = await makeRef<MessageEditOptions[]>([]);
+  const interactionReplies = await makeRef<Array<{ content?: string | null }>>([]);
+  const sentQuestionUiFailures = await makeRef<string[]>([]);
+  const questionReplyTargetIds = await makeRef<string[]>([]);
+  const questionUiFailureTargetIds = await makeRef<string[]>([]);
+  const replyCalls = await makeRef<string[]>([]);
+  const rejectCalls = await makeRef<string[]>([]);
+  const typingPauseCount = await makeRef(0);
+  const typingResumeCount = await makeRef(0);
+  const typingStopCount = await makeRef(0);
+  const typingPausedRef = await makeRef(false);
+  const questionPostStarted = await runTestEffect(Deferred.make<void>());
+  const allowQuestionPost = await runTestEffect(Deferred.make<void>());
 
   const questionMessage: Message = makeMessage({
     id: "question-message",
     edit: (payload: MessageEditOptions): Promise<Message> =>
-      Effect.runPromise(Ref.update(editedPayloads, (current) => [...current, payload])).then(
-        () => questionMessage,
-      ),
+      runTestEffect(appendRef(editedPayloads, payload)).then(() => questionMessage),
   });
 
   const makeReplyTargetMessage = (id: string) =>
@@ -72,22 +65,19 @@ const makeHarness = async (options?: {
       channelId: "channel-1",
       author: { id: "owner", tag: "owner#0001" },
       reply: (payload: MessageCreateOptions) =>
-        Effect.runPromise(Ref.update(questionReplyTargetIds, (current) => [...current, id])).then(
-          () =>
-            Effect.runPromise(Ref.update(postedPayloads, (current) => [...current, payload])).then(
-              async () => {
-                if (options?.blockQuestionPost) {
-                  await Effect.runPromise(
-                    Deferred.succeed(questionPostStarted, undefined).pipe(Effect.ignore),
-                  );
-                  await Effect.runPromise(Deferred.await(allowQuestionPost));
-                }
-                if (options?.postQuestionResult === "failure") {
-                  throw new Error("post failed");
-                }
-                return questionMessage;
-              },
-            ),
+        runTestEffect(appendRef(questionReplyTargetIds, id)).then(() =>
+          runTestEffect(appendRef(postedPayloads, payload)).then(async () => {
+            if (options?.blockQuestionPost) {
+              await runTestEffect(
+                Deferred.succeed(questionPostStarted, undefined).pipe(Effect.ignore),
+              );
+              await runTestEffect(Deferred.await(allowQuestionPost));
+            }
+            if (options?.postQuestionResult === "failure") {
+              throw new Error("post failed");
+            }
+            return questionMessage;
+          }),
         ),
     });
 
@@ -97,25 +87,14 @@ const makeHarness = async (options?: {
       ? makeReplyTargetMessage(options.replyTargetId)
       : originMessage;
 
-  const activeRun: ActiveRun = {
+  const { activeRun } = await makeTestActiveRun({
     originMessage,
-    workdir: "/home/opencode/workspace",
-    attachmentMessagesById: new Map(),
     currentPromptContext: {
       kind: replyTargetMessage.id === originMessage.id ? "initial" : "follow-up",
       prompt: "prompt",
       replyTargetMessage,
       requestMessages: [replyTargetMessage],
     },
-    previousPromptMessageIds: new Set<string>(),
-    currentPromptMessageIds: new Set<string>(),
-    currentPromptUserMessageId: null,
-    assistantMessageParentIds: new Map<string, string>(),
-    observedToolCallIds: new Set<string>(),
-    progressQueue: {} as ActiveRun["progressQueue"],
-    promptState,
-    followUpQueue: {} as ActiveRun["followUpQueue"],
-    acceptFollowUps: {} as ActiveRun["acceptFollowUps"],
     typing: {
       pause: () => Effect.runPromise(Ref.update(typingPauseCount, (count) => count + 1)),
       resume: () => {
@@ -123,49 +102,29 @@ const makeHarness = async (options?: {
       },
       stop: () => Effect.runPromise(Ref.update(typingStopCount, (count) => count + 1)),
     },
-    finalizeProgress: () => Effect.void,
-    questionOutcome: noQuestionOutcome(),
-    interruptRequested: false,
-    interruptSource: null,
-  };
+  });
 
-  const session: ChannelSession = {
-    channelId: "channel-1",
-    opencode: makeSessionHandle(),
+  const session: ChannelSession = makeTestSession({
     rootDir: "/tmp/root",
-    workdir: "/home/opencode/workspace",
-    createdAt: Date.now(),
-    lastActivityAt: Date.now(),
-    channelSettings: {
-      showThinking: true,
-      showCompactionSummaries: true,
-    },
-    progressChannel: null,
-    progressMentionContext: null,
-    emittedCompactionSummaryMessageIds: new Set<string>(),
-    queue: {} as ChannelSession["queue"],
     activeRun,
-  };
-  const sessionContextRef = await Effect.runPromise(
+  });
+  const sessionContextRef = await runTestEffect(
     Ref.make<{ session: ChannelSession; activeRun: ActiveRun } | null>({ session, activeRun }),
   );
 
-  const rawRuntime = await Effect.runPromise(
+  const rawRuntime = await runTestEffect(
     makeQuestionRuntime({
       getSessionContext: () => Ref.get(sessionContextRef),
-      replyToQuestion: (_opencode, requestId) =>
-        Ref.update(replyCalls, (current) => [...current, requestId]),
+      replyToQuestion: (_opencode, requestId) => appendRef(replyCalls, requestId),
       rejectQuestion: (_opencode, requestId) =>
-        Ref.update(rejectCalls, (current) => [...current, requestId]).pipe(
+        appendRef(rejectCalls, requestId).pipe(
           Effect.flatMap(() =>
             options?.rejectResult === "failure" ? failTest("reject failed") : Effect.void,
           ),
         ),
       sendQuestionUiFailure: (message, error) =>
-        Ref.update(questionUiFailureTargetIds, (current) => [...current, message.id]).pipe(
-          Effect.andThen(
-            Ref.update(sentQuestionUiFailures, (current) => [...current, String(error)]),
-          ),
+        appendRef(questionUiFailureTargetIds, message.id).pipe(
+          Effect.andThen(appendRef(sentQuestionUiFailures, String(error))),
         ),
       logger: makeSilentLogger(),
       formatError,
@@ -232,7 +191,7 @@ const makeHarness = async (options?: {
       isModalSubmit: () => kind === "modal",
       isChatInputCommand: () => false,
       reply: (payload: { content?: string | null }) =>
-        Effect.runPromise(Ref.update(interactionReplies, (current) => [...current, payload])),
+        runTestEffect(appendRef(interactionReplies, payload)),
       update: () => Promise.resolve(questionMessage),
       followUp: () => Promise.resolve(questionMessage),
       showModal: () => Promise.resolve(),

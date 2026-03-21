@@ -23,6 +23,8 @@ import { appendRef } from "../support/runtime.ts";
 import { makeTestActiveRun, makeTestSession } from "../support/session.ts";
 import { unsafeStub } from "../support/stub.ts";
 
+const makeRef = <A>(value: A) => Effect.runPromise(Ref.make(value));
+
 const makeSession = async (withActiveRun: boolean, showCompactionSummaries = true) => {
   const activeRunState = withActiveRun ? await makeTestActiveRun() : null;
   const activeRun = activeRunState?.activeRun ?? null;
@@ -77,10 +79,38 @@ const makeRuntime = (input: {
     formatError: (error) => String(error),
   });
 
+const makeSummaryWorkflow = (deps: {
+  readPromptResult: (
+    _session: SessionHandle,
+    messageId: string,
+  ) => Effect.Effect<PromptResult, unknown>;
+  sendCompactionSummary: (_session: ChannelSession, text: string) => Effect.Effect<void, unknown>;
+}): Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted"> => ({
+  ...noopIdleCompactionWorkflow,
+  emitSummary: ({ session, messageId }) =>
+    Effect.sync(() => {
+      if (session.emittedCompactionSummaryMessageIds.has(messageId)) {
+        return false;
+      }
+      session.emittedCompactionSummaryMessageIds.add(messageId);
+      return session.channelSettings.showCompactionSummaries;
+    }).pipe(
+      Effect.flatMap((shouldProcess) =>
+        !shouldProcess
+          ? Effect.void
+          : deps
+              .readPromptResult(session.opencode, messageId)
+              .pipe(
+                Effect.flatMap((result) => deps.sendCompactionSummary(session, result.transcript)),
+              ),
+      ),
+    ),
+});
+
 describe("createEventHandler", () => {
   test("routes question asked events to the question coordinator", async () => {
     const { session } = await makeSession(false);
-    const questionEvents = await Effect.runPromise(Ref.make<unknown[]>([]));
+    const questionEvents = await makeRef<unknown[]>([]);
 
     const runtime = makeRuntime({
       session,
@@ -100,7 +130,7 @@ describe("createEventHandler", () => {
 
   test("routes question reply and rejection events to the question coordinator", async () => {
     const { session } = await makeSession(false);
-    const questionEvents = await Effect.runPromise(Ref.make<unknown[]>([]));
+    const questionEvents = await makeRef<unknown[]>([]);
 
     const runtime = makeRuntime({
       session,
@@ -142,7 +172,7 @@ describe("createEventHandler", () => {
 
   test("updates the idle compaction card when compaction finishes outside an active run", async () => {
     const { session } = await makeSession(false);
-    const idleUpdates = await Effect.runPromise(Ref.make<string[]>([]));
+    const idleUpdates = await makeRef<string[]>([]);
 
     const runtime = makeRuntime({
       session,
@@ -158,8 +188,8 @@ describe("createEventHandler", () => {
   });
 
   test("ignores events for sessions that are not currently tracked", async () => {
-    const questionEvents = await Effect.runPromise(Ref.make(0));
-    const idleUpdates = await Effect.runPromise(Ref.make(0));
+    const questionEvents = await makeRef(0);
+    const idleUpdates = await makeRef(0);
 
     const runtime = makeRuntime({
       getSessionContext: () => Effect.succeed(null),
@@ -179,8 +209,8 @@ describe("createEventHandler", () => {
 
   test("emits a late compaction summary once even after the active run is gone", async () => {
     const { session } = await makeSession(false);
-    const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]));
-    const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]));
+    const readPromptCalls = await makeRef<string[]>([]);
+    const sentSummaries = await makeRef<string[]>([]);
 
     const readPromptResult = (_session: SessionHandle, messageId: string) =>
       appendRef(readPromptCalls, messageId).pipe(
@@ -194,25 +224,7 @@ describe("createEventHandler", () => {
 
     const runtime = makeRuntime({
       session,
-      idleCompactionWorkflow: {
-        ...noopIdleCompactionWorkflow,
-        emitSummary: ({ session, messageId }) =>
-          Effect.sync(() => {
-            if (session.emittedCompactionSummaryMessageIds.has(messageId)) {
-              return false;
-            }
-            session.emittedCompactionSummaryMessageIds.add(messageId);
-            return session.channelSettings.showCompactionSummaries;
-          }).pipe(
-            Effect.flatMap((shouldProcess) =>
-              shouldProcess
-                ? readPromptResult(session.opencode, messageId).pipe(
-                    Effect.flatMap((result) => sendCompactionSummary(session, result.transcript)),
-                  )
-                : Effect.void,
-            ),
-          ),
-      },
+      idleCompactionWorkflow: makeSummaryWorkflow({ readPromptResult, sendCompactionSummary }),
       readPromptResult,
     });
 
@@ -233,8 +245,8 @@ describe("createEventHandler", () => {
 
   test("suppresses compaction summaries when the channel has them disabled", async () => {
     const { session } = await makeSession(false, false);
-    const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]));
-    const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]));
+    const readPromptCalls = await makeRef<string[]>([]);
+    const sentSummaries = await makeRef<string[]>([]);
 
     const readPromptResult = (_session: SessionHandle, messageId: string) =>
       appendRef(readPromptCalls, messageId).pipe(
@@ -248,25 +260,7 @@ describe("createEventHandler", () => {
 
     const runtime = makeRuntime({
       session,
-      idleCompactionWorkflow: {
-        ...noopIdleCompactionWorkflow,
-        emitSummary: ({ session, messageId }) =>
-          Effect.sync(() => {
-            if (session.emittedCompactionSummaryMessageIds.has(messageId)) {
-              return false;
-            }
-            session.emittedCompactionSummaryMessageIds.add(messageId);
-            return session.channelSettings.showCompactionSummaries;
-          }).pipe(
-            Effect.flatMap((shouldProcess) =>
-              shouldProcess
-                ? readPromptResult(session.opencode, messageId).pipe(
-                    Effect.flatMap((result) => sendCompactionSummary(session, result.transcript)),
-                  )
-                : Effect.void,
-            ),
-          ),
-      },
+      idleCompactionWorkflow: makeSummaryWorkflow({ readPromptResult, sendCompactionSummary }),
       readPromptResult,
     });
 
@@ -290,8 +284,8 @@ describe("createEventHandler", () => {
   test("keeps waiting for the follow-up assistant after an auto-compaction summary on the original user message", async () => {
     const { session, activeRun, progressQueue, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
-    const readPromptCalls = await Effect.runPromise(Ref.make<string[]>([]));
-    const sentSummaries = await Effect.runPromise(Ref.make<string[]>([]));
+    const readPromptCalls = await makeRef<string[]>([]);
+    const sentSummaries = await makeRef<string[]>([]);
 
     const readPromptResult = (_session: SessionHandle, messageId: string) =>
       appendRef(readPromptCalls, messageId).pipe(
@@ -313,25 +307,7 @@ describe("createEventHandler", () => {
     const runtime = makeRuntime({
       session,
       activeRun,
-      idleCompactionWorkflow: {
-        ...noopIdleCompactionWorkflow,
-        emitSummary: ({ session, messageId }) =>
-          Effect.sync(() => {
-            if (session.emittedCompactionSummaryMessageIds.has(messageId)) {
-              return false;
-            }
-            session.emittedCompactionSummaryMessageIds.add(messageId);
-            return session.channelSettings.showCompactionSummaries;
-          }).pipe(
-            Effect.flatMap((shouldProcess) =>
-              shouldProcess
-                ? readPromptResult(session.opencode, messageId).pipe(
-                    Effect.flatMap((result) => sendCompactionSummary(session, result.transcript)),
-                  )
-                : Effect.void,
-            ),
-          ),
-      },
+      idleCompactionWorkflow: makeSummaryWorkflow({ readPromptResult, sendCompactionSummary }),
       readPromptResult,
     });
 
@@ -555,7 +531,7 @@ describe("createEventHandler", () => {
   test("fails the pending prompt when the correlated assistant aborts", async () => {
     const { session, activeRun, promptState } = await makeSession(true);
     const completion = await Effect.runPromise(beginPendingPrompt(promptState));
-    const readPromptCalls = await Effect.runPromise(Ref.make(0));
+    const readPromptCalls = await makeRef(0);
 
     const runtime = makeRuntime({
       session,

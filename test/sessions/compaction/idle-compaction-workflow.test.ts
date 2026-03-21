@@ -6,106 +6,107 @@ import { formatErrorResponse } from "@/discord/formatting.ts";
 import { InfoCards, type InfoCardsShape } from "@/discord/info-card.ts";
 import { makeIdleCompactionWorkflow } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import { OpencodeService, type OpencodeServiceShape } from "@/opencode/service.ts";
-import type { ChannelSession } from "@/sessions/session.ts";
 import { Logger } from "@/util/logging.ts";
 import { failTest, timeoutTestError } from "../../support/errors.ts";
-import { getRef, makeSessionHandle, makeSilentLogger } from "../../support/fixtures.ts";
+import { getRef, makeSilentLogger } from "../../support/fixtures.ts";
+import { makeTestSession } from "../../support/session.ts";
 import { unsafeStub } from "../../support/stub.ts";
 
-const makeSession = (): ChannelSession =>
-  unsafeStub<ChannelSession>({
-    channelId: "channel-1",
-    opencode: makeSessionHandle(),
-    rootDir: "/tmp/session-root",
-    workdir: "/home/opencode/workspace",
-    createdAt: Date.now(),
-    lastActivityAt: Date.now(),
-    channelSettings: {
-      showThinking: true,
-      showCompactionSummaries: true,
-    },
-    progressChannel: null,
-    progressMentionContext: null,
-    emittedCompactionSummaryMessageIds: new Set<string>(),
-    queue: {} as ChannelSession["queue"],
-    activeRun: null,
-  });
+const makeSession = () => makeTestSession();
+const makeChannel = () => unsafeStub<SendableChannels>({ id: "channel-1" });
+const makeOpencode = (overrides: Partial<OpencodeServiceShape> = {}): OpencodeServiceShape => ({
+  createSession: () => failTest("unexpected"),
+  attachSession: () => failTest("unexpected"),
+  submitPrompt: () => failTest("unexpected"),
+  readPromptResult: () => failTest("unexpected"),
+  interruptSession: () => failTest("unexpected"),
+  compactSession: () => failTest("unexpected"),
+  replyToQuestion: () => failTest("unexpected"),
+  rejectQuestion: () => failTest("unexpected"),
+  isHealthy: () => Effect.succeed(true),
+  ...overrides,
+});
+const makeWorkflow = (input: {
+  infoCards: InfoCardsShape;
+  opencode?: Partial<OpencodeServiceShape>;
+}) =>
+  Effect.runPromise(
+    makeIdleCompactionWorkflow().pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.succeed(InfoCards, input.infoCards),
+          Layer.succeed(Logger, makeSilentLogger()),
+          Layer.succeed(OpencodeService, makeOpencode(input.opencode)),
+        ),
+      ),
+    ),
+  );
+const expectEventuallyActive = (
+  sessionId: string,
+  hasActive: (sessionId: string) => Effect.Effect<boolean, unknown>,
+) =>
+  Effect.runPromise(
+    hasActive(sessionId).pipe(
+      Effect.flatMap((active) =>
+        active ? Effect.void : failTest("compaction not marked active yet"),
+      ),
+      Effect.eventually,
+      Effect.timeoutOrElse({
+        duration: "1 second",
+        onTimeout: () =>
+          Effect.fail(timeoutTestError("timed out waiting for compaction to become active")),
+      }),
+    ),
+  );
+const expectEventuallyInactive = (
+  sessionId: string,
+  hasActive: (sessionId: string) => Effect.Effect<boolean, unknown>,
+) =>
+  Effect.runPromise(
+    hasActive(sessionId).pipe(
+      Effect.flatMap((active) => (active ? failTest("compaction still active") : Effect.void)),
+      Effect.eventually,
+      Effect.timeoutOrElse({
+        duration: "1 second",
+        onTimeout: () => Effect.fail(timeoutTestError("timed out waiting for compaction to clear")),
+      }),
+    ),
+  );
 
 describe("makeIdleCompactionWorkflow", () => {
   test("clears active state when card post and compaction both fail", async () => {
-    const workflow = await Effect.runPromise(
-      makeIdleCompactionWorkflow().pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            Layer.succeed(InfoCards, {
-              send: () => failTest("unexpected"),
-              edit: () => Effect.void,
-              upsert: () => failTest("channel send failed"),
-            } satisfies InfoCardsShape),
-            Layer.succeed(Logger, makeSilentLogger()),
-            Layer.succeed(OpencodeService, {
-              createSession: () => failTest("unexpected"),
-              attachSession: () => failTest("unexpected"),
-              submitPrompt: () => failTest("unexpected"),
-              readPromptResult: () => failTest("unexpected"),
-              interruptSession: () => failTest("unexpected"),
-              compactSession: () => failTest("compaction failed"),
-              replyToQuestion: () => failTest("unexpected"),
-              rejectQuestion: () => failTest("unexpected"),
-              isHealthy: () => Effect.succeed(true),
-            } satisfies OpencodeServiceShape),
-          ),
-        ),
-      ),
-    );
+    const workflow = await makeWorkflow({
+      infoCards: {
+        send: () => failTest("unexpected"),
+        edit: () => Effect.void,
+        upsert: () => failTest("channel send failed"),
+      },
+      opencode: { compactSession: () => failTest("compaction failed") },
+    });
 
     const session = makeSession();
-    const channel = unsafeStub<SendableChannels>({ id: "channel-1" });
+    const channel = makeChannel();
 
     await Effect.runPromise(workflow.start({ session, channel }));
-    await Effect.runPromise(
-      workflow.hasActive(session.opencode.sessionId).pipe(
-        Effect.flatMap((active) => (active ? failTest("compaction still active") : Effect.void)),
-        Effect.eventually,
-        Effect.timeoutOrElse({
-          duration: "1 second",
-          onTimeout: () =>
-            Effect.fail(timeoutTestError("timed out waiting for compaction to clear")),
-        }),
-      ),
-    );
+    await expectEventuallyInactive(session.opencode.sessionId, workflow.hasActive);
   });
 
   test("formats compaction interrupt failures consistently", async () => {
     const card = unsafeStub<Message>({ id: "card-1" });
-    const workflow = await Effect.runPromise(
-      makeIdleCompactionWorkflow().pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            Layer.succeed(InfoCards, {
-              send: () => failTest("unexpected"),
-              edit: () => Effect.void,
-              upsert: () => Effect.succeed(card),
-            } satisfies InfoCardsShape),
-            Layer.succeed(Logger, makeSilentLogger()),
-            Layer.succeed(OpencodeService, {
-              createSession: () => failTest("unexpected"),
-              attachSession: () => failTest("unexpected"),
-              submitPrompt: () => failTest("unexpected"),
-              readPromptResult: () => failTest("unexpected"),
-              interruptSession: () => failTest("interrupt failed"),
-              compactSession: () => Effect.never,
-              replyToQuestion: () => failTest("unexpected"),
-              rejectQuestion: () => failTest("unexpected"),
-              isHealthy: () => Effect.succeed(true),
-            } satisfies OpencodeServiceShape),
-          ),
-        ),
-      ),
-    );
+    const workflow = await makeWorkflow({
+      infoCards: {
+        send: () => failTest("unexpected"),
+        edit: () => Effect.void,
+        upsert: () => Effect.succeed(card),
+      },
+      opencode: {
+        interruptSession: () => failTest("interrupt failed"),
+        compactSession: () => Effect.never,
+      },
+    });
 
     const session = makeSession();
-    const channel = unsafeStub<SendableChannels>({ id: "channel-1" });
+    const channel = makeChannel();
     await Effect.runPromise(workflow.start({ session, channel }));
     const result = await Effect.runPromise(workflow.requestInterrupt({ session }));
 
@@ -118,53 +119,22 @@ describe("makeIdleCompactionWorkflow", () => {
   test("ignores a late compaction card attachment after shutdown", async () => {
     const allowCardPost = await Effect.runPromise(Deferred.make<void>());
     const edits = await Effect.runPromise(Ref.make<string[]>([]));
-    const workflow = await Effect.runPromise(
-      makeIdleCompactionWorkflow().pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            Layer.succeed(InfoCards, {
-              send: () => failTest("unexpected"),
-              edit: (_card, title) =>
-                Ref.update(edits, (current) => [...current, title]).pipe(Effect.asVoid),
-              upsert: () =>
-                Deferred.await(allowCardPost).pipe(
-                  Effect.as(unsafeStub<Message>({ id: "late-card" })),
-                ),
-            } satisfies InfoCardsShape),
-            Layer.succeed(Logger, makeSilentLogger()),
-            Layer.succeed(OpencodeService, {
-              createSession: () => failTest("unexpected"),
-              attachSession: () => failTest("unexpected"),
-              submitPrompt: () => failTest("unexpected"),
-              readPromptResult: () => failTest("unexpected"),
-              interruptSession: () => failTest("unexpected"),
-              compactSession: () => Effect.never,
-              replyToQuestion: () => failTest("unexpected"),
-              rejectQuestion: () => failTest("unexpected"),
-              isHealthy: () => Effect.succeed(true),
-            } satisfies OpencodeServiceShape),
-          ),
-        ),
-      ),
-    );
+    const workflow = await makeWorkflow({
+      infoCards: {
+        send: () => failTest("unexpected"),
+        edit: (_card, title) =>
+          Ref.update(edits, (current) => [...current, title]).pipe(Effect.asVoid),
+        upsert: () =>
+          Deferred.await(allowCardPost).pipe(Effect.as(unsafeStub<Message>({ id: "late-card" }))),
+      },
+      opencode: { compactSession: () => Effect.never },
+    });
 
     const session = makeSession();
-    const channel = unsafeStub<SendableChannels>({ id: "channel-1" });
+    const channel = makeChannel();
     const startPromise = Effect.runPromise(workflow.start({ session, channel }));
 
-    await Effect.runPromise(
-      workflow.hasActive(session.opencode.sessionId).pipe(
-        Effect.flatMap((active) =>
-          active ? Effect.void : failTest("compaction not marked active yet"),
-        ),
-        Effect.eventually,
-        Effect.timeoutOrElse({
-          duration: "1 second",
-          onTimeout: () =>
-            Effect.fail(timeoutTestError("timed out waiting for compaction to become active")),
-        }),
-      ),
-    );
+    await expectEventuallyActive(session.opencode.sessionId, workflow.hasActive);
     await Effect.runPromise(workflow.shutdown());
     await Effect.runPromise(Deferred.succeed(allowCardPost, undefined).pipe(Effect.ignore));
 
@@ -174,48 +144,24 @@ describe("makeIdleCompactionWorkflow", () => {
 
   test("prunes completed workflows so later interrupts do not hit opencode", async () => {
     const interruptCalls = await Effect.runPromise(Ref.make(0));
-    const workflow = await Effect.runPromise(
-      makeIdleCompactionWorkflow().pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            Layer.succeed(InfoCards, {
-              send: () => failTest("unexpected"),
-              edit: () => Effect.void,
-              upsert: () => failTest("channel send failed"),
-            } satisfies InfoCardsShape),
-            Layer.succeed(Logger, makeSilentLogger()),
-            Layer.succeed(OpencodeService, {
-              createSession: () => failTest("unexpected"),
-              attachSession: () => failTest("unexpected"),
-              submitPrompt: () => failTest("unexpected"),
-              readPromptResult: () => failTest("unexpected"),
-              interruptSession: () =>
-                Ref.update(interruptCalls, (count) => count + 1).pipe(Effect.asVoid),
-              compactSession: () => failTest("compaction failed"),
-              replyToQuestion: () => failTest("unexpected"),
-              rejectQuestion: () => failTest("unexpected"),
-              isHealthy: () => Effect.succeed(true),
-            } satisfies OpencodeServiceShape),
-          ),
-        ),
-      ),
-    );
+    const workflow = await makeWorkflow({
+      infoCards: {
+        send: () => failTest("unexpected"),
+        edit: () => Effect.void,
+        upsert: () => failTest("channel send failed"),
+      },
+      opencode: {
+        interruptSession: () =>
+          Ref.update(interruptCalls, (count) => count + 1).pipe(Effect.asVoid),
+        compactSession: () => failTest("compaction failed"),
+      },
+    });
 
     const session = makeSession();
-    const channel = unsafeStub<SendableChannels>({ id: "channel-1" });
+    const channel = makeChannel();
 
     await Effect.runPromise(workflow.start({ session, channel }));
-    await Effect.runPromise(
-      workflow.hasActive(session.opencode.sessionId).pipe(
-        Effect.flatMap((active) => (active ? failTest("compaction still active") : Effect.void)),
-        Effect.eventually,
-        Effect.timeoutOrElse({
-          duration: "1 second",
-          onTimeout: () =>
-            Effect.fail(timeoutTestError("timed out waiting for compaction to clear")),
-        }),
-      ),
-    );
+    await expectEventuallyInactive(session.opencode.sessionId, workflow.hasActive);
 
     const result = await Effect.runPromise(workflow.requestInterrupt({ session }));
     expect(result).toEqual({
