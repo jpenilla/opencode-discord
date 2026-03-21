@@ -459,7 +459,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
       });
 
     const updateInteraction = (interaction: Interaction, batch: QuestionWorkflowBatch) =>
-      !interaction.isButton()
+      !interaction.isButton() && !interaction.isStringSelectMenu()
         ? Effect.void
         : Effect.promise(() =>
             interaction.update(createQuestionMessageEdit(questionBatchView(batch))),
