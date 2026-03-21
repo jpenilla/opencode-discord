@@ -602,9 +602,9 @@ describe("createCommandHandler", () => {
     });
 
     harness.interaction.commandName = "new-session";
-    await expect(runEffect(harness.runtime.handleInteraction(harness.interaction))).rejects.toThrow(
-      "invalidate failed",
-    );
+    await expect(
+      harness.runtime.handleInteraction(harness.interaction).pipe(runEffect),
+    ).rejects.toThrow("invalidate failed");
 
     await expectDeferredEdit(
       harness,

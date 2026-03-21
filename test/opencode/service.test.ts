@@ -464,20 +464,18 @@ describe("makeOpencodeService", () => {
     let serverClosed = false;
 
     await expect(
-      runScoped(
-        Effect.gen(function* () {
-          const service = yield* makeService({
-            createClient: () => {
-              throw new Error("client init failed");
-            },
-            sandbox: makeTrackedSandbox(() => {
-              serverClosed = true;
-            }),
-          });
+      Effect.gen(function* () {
+        const service = yield* makeService({
+          createClient: () => {
+            throw new Error("client init failed");
+          },
+          sandbox: makeTrackedSandbox(() => {
+            serverClosed = true;
+          }),
+        });
 
-          yield* createSession(service);
-        }),
-      ),
+        yield* createSession(service);
+      }).pipe(runScoped),
     ).rejects.toThrow("client init failed");
 
     expect(serverClosed).toBe(true);

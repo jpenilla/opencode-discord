@@ -76,7 +76,7 @@ const makeUserMessage = (id: string): UserMessage =>
 describe("prompt-state", () => {
   test("ignores auto-compaction summaries parented to the original user message", async () => {
     const state = await run(createPromptState());
-    const completion = await run(beginPendingPrompt(state));
+    const completion = await run(state.pipe(beginPendingPrompt));
     await run(handleUserMessageUpdated(state, makeUserMessage("user-1")));
 
     const summaryActions = await run(
@@ -124,7 +124,7 @@ describe("prompt-state", () => {
 
   test("waits for session.status idle before completing a prompt", async () => {
     const state = await run(createPromptState());
-    const completion = await run(beginPendingPrompt(state));
+    const completion = await run(state.pipe(beginPendingPrompt));
 
     await run(handleUserMessageUpdated(state, makeUserMessage("user-1")));
 
@@ -160,7 +160,7 @@ describe("prompt-state", () => {
 
   test("waits for the follow-up assistant after a tool-calls turn", async () => {
     const state = await run(createPromptState());
-    const completion = await run(beginPendingPrompt(state));
+    const completion = await run(state.pipe(beginPendingPrompt));
 
     await run(handleUserMessageUpdated(state, makeUserMessage("user-1")));
 
@@ -208,7 +208,7 @@ describe("prompt-state", () => {
 
   test("waits to bind the server-created user message before session.status idle completes the prompt", async () => {
     const state = await run(createPromptState());
-    const completion = await run(beginPendingPrompt(state));
+    const completion = await run(state.pipe(beginPendingPrompt));
 
     await run(
       handleAssistantMessageUpdated(
