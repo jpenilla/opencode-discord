@@ -19,7 +19,7 @@ const runEffect = runTestEffect;
 const closeScope = closeTestScope;
 
 const makeConfig = (overrides?: Partial<AppConfigShape>): AppConfigShape =>
-  makeTestConfig({ stateDir: "/tmp/opencode-discord-test", ...overrides });
+  makeTestConfig(overrides);
 
 describe("consumeServerUrlOutput", () => {
   test("waits for a complete line before parsing the server url", () => {

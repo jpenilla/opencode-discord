@@ -17,7 +17,7 @@ import { makeTestConfig } from "../support/config.ts";
 import { runTestEffect } from "../support/runtime.ts";
 import { unsafeStub } from "../support/stub.ts";
 
-const makeConfig = (): AppConfigShape => makeTestConfig({ stateDir: "/tmp/opencode-discord-test" });
+const makeConfig = (): AppConfigShape => makeTestConfig();
 
 const logger: LoggerShape = {
   info: () => Effect.void,
