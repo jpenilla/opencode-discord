@@ -13,6 +13,10 @@ export type QuestionBatchLifecycle =
 
 export type QuestionBatchAttachment = { _tag: "pending" } | { _tag: "attached"; message: Message };
 
+export const isAttachedQuestionBatchAttachment = (
+  attachment: QuestionBatchAttachment,
+): attachment is { _tag: "attached"; message: Message } => attachment._tag === "attached";
+
 export type QuestionBatchDomainState = {
   request: QuestionRequest;
   version: number;

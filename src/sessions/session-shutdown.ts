@@ -1,4 +1,4 @@
-import { Data, Effect, Option } from "effect";
+import { Data, Effect, Option, Result } from "effect";
 import { type SendableChannels } from "discord.js";
 
 import type { InfoCardsShape } from "@/discord/info-card.ts";
@@ -108,7 +108,7 @@ const interruptRunForShutdown = (
         withShutdownRpcTimeout("Timed out interrupting active run during shutdown"),
         Effect.result,
       );
-    if (result._tag === "Success") {
+    if (Result.isSuccess(result)) {
       return true;
     }
 

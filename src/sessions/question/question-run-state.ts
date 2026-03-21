@@ -1,6 +1,6 @@
 import { Effect, Option } from "effect";
 
-import type { ActiveRun, QuestionOutcome } from "@/sessions/session.ts";
+import { isQuestionOutcomeNone, type ActiveRun, type QuestionOutcome } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
 export type QuestionWorkflowSignal =
@@ -36,7 +36,7 @@ export const questionTypingAction = (activeRun: ActiveRun, pending: boolean, pau
   if (pending) {
     return paused ? "none" : "pause";
   }
-  if (activeRun.questionOutcome._tag !== "none" || activeRun.interruptRequested) {
+  if (!isQuestionOutcomeNone(activeRun.questionOutcome) || activeRun.interruptRequested) {
     return "stop";
   }
   return paused ? "resume" : "none";

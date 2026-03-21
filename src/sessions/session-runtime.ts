@@ -1,5 +1,5 @@
 import type { Interaction, Message, SendableChannels } from "discord.js";
-import { Effect, FiberSet, FileSystem, Layer, Path, Queue, Ref, ServiceMap } from "effect";
+import { Effect, FiberSet, FileSystem, Layer, Path, Queue, Ref, Result, ServiceMap } from "effect";
 
 import { AppConfig } from "@/config.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
@@ -507,7 +507,7 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
       const attached = yield* attachPersistedSession(message.channelId, persisted, now).pipe(
         Effect.result,
       );
-      if (attached._tag === "Success") {
+      if (Result.isSuccess(attached)) {
         return attached.success;
       }
 

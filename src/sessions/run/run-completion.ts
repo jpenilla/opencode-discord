@@ -1,4 +1,8 @@
-import type { QuestionOutcome } from "@/sessions/session.ts";
+import {
+  isQuestionOutcomeUiFailure,
+  isQuestionOutcomeUserRejected,
+  type QuestionOutcome,
+} from "@/sessions/session.ts";
 
 export const decideRunCompletion = (input: {
   transcript: string;
@@ -11,13 +15,13 @@ export const decideRunCompletion = (input: {
   if (input.transcript.trim()) {
     return { type: "send-final-response" };
   }
-  if (input.questionOutcome._tag === "ui-failure" && !input.questionOutcome.notified) {
+  if (isQuestionOutcomeUiFailure(input.questionOutcome) && !input.questionOutcome.notified) {
     return {
       type: "send-question-ui-failure",
       message: input.questionOutcome.message,
     };
   }
-  if (input.interruptRequested || input.questionOutcome._tag === "user-rejected") {
+  if (input.interruptRequested || isQuestionOutcomeUserRejected(input.questionOutcome)) {
     return { type: "suppress-response" };
   }
   return { type: "send-final-response" };
