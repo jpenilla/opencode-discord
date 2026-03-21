@@ -11,8 +11,12 @@ import type { RunRequest } from "@/sessions/session.ts";
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
 import { makeMessage, makeSessionHandle, makeSilentLogger } from "../../support/fixtures.ts";
 import { failTest } from "../../support/errors.ts";
+import { clearQueue, makeRef, runTestEffect } from "../../support/runtime.ts";
 
 const session = makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" });
+const run = runTestEffect;
+const drainQueue = (queue: Queue.Queue<RunRequest>) =>
+  clearQueue(queue).then((items) => [...items]);
 
 const makeRequest = (
   id: string,
@@ -49,22 +53,22 @@ const makeActiveRunState = async () => ({
   currentPromptUserMessageId: "stale-user",
   assistantMessageParentIds: new Map<string, string>([["assistant-old", "stale-user"]]),
   observedToolCallIds: new Set<string>(["call-old"]),
-  promptState: await Effect.runPromise(createPromptState()),
-  followUpQueue: await Effect.runPromise(Queue.unbounded<RunRequest>()),
-  acceptFollowUps: await Effect.runPromise(Ref.make(true)),
+  promptState: await run(createPromptState()),
+  followUpQueue: await run(Queue.unbounded<RunRequest>()),
+  acceptFollowUps: await makeRef(true),
   interruptRequested: false,
   interruptSource: null,
 });
 
 const makeQueuedSession = async (activeRun: Awaited<ReturnType<typeof makeActiveRunState>>) => ({
-  queue: await Effect.runPromise(Queue.unbounded<RunRequest>()),
+  queue: await run(Queue.unbounded<RunRequest>()),
   activeRun,
 });
 
 const runCoordinator = (
   input: Omit<Parameters<typeof coordinateActiveRunPrompts>[0], "channelId" | "session" | "logger">,
 ) =>
-  Effect.runPromise(
+  run(
     coordinateActiveRunPrompts({
       channelId: "c-1",
       session,
@@ -72,9 +76,6 @@ const runCoordinator = (
       ...input,
     }),
   );
-
-const clearQueue = (queue: Queue.Queue<RunRequest>) =>
-  Effect.runPromise(Queue.clear(queue).pipe(Effect.map((items) => [...items])));
 
 describe("coordinateActiveRunPrompts", () => {
   test("prompts the initial batch, absorbs queued follow-ups, and returns the last result", async () => {
@@ -90,7 +91,7 @@ describe("coordinateActiveRunPrompts", () => {
         });
       });
 
-    await Effect.runPromise(
+    await run(
       Queue.offerAll(activeRun.followUpQueue, [
         makeRequest("m-2", "follow-1", ["m-2", "m-3"]),
         makeRequest("m-4", "follow-2", ["m-4"]),
@@ -152,7 +153,7 @@ describe("coordinateActiveRunPrompts", () => {
         }),
       );
 
-    await Effect.runPromise(Queue.offer(activeRun.followUpQueue, makeRequest("m-2", "follow-up")));
+    await run(Queue.offer(activeRun.followUpQueue, makeRequest("m-2", "follow-up")));
 
     await runCoordinator({
       activeRun,
@@ -163,7 +164,7 @@ describe("coordinateActiveRunPrompts", () => {
     });
 
     expect(gateSnapshots).toEqual([true, true]);
-    expect(await Effect.runPromise(Ref.get(activeRun.acceptFollowUps))).toBe(false);
+    expect(await run(Ref.get(activeRun.acceptFollowUps))).toBe(false);
   });
 
   test("absorbs a follow-up queued while the first prompt is running", async () => {
@@ -196,7 +197,7 @@ describe("coordinateActiveRunPrompts", () => {
     expect(submitCalls).toEqual(["initial", buildQueuedFollowUpPrompt(["later"])]);
     expect(result.messageId).toBe("msg-2");
     expect([...activeRun.attachmentMessagesById.keys()]).toEqual(["m-1", "m-2", "m-3"]);
-    expect(await clearQueue(queuedSession.queue)).toEqual([]);
+    expect(await drainQueue(queuedSession.queue)).toEqual([]);
   });
 
   test("does not start an absorbed follow-up after interrupt is requested", async () => {
@@ -234,7 +235,7 @@ describe("coordinateActiveRunPrompts", () => {
     ).rejects.toThrow("interrupted");
 
     expect(submitCalls).toEqual(["initial"]);
-    expect(await clearQueue(queuedSession.queue)).toEqual([]);
+    expect(await drainQueue(queuedSession.queue)).toEqual([]);
   });
 
   test("resets prompt-scoped tracking before each prompt submission", async () => {
@@ -261,7 +262,7 @@ describe("coordinateActiveRunPrompts", () => {
         });
       });
 
-    await Effect.runPromise(Queue.offer(activeRun.followUpQueue, makeRequest("m-2", "follow-up")));
+    await run(Queue.offer(activeRun.followUpQueue, makeRequest("m-2", "follow-up")));
 
     await runCoordinator({
       activeRun,
@@ -322,7 +323,7 @@ describe("coordinateActiveRunPrompts", () => {
         });
       });
 
-    await Effect.runPromise(Queue.offer(activeRun.followUpQueue, makeRequest("m-2", "follow-1")));
+    await run(Queue.offer(activeRun.followUpQueue, makeRequest("m-2", "follow-1")));
 
     await runCoordinator({
       activeRun,
@@ -348,7 +349,7 @@ describe("coordinateActiveRunPrompts", () => {
     ]);
     expect([...activeRun.previousPromptMessageIds]).toEqual(["user-2", "assistant-2"]);
     expect([...activeRun.currentPromptMessageIds]).toEqual(["user-3", "assistant-3"]);
-    expect(await clearQueue(queuedSession.queue)).toEqual([]);
+    expect(await drainQueue(queuedSession.queue)).toEqual([]);
   });
 
   test("fails immediately when prompt submission fails", async () => {
@@ -364,6 +365,6 @@ describe("coordinateActiveRunPrompts", () => {
       }),
     ).rejects.toThrow("submit failed");
 
-    expect(await Effect.runPromise(Ref.get(activeRun.promptState))).toBeNull();
+    expect(await run(Ref.get(activeRun.promptState))).toBeNull();
   });
 });

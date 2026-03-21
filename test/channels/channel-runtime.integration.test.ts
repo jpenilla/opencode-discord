@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ChannelType,
-  type Interaction,
   type Message,
   type MessageCreateOptions,
   type MessageEditOptions,
@@ -45,30 +44,36 @@ import {
 } from "@/sessions/session-runtime.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
 import {
+  cardText,
+  makePostedMessage,
+  makeRecordedCommandInteraction,
+  makeRecordedComponentInteraction,
+  makeSendableChannel,
+} from "../support/discord.ts";
+import {
   makeAssistantMessageUpdatedEvent,
   makeQuestionAskedEvent,
   makeQuestionRepliedEvent,
   makeSessionCompactedEvent,
+  makeSessionIdleEvent,
   makeUserMessageUpdatedEvent,
   toGlobalEvent,
 } from "../support/opencode-events.ts";
 import { getRef } from "../support/fixtures.ts";
 import { makeTestConfig } from "../support/config.ts";
 import { failTest, interruptedTestError, timeoutTestError } from "../support/errors.ts";
-import { appendRef, runTestEffect } from "../support/runtime.ts";
+import {
+  appendRef,
+  makeDeferred,
+  makeRef,
+  runTestEffect,
+  updateMapRef,
+} from "../support/runtime.ts";
 import { unsafeEffect, unsafeStub } from "../support/stub.ts";
 
 const TEST_STATE_DIR = join(tmpdir(), `.opencode-discord-test-storage-${process.pid}`);
 
 const runEffect = runTestEffect;
-const makeRef = <A>(value: A) => runEffect(Ref.make(value));
-const makeDeferred = <A = void, E = never>() => runEffect(Deferred.make<A, E>());
-const updateMapRef = <K, V>(ref: Ref.Ref<Map<K, V>>, update: (current: Map<K, V>) => void) =>
-  Ref.update(ref, (current) => {
-    const next = new Map(current);
-    update(next);
-    return next;
-  });
 
 const makeConfig = (): AppConfigShape =>
   makeTestConfig({
@@ -109,12 +114,6 @@ const waitForNoActiveRun = (
       onTimeout: () =>
         Effect.fail(timeoutTestError(`Timed out waiting for active run ${sessionId} to clear`)),
     }),
-  );
-
-const cardText = (payload: unknown) =>
-  String(
-    (payload as { components?: Array<{ components?: Array<{ data?: { content?: string } }> }> })
-      .components?.[0]?.components?.[0]?.data?.content ?? "",
   );
 
 const waitForReplyPayload = (
@@ -174,19 +173,6 @@ const makeToolUpdatedEvent = (input: {
                     end: 2,
                   },
                 },
-        },
-      },
-    },
-  });
-
-const makeSessionIdleEvent = (sessionId = "session-1"): GlobalEvent =>
-  unsafeStub<GlobalEvent>({
-    payload: {
-      type: "session.status",
-      properties: {
-        sessionID: sessionId,
-        status: {
-          type: "idle",
         },
       },
     },
@@ -268,18 +254,18 @@ const makeHarness = async (options: {
   failComponentReplies?: boolean;
   failChannelSend?: boolean;
 }) => {
+  const replies: string[] = [];
+  const replyTargetIds: string[] = [];
+  const sentPayloads: unknown[] = [];
+  let typing = 0;
+  const promptCalls: string[] = [];
+  const createSessionCalls: Array<{ workdir: string; title: string }> = [];
+  let compactCalls = 0;
+  let interruptCalls = 0;
+  let createSessionCount = 0;
   const [
-    replies,
     replyPayloads,
-    replyTargetIds,
-    sentPayloads,
     editedPayloads,
-    typing,
-    promptCalls,
-    createSessionCalls,
-    compactCalls,
-    interruptCalls,
-    createSessionCount,
     replyEvents,
     eventQueue,
     promptResults,
@@ -287,17 +273,8 @@ const makeHarness = async (options: {
     persistedSettings,
   ] = await runEffect(
     Effect.all([
-      Ref.make<string[]>([]),
-      Ref.make<unknown[]>([]),
-      Ref.make<string[]>([]),
       Ref.make<unknown[]>([]),
       Ref.make<unknown[]>([]),
-      Ref.make(0),
-      Ref.make<string[]>([]),
-      Ref.make<Array<{ workdir: string; title: string }>>([]),
-      Ref.make(0),
-      Ref.make(0),
-      Ref.make(0),
       Queue.unbounded<string>(),
       Queue.unbounded<GlobalEvent>(),
       Ref.make<Map<string, PromptResult>>(new Map()),
@@ -306,32 +283,32 @@ const makeHarness = async (options: {
     ]),
   );
 
-  const makePostedMessage = (id: string): Message =>
-    unsafeStub<Message>({
-      id,
-      edit: (payload: MessageEditOptions): Promise<Message> =>
-        runEffect(pushRef(editedPayloads, payload)).then(() => makePostedMessage(id)),
-    });
+  const nextPostedMessage = (id: string): Message =>
+    makePostedMessage(id, (payload: MessageEditOptions) =>
+      runEffect(pushRef(editedPayloads, payload)).then(() => nextPostedMessage(id)),
+    );
 
   const sendOnChannel = (payload: MessageCreateOptions) =>
-    runEffect(pushRef(sentPayloads, payload)).then(() => {
+    Promise.resolve().then(() => {
+      sentPayloads.push(payload);
       if (options.failChannelSend) {
         throw new Error("channel send failed");
       }
       const content = payload.content;
       if (content) {
         return runEffect(Queue.offer(replyEvents, String(content))).then(() =>
-          makePostedMessage(`sent-${Date.now()}`),
+          nextPostedMessage(`sent-${Date.now()}`),
         );
       }
-      return makePostedMessage(`sent-${Date.now()}`);
+      return nextPostedMessage(`sent-${Date.now()}`);
     });
 
-  const messageChannel = unsafeStub<SendableChannels>({
+  const messageChannel = makeSendableChannel({
     id: "channel-1",
     type: ChannelType.DM,
-    isSendable: () => true,
-    sendTyping: () => runEffect(Ref.update(typing, (count) => count + 1)),
+    sendTyping: async () => {
+      typing += 1;
+    },
     send: sendOnChannel,
   });
 
@@ -355,11 +332,12 @@ const makeHarness = async (options: {
       Effect.andThen(publishEvent(makeSessionIdleEvent(sessionId))),
     );
 
-  const commandChannel = unsafeStub<SendableChannels>({
+  const commandChannel = makeSendableChannel({
     id: "channel-1",
     type: ChannelType.GuildText,
-    isSendable: () => true,
-    sendTyping: () => runEffect(Ref.update(typing, (count) => count + 1)),
+    sendTyping: async () => {
+      typing += 1;
+    },
     send: sendOnChannel,
   });
 
@@ -381,18 +359,22 @@ const makeHarness = async (options: {
       guild: null,
       channel: messageChannel,
       reply: (payload: MessageCreateOptions) =>
-        runEffect(pushRef(replyTargetIds, input.id)).then(() =>
-          runEffect(pushRef(replyPayloads, payload)).then(async () => {
-            if (options.failComponentReplies && payload.components?.length) {
-              throw new Error("question post failed");
-            }
-            if (payload.content) {
-              await runEffect(pushRef(replies, String(payload.content)));
-              await runEffect(Queue.offer(replyEvents, String(payload.content)));
-            }
-            return makePostedMessage(`reply-${input.id}`);
-          }),
-        ),
+        Promise.resolve()
+          .then(() => {
+            replyTargetIds.push(input.id);
+          })
+          .then(() =>
+            runEffect(pushRef(replyPayloads, payload)).then(async () => {
+              if (options.failComponentReplies && payload.components?.length) {
+                throw new Error("question post failed");
+              }
+              if (payload.content) {
+                replies.push(String(payload.content));
+                await runEffect(Queue.offer(replyEvents, String(payload.content)));
+              }
+              return nextPostedMessage(`reply-${input.id}`);
+            }),
+          ),
     });
 
   const makeCommandInteraction = async (
@@ -403,68 +385,49 @@ const makeHarness = async (options: {
       | "toggle-thinking"
       | "toggle-compaction-summaries",
   ) => {
-    const [interactionReplies, interactionEdits, interactionDefers] = await runEffect(
-      Effect.all([Ref.make<unknown[]>([]), Ref.make<unknown[]>([]), Ref.make(0)]),
-    );
+    const interactionReplies: unknown[] = [];
+    const interactionEdits: unknown[] = [];
 
-    const interaction = unsafeStub<
-      Interaction & {
-        replied: boolean;
-        deferred: boolean;
-      }
-    >({
+    const { interaction, readDefers } = makeRecordedCommandInteraction({
       commandName,
-      channelId: "channel-1",
       channel: commandChannel,
-      replied: false,
-      deferred: false,
-      inGuild: () => true,
-      isChatInputCommand: () => true,
-      reply: (payload: unknown) => {
-        interaction.replied = true;
-        return runEffect(pushRef(interactionReplies, payload));
+      onReply: (payload) => {
+        interactionReplies.push(payload);
+        return Promise.resolve();
       },
-      deferReply: (_payload: unknown) => {
-        interaction.deferred = true;
-        return runEffect(Ref.update(interactionDefers, (count) => count + 1));
+      onDeferReply: () => Promise.resolve(),
+      onEditReply: (payload) => {
+        interactionEdits.push(payload);
+        return Promise.resolve();
       },
-      editReply: (payload: unknown) => runEffect(pushRef(interactionEdits, payload)),
     });
 
     return {
       interaction,
       interactionReplies,
       interactionEdits,
-      interactionDefers,
+      readInteractionDefers: readDefers,
     };
   };
 
   const makeQuestionButtonInteraction = async (input?: { userId?: string; messageId?: string }) => {
-    const [interactionReplies, interactionEdits] = await runEffect(
-      Effect.all([Ref.make<unknown[]>([]), Ref.make<unknown[]>([])]),
-    );
+    const interactionReplies: unknown[] = [];
+    const interactionEdits: unknown[] = [];
 
-    const interaction = unsafeStub<Interaction & { replied: boolean; deferred: boolean }>({
+    const interaction = makeRecordedComponentInteraction("button", {
       customId: "ocq:req-1:0:submit",
-      user: { id: input?.userId ?? "intruder" },
-      message: { id: input?.messageId ?? "reply-message-1" },
-      replied: false,
-      deferred: false,
-      isButton: () => true,
-      isStringSelectMenu: () => false,
-      isModalSubmit: () => false,
-      isChatInputCommand: () => false,
-      reply: (payload: unknown) => {
-        interaction.replied = true;
-        return runEffect(pushRef(interactionReplies, payload));
+      userId: input?.userId ?? "intruder",
+      messageId: input?.messageId ?? "reply-message-1",
+      onReply: (payload) => {
+        interactionReplies.push(payload);
+        return Promise.resolve();
       },
-      update: (payload: unknown) =>
-        runEffect(pushRef(interactionEdits, payload)).then(() =>
-          makePostedMessage("reply-message-1"),
-        ),
-      followUp: (_payload: unknown) => Promise.resolve(makePostedMessage("reply-message-1")),
-      showModal: (_payload: unknown) => Promise.resolve(),
-      deferUpdate: () => Promise.resolve(),
+      onUpdate: (payload) => {
+        interactionEdits.push(payload);
+        return Promise.resolve();
+      },
+      update: () => Promise.resolve(nextPostedMessage("reply-message-1")),
+      followUp: () => Promise.resolve(nextPostedMessage("reply-message-1")),
     });
 
     return {
@@ -476,24 +439,25 @@ const makeHarness = async (options: {
 
   const service: OpencodeServiceShape = {
     createSession: (workdir, title) =>
-      Ref.updateAndGet(createSessionCount, (count) => count + 1).pipe(
-        Effect.flatMap((callIndex) =>
-          pushRef(createSessionCalls, { workdir, title }).pipe(
-            Effect.andThen(
-              options.createSessionImpl?.({
-                workdir,
-                title,
-                callIndex,
-              }) ??
-                Effect.succeed({
-                  sessionId: `session-${callIndex}`,
-                  client: {} as never,
-                  workdir: "/home/opencode/workspace",
-                  backend: "bwrap",
-                  close: () => Effect.void,
-                } as SessionHandle),
-            ),
-          ),
+      Effect.sync(() => {
+        createSessionCount += 1;
+        createSessionCalls.push({ workdir, title });
+        return createSessionCount;
+      }).pipe(
+        Effect.flatMap(
+          (callIndex) =>
+            options.createSessionImpl?.({
+              workdir,
+              title,
+              callIndex,
+            }) ??
+            Effect.succeed({
+              sessionId: `session-${callIndex}`,
+              client: {} as never,
+              workdir: "/home/opencode/workspace",
+              backend: "bwrap",
+              close: () => Effect.void,
+            } as SessionHandle),
         ),
       ),
     attachSession: (workdir, sessionId) =>
@@ -505,10 +469,13 @@ const makeHarness = async (options: {
         close: () => Effect.void,
       } as SessionHandle),
     submitPrompt: (_session, prompt) =>
-      Ref.updateAndGet(promptCalls, (current) => [...current, prompt]).pipe(
-        Effect.flatMap((calls) =>
+      Effect.sync(() => {
+        promptCalls.push(prompt);
+        return promptCalls.length;
+      }).pipe(
+        Effect.flatMap((callIndex) =>
           Effect.gen(function* () {
-            const messageId = `user-${calls.length}`;
+            const messageId = `user-${callIndex}`;
             yield* publishEvent(
               makeUserMessageUpdatedEvent({
                 id: messageId,
@@ -517,7 +484,7 @@ const makeHarness = async (options: {
             );
             yield* options.promptImpl({
               prompt,
-              callIndex: calls.length,
+              callIndex,
               messageId,
               sessionId: _session.sessionId,
               publishEvent,
@@ -538,13 +505,13 @@ const makeHarness = async (options: {
         }),
       ),
     interruptSession: () =>
-      Ref.update(interruptCalls, (count) => count + 1).pipe(
-        Effect.andThen(options.interruptSessionImpl?.() ?? Effect.void),
-      ),
+      Effect.sync(() => {
+        interruptCalls += 1;
+      }).pipe(Effect.andThen(options.interruptSessionImpl?.() ?? Effect.void)),
     compactSession: () =>
-      Ref.update(compactCalls, (count) => count + 1).pipe(
-        Effect.andThen(options.compactSessionImpl?.() ?? Effect.void),
-      ),
+      Effect.sync(() => {
+        compactCalls += 1;
+      }).pipe(Effect.andThen(options.compactSessionImpl?.() ?? Effect.void)),
     replyToQuestion: () => Effect.void,
     rejectQuestion: () => options.rejectQuestionImpl?.() ?? Effect.void,
     isHealthy: () => options.isHealthyImpl?.() ?? Effect.succeed(true),
@@ -595,11 +562,11 @@ const makeHarness = async (options: {
     replyEvents,
     sentPayloads,
     editedPayloads,
-    typing,
+    readTyping: () => typing,
     promptCalls,
     createSessionCalls,
-    compactCalls,
-    interruptCalls,
+    readCompactCalls: () => compactCalls,
+    readInterruptCalls: () => interruptCalls,
     harnessLayer,
     makeMessage,
     makeCommandInteraction,
@@ -629,9 +596,9 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(await getRef(harness.promptCalls)).toEqual([promptFor(message, "hello")]);
-    expect(await getRef(harness.replies)).toEqual(["done"]);
-    expect(await getRef(harness.createSessionCalls)).toHaveLength(1);
+    expect(harness.promptCalls).toEqual([promptFor(message, "hello")]);
+    expect(harness.replies).toEqual(["done"]);
+    expect(harness.createSessionCalls).toHaveLength(1);
   });
 
   test("absorbs follow-up messages into the active run and re-prompts opencode", async () => {
@@ -670,15 +637,15 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(await getRef(harness.promptCalls)).toEqual([
+    expect(harness.promptCalls).toEqual([
       promptFor(firstMessage, "hello"),
       queuedPromptFor(secondMessage, "follow up"),
     ]);
-    expect(await getRef(harness.replies)).toEqual([
+    expect(harness.replies).toEqual([
       "intermediate",
       `final:${queuedPromptFor(secondMessage, "follow up")}`,
     ]);
-    expect(await getRef(harness.replyTargetIds)).toEqual(["message-1", "message-2"]);
+    expect(harness.replyTargetIds).toEqual(["message-1", "message-2"]);
   });
 
   test("keeps the active run open after the final assistant update until session.status idle arrives", async () => {
@@ -725,7 +692,7 @@ describe("ChannelRuntimeLayer integration", () => {
         yield* submitPrompt(channels, firstMessage, "hello");
         yield* Deferred.await(assistantFinished);
 
-        expect(yield* Ref.get(harness.replies)).toEqual([]);
+        expect(harness.replies).toEqual([]);
         yield* sessions
           .getActiveRunBySessionId("session-1")
           .pipe(
@@ -735,7 +702,7 @@ describe("ChannelRuntimeLayer integration", () => {
           );
 
         yield* submitPrompt(channels, secondMessage, "follow up");
-        expect(yield* Ref.get(harness.replies)).toEqual([]);
+        expect(harness.replies).toEqual([]);
 
         yield* Deferred.succeed(allowIdleStatus, undefined).pipe(Effect.ignore);
         yield* expectReplyEvents(harness.replyEvents, [
@@ -745,11 +712,11 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(await getRef(harness.promptCalls)).toEqual([
+    expect(harness.promptCalls).toEqual([
       promptFor(firstMessage, "hello"),
       queuedPromptFor(secondMessage, "follow up"),
     ]);
-    expect(await getRef(harness.replyTargetIds)).toEqual(["message-1", "message-2"]);
+    expect(harness.replyTargetIds).toEqual(["message-1", "message-2"]);
   });
 
   test("ignores replayed message updates from the previous prompt when running an absorbed follow-up", async () => {
@@ -803,8 +770,8 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(await getRef(harness.replies)).toEqual(["stale-final", "follow-up-final"]);
-    expect(await getRef(harness.replyTargetIds)).toEqual(["message-1", "message-2"]);
+    expect(harness.replies).toEqual(["stale-final", "follow-up-final"]);
+    expect(harness.replyTargetIds).toEqual(["message-1", "message-2"]);
   });
 
   test("surfaces compaction summaries as progress updates and still replies with the direct assistant result", async () => {
@@ -845,7 +812,7 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(await getRef(harness.replies)).toEqual(["final reply"]);
+    expect(harness.replies).toEqual(["final reply"]);
   });
 
   test("surfaces a late compaction summary after the direct reply has already finished", async () => {
@@ -882,7 +849,7 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(await getRef(harness.replies)).toEqual(["final reply"]);
+    expect(harness.replies).toEqual(["final reply"]);
   });
 
   test("surfaces a late aborted-tool update in the run UI after the final reply", async () => {
@@ -931,7 +898,7 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect((await getRef(harness.sentPayloads)).map(cardText)).toContain(
+    expect(harness.sentPayloads.map(cardText)).toContain(
       "**💻 🛠️ `bash` Running**\n`pwd`\nPrint cwd",
     );
     expect((await getRef(harness.editedPayloads)).map(cardText)).toContain(
@@ -968,9 +935,9 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(await getRef(harness.interruptCalls)).toBe(1);
-    expect(await getRef(harness.replies)).toEqual([]);
-    expect((await getRef(harness.sentPayloads)).map(cardText)).toContain(
+    expect(harness.readInterruptCalls()).toBe(1);
+    expect(harness.replies).toEqual([]);
+    expect(harness.sentPayloads.map(cardText)).toContain(
       "**‼️ Run interrupted**\nOpenCode stopped the active run in this channel.",
     );
   });
@@ -1014,18 +981,16 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(await getRef(harness.interruptCalls)).toBe(1);
-    expect(await getRef(command.interactionDefers)).toBe(1);
-    expect(await getRef(command.interactionEdits)).toHaveLength(1);
+    expect(harness.readInterruptCalls()).toBe(1);
+    expect(command.readInteractionDefers()).toBe(1);
+    expect(command.interactionEdits).toHaveLength(1);
     expect(
       (await getRef(harness.replyPayloads)).some((payload) =>
         cardText(payload).includes("❓ Questions need answers"),
       ),
     ).toBe(true);
     expect(
-      (await getRef(harness.sentPayloads)).some((payload) =>
-        cardText(payload).includes("‼️ Run interrupted"),
-      ),
+      harness.sentPayloads.some((payload) => cardText(payload).includes("‼️ Run interrupted")),
     ).toBe(false);
   });
 
@@ -1053,9 +1018,8 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    const createSessionCalls = await getRef(harness.createSessionCalls);
-    expect(createSessionCalls).toHaveLength(2);
-    expect(createSessionCalls[0]?.workdir).toBe(createSessionCalls[1]?.workdir);
+    expect(harness.createSessionCalls).toHaveLength(2);
+    expect(harness.createSessionCalls[0]?.workdir).toBe(harness.createSessionCalls[1]?.workdir);
   });
 
   test("marks idle compaction interrupted when the compaction exits with an abort after interrupt", async () => {
@@ -1149,7 +1113,7 @@ describe("ChannelRuntimeLayer integration", () => {
     const compactedText =
       "**🗜️ Session compacted**\nOpenCode summarized earlier context for this session.";
     const allCardTexts = [
-      ...(await getRef(harness.sentPayloads)).map(cardText),
+      ...harness.sentPayloads.map(cardText),
       ...(await getRef(harness.editedPayloads)).map(cardText),
     ];
 
@@ -1202,8 +1166,8 @@ describe("ChannelRuntimeLayer integration", () => {
     );
 
     expect(await getRef(createSessionCount)).toBe(2);
-    expect(await getRef(harness.createSessionCalls)).toHaveLength(2);
-    expect(await getRef(harness.promptCalls)).toEqual([
+    expect(harness.createSessionCalls).toHaveLength(2);
+    expect(harness.promptCalls).toEqual([
       promptFor(firstMessage, "first"),
       promptFor(secondMessage, "second"),
     ]);
@@ -1277,8 +1241,8 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(await getRef(questionInteraction.interactionReplies)).toEqual([]);
-    expect((await getRef(questionInteraction.interactionEdits)).length).toBe(1);
+    expect(questionInteraction.interactionReplies).toEqual([]);
+    expect(questionInteraction.interactionEdits.length).toBe(1);
   });
 
   test("waits for observed session idle before expiring active question cards during session shutdown", async () => {
@@ -1363,7 +1327,7 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect((await getRef(harness.sentPayloads)).map(cardText)).toContain(
+    expect(harness.sentPayloads.map(cardText)).toContain(
       "**🛑 Run interrupted**\nOpenCode stopped the active run in this channel because the bot is shutting down.",
     );
   });
@@ -1384,10 +1348,10 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(await getRef(harness.promptCalls)).toEqual([]);
-    expect(await getRef(command.interactionDefers)).toBe(0);
-    expect(await getRef(command.interactionReplies)).toEqual([]);
-    expect(await getRef(command.interactionEdits)).toEqual([]);
+    expect(harness.promptCalls).toEqual([]);
+    expect(command.readInteractionDefers()).toBe(0);
+    expect(command.interactionReplies).toEqual([]);
+    expect(command.interactionEdits).toEqual([]);
   });
 
   test("surfaces a question UI failure reply when posting the question card fails", async () => {
@@ -1433,7 +1397,7 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(await getRef(harness.replies)).toHaveLength(1);
+    expect(harness.replies).toHaveLength(1);
     expect(
       (await getRef(harness.replyPayloads)).some((payload) =>
         cardText(payload).includes("❓ Questions need answers"),

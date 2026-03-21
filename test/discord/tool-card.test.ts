@@ -1,20 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { ToolPart } from "@opencode-ai/sdk/v2";
-import type { Message, MessageCreateOptions, SendableChannels } from "discord.js";
+import type { Message, MessageCreateOptions } from "discord.js";
 import type { ResolvedSandboxBackend } from "@/sandbox/common.ts";
 import { Effect } from "effect";
 
 import { upsertToolCard } from "@/discord/tool-card.ts";
+import { cardText, makeSendableChannel } from "../support/discord.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const WORKDIR = "/home/opencode/workspace";
 const UNSAFE_WORKDIR = "/Users/jason/project";
-
-const cardText = (payload: MessageCreateOptions) =>
-  String(
-    (payload as { components?: Array<{ components?: Array<{ data?: { content?: string } }> }> })
-      .components?.[0]?.components?.[0]?.data?.content ?? "",
-  );
 
 const makeToolPart = (input: {
   tool: string;
@@ -52,8 +47,7 @@ const renderCard = async (
   }: { workdir?: string; backend?: ResolvedSandboxBackend } = {},
 ) => {
   let payload: MessageCreateOptions | null = null;
-  const channel = unsafeStub<SendableChannels>({
-    isSendable: () => true,
+  const channel = makeSendableChannel({
     send: async (nextPayload: MessageCreateOptions) => {
       payload = nextPayload;
       return unsafeStub<Message>({});

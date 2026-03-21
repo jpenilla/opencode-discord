@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ChannelType } from "discord.js";
-import { Deferred, Effect, Fiber, Ref } from "effect";
+import { Deferred, Effect, Ref } from "effect";
 
 import type { SessionHandle } from "@/opencode/service.ts";
 import { createSessionRegistry, type SessionRegistryState } from "@/sessions/session-runtime.ts";
@@ -10,7 +10,15 @@ import type { PersistedChannelSession } from "@/state/persistence.ts";
 import { sessionPathsFromRoot } from "@/state/paths.ts";
 import { makeMessage, makeSilentLogger } from "../support/fixtures.ts";
 import { failTest } from "../support/errors.ts";
-import { appendRef, runTestEffect } from "../support/runtime.ts";
+import {
+  appendRef,
+  makeDeferred,
+  makeRef,
+  readRef,
+  runConcurrent,
+  runTestEffect,
+  updateMapRef,
+} from "../support/runtime.ts";
 import { unsafeStub } from "../support/stub.ts";
 
 const makeRegistryMessage = (channelId = "channel-1") =>
@@ -51,29 +59,9 @@ const makeState = (): SessionRegistryState => ({
 const logger = makeSilentLogger();
 
 const runEffect = runTestEffect;
-const makeRef = <A>(value: A) => runEffect(Ref.make(value));
-const makeDeferred = <A = void, E = never>() => runEffect(Deferred.make<A, E>());
-const updateMapRef = <K, V>(ref: Ref.Ref<Map<K, V>>, update: (current: Map<K, V>) => void) =>
-  Ref.update(ref, (current) => {
-    const next = new Map(current);
-    update(next);
-    return next;
-  });
 const appendClosed = (closed: Ref.Ref<string[]>, sessionId: string) => {
   Effect.runSync(appendRef(closed, sessionId));
 };
-const readRef = <A>(ref: Ref.Ref<A>) => runEffect(Ref.get(ref));
-const runConcurrent = <A, E1, R1, B, E2, R2>(
-  first: Effect.Effect<A, E1, R1>,
-  second: Effect.Effect<B, E2, R2>,
-) =>
-  runEffect(
-    Effect.gen(function* () {
-      const fiber1 = yield* Effect.forkChild(first);
-      const fiber2 = yield* Effect.forkChild(second);
-      return yield* Effect.all([Fiber.join(fiber1), Fiber.join(fiber2)]);
-    }),
-  );
 
 const makeHarness = async (options?: {
   createOpencodeSession?: (input: {

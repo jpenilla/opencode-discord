@@ -104,7 +104,6 @@ type RemoteQuestionAction = {
   interaction: Interaction;
   requestId: string;
   expectedVersion: number;
-  actorId: string;
   invoke: (session: ChannelSession["opencode"], requestId: string) => Effect.Effect<void, unknown>;
   followUpFailure: (error: unknown) => string;
   onSuccess: (batch: QuestionWorkflowBatch) => Effect.Effect<ReadonlyArray<QuestionWorkflowSignal>>;
@@ -131,11 +130,6 @@ const routedNoSignals = (sessionId: string): RoutedQuestionSignals => ({
   signals: noSignals,
 });
 
-const createQuestionRuntimeState = (): QuestionRuntimeState => ({
-  sessions: new Map(),
-  requestRoutes: new Map(),
-});
-
 const emptyQuestionSessionState = (): QuestionSessionState => ({
   stopped: false,
   batches: new Map(),
@@ -157,6 +151,13 @@ const writeSessionState = (
     sessions,
   };
 };
+
+const writeSessionBatchesState = (
+  state: QuestionRuntimeState,
+  sessionId: string,
+  session: QuestionSessionState,
+  batches: QuestionSessionState["batches"],
+): QuestionRuntimeState => writeSessionState(state, sessionId, { ...session, batches });
 
 const dropRequestRoute = (state: QuestionRuntimeState, requestId: string): QuestionRuntimeState => {
   if (!state.requestRoutes.has(requestId)) {
@@ -209,7 +210,10 @@ export const routeQuestionEvent = (
 
 export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<QuestionRuntime> =>
   Effect.gen(function* () {
-    const stateRef = yield* Ref.make(createQuestionRuntimeState());
+    const stateRef = yield* Ref.make<QuestionRuntimeState>({
+      sessions: new Map(),
+      requestRoutes: new Map(),
+    });
 
     const readState = () => Ref.get(stateRef);
     const getSessionState = (sessionId: string) =>
@@ -242,10 +246,12 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
           batches.delete(requestId);
           return [
             batch,
-            writeSessionState(dropRequestRoute(current, requestId), sessionId, {
-              ...session,
+            writeSessionBatchesState(
+              dropRequestRoute(current, requestId),
+              sessionId,
+              session,
               batches,
-            }),
+            ),
           ];
         },
       );
@@ -274,13 +280,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
             nextState = dropRequestRoute(nextState, requestId);
           }
 
-          return [
-            nextBatch,
-            writeSessionState(nextState, sessionId, {
-              ...session,
-              batches,
-            }),
-          ];
+          return [nextBatch, writeSessionBatchesState(nextState, sessionId, session, batches)];
         },
       );
 
@@ -308,10 +308,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
           batches.set(requestId, batch);
           return [
             { type: "updated", batch },
-            writeSessionState(current, sessionId, {
-              ...session,
-              batches,
-            }),
+            writeSessionBatchesState(current, sessionId, session, batches),
           ];
         },
       );
@@ -349,16 +346,14 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
 
           return [
             { terminated, requestIds },
-            writeSessionState(
+            writeSessionBatchesState(
               {
                 ...current,
                 requestRoutes,
               },
               sessionId,
-              {
-                ...session,
-                batches,
-              },
+              session,
+              batches,
             ),
           ];
         },
@@ -467,9 +462,6 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
             interaction.update(createQuestionMessageEdit(questionBatchView(batch))),
           );
 
-    const routeQuestionReply = (sessionId: string, interaction: Interaction, message: string) =>
-      replyToQuestionInteraction(interaction, message).pipe(Effect.as(routedNoSignals(sessionId)));
-
     const routeQuestionUpdate = <A extends { requestID: string; version: number }>(
       sessionId: string,
       interaction: Interaction,
@@ -480,49 +472,86 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         Effect.as(routedNoSignals(sessionId)),
       );
 
+    const setQuestionDraft = (
+      batch: QuestionWorkflowBatch,
+      questionIndex: number,
+      draft: QuestionWorkflowBatch["domain"]["drafts"][number],
+    ): QuestionWorkflowBatch => {
+      const drafts = [...batch.domain.drafts];
+      drafts[questionIndex] = draft;
+      return {
+        ...batch,
+        domain: {
+          ...batch.domain,
+          page: questionIndex,
+          drafts,
+        },
+      };
+    };
+
     const requireCustomQuestion = (
-      sessionId: string,
       interaction: Interaction,
       batch: QuestionWorkflowBatch,
       questionIndex: number,
     ): Effect.Effect<QuestionRequest["questions"][number] | null> => {
       const question = batch.domain.request.questions[questionIndex];
       return !question || question.custom === false
-        ? routeQuestionReply(
-            sessionId,
+        ? replyToQuestionInteraction(
             interaction,
             "This question does not allow a custom answer.",
           ).pipe(Effect.as(null))
         : Effect.succeed(question);
     };
 
-    const getQuestionSession = (sessionId: string) =>
-      deps.getSessionContext(sessionId).pipe(Effect.map((context) => context?.session ?? null));
-
-    const expireQuestionBatch = (sessionId: string, requestId: string) =>
-      updateQuestionBatch(sessionId, requestId, (current) => terminateQuestionBatch(current));
+    const persistQuestionBatchOrReply = (input: {
+      sessionId: string;
+      interaction: Interaction;
+      requestId: string;
+      expectedVersion: number;
+      update: (batch: QuestionWorkflowBatch) => QuestionWorkflowBatch;
+      missingMessage: string;
+    }) =>
+      tryPersistQuestionBatch(
+        input.sessionId,
+        input.requestId,
+        input.expectedVersion,
+        input.interaction.user.id,
+        input.update,
+      ).pipe(
+        Effect.flatMap((result) => {
+          if (result.type === "missing") {
+            return replyToQuestionInteraction(input.interaction, input.missingMessage).pipe(
+              Effect.as(null),
+            );
+          }
+          if (result.type === "conflict") {
+            return replyToQuestionConflict(input.interaction, result.batch).pipe(Effect.as(null));
+          }
+          return Effect.succeed(result.batch);
+        }),
+      );
 
     const finalizeRemoteQuestionBatch = (input: RemoteQuestionAction) =>
       Effect.gen(function* () {
-        const pending = yield* tryPersistQuestionBatch(
-          input.sessionId,
-          input.requestId,
-          input.expectedVersion,
-          input.actorId,
-          (current) => setQuestionBatchStatus(current, "submitting"),
-        );
-        if (pending.type === "missing") {
-          yield* replyToQuestionInteraction(input.interaction, "This question prompt has expired.");
-          return noSignals;
-        }
-        if (pending.type === "conflict") {
-          yield* replyToQuestionConflict(input.interaction, pending.batch);
+        const pending = yield* persistQuestionBatchOrReply({
+          sessionId: input.sessionId,
+          interaction: input.interaction,
+          requestId: input.requestId,
+          expectedVersion: input.expectedVersion,
+          update: (current) => setQuestionBatchStatus(current, "submitting"),
+          missingMessage: "This question prompt has expired.",
+        });
+        if (!pending) {
           return noSignals;
         }
 
-        const session = yield* getQuestionSession(input.sessionId);
+        const session = yield* deps
+          .getSessionContext(input.sessionId)
+          .pipe(Effect.map((context) => context?.session ?? null));
         if (!session) {
-          const expired = yield* expireQuestionBatch(input.sessionId, input.requestId);
+          const expired = yield* updateQuestionBatch(input.sessionId, input.requestId, (current) =>
+            terminateQuestionBatch(current),
+          );
           if (!expired) {
             yield* replyToQuestionInteraction(
               input.interaction,
@@ -535,9 +564,9 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
           return noSignals;
         }
 
-        yield* updateInteraction(input.interaction, pending.batch);
+        yield* updateInteraction(input.interaction, pending);
 
-        return yield* input.invoke(session.opencode, pending.batch.domain.request.id).pipe(
+        return yield* input.invoke(session.opencode, pending.domain.request.id).pipe(
           Effect.matchEffect({
             onFailure: (error) =>
               Effect.gen(function* () {
@@ -557,7 +586,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                 }
                 return noSignals;
               }),
-            onSuccess: () => input.onSuccess(pending.batch),
+            onSuccess: () => input.onSuccess(pending),
           }),
         );
       });
@@ -577,28 +606,19 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
           return;
         }
 
-        const persisted = yield* tryPersistQuestionBatch(
+        const persisted = yield* persistQuestionBatchOrReply({
           sessionId,
+          interaction,
           requestId,
           expectedVersion,
-          interaction.user.id,
           update,
-        );
-        if (persisted.type === "missing") {
-          yield* replyToQuestionInteraction(
-            interaction,
-            "This question prompt is no longer active.",
-          );
-          return;
-        }
-        if (persisted.type === "conflict") {
-          yield* replyToQuestionConflict(interaction, persisted.batch);
+          missingMessage: "This question prompt is no longer active.",
+        });
+        if (!persisted) {
           return;
         }
 
-        yield* Effect.promise(() =>
-          interaction.update(createQuestionMessageEdit(questionBatchView(persisted.batch))),
-        );
+        yield* updateInteraction(interaction, persisted);
       });
 
     const handleQuestionAsked = (
@@ -817,18 +837,9 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
               };
             });
           case "clear":
-            return yield* routeQuestionUpdate(sessionId, interaction, action, (current) => {
-              const drafts = [...current.domain.drafts];
-              drafts[action.questionIndex] = clearQuestionDraft();
-              return {
-                ...current,
-                domain: {
-                  ...current.domain,
-                  page: action.questionIndex,
-                  drafts,
-                },
-              };
-            });
+            return yield* routeQuestionUpdate(sessionId, interaction, action, (current) =>
+              setQuestionDraft(current, action.questionIndex, clearQuestionDraft()),
+            );
           case "select":
             if (!interaction.isStringSelectMenu()) {
               return routedNoSignals(sessionId);
@@ -846,33 +857,23 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                   page * QUESTION_OPTIONS_PER_PAGE + QUESTION_OPTIONS_PER_PAGE,
                 )
                 .map((option) => option.label);
-              const drafts = [...current.domain.drafts];
-              drafts[action.questionIndex] = setQuestionOptionSelection({
-                question,
-                draft: currentQuestionDraft(current, action.questionIndex),
-                visibleOptions,
-                selectedOptions: interaction.values,
-              });
-              return {
-                ...current,
-                domain: {
-                  ...current.domain,
-                  page: action.questionIndex,
-                  drafts,
-                },
-              };
+              return setQuestionDraft(
+                current,
+                action.questionIndex,
+                setQuestionOptionSelection({
+                  question,
+                  draft: currentQuestionDraft(current, action.questionIndex),
+                  visibleOptions,
+                  selectedOptions: interaction.values,
+                }),
+              );
             });
           case "custom": {
             if (!interaction.isButton()) {
               return routedNoSignals(sessionId);
             }
 
-            const question = yield* requireCustomQuestion(
-              sessionId,
-              interaction,
-              batch,
-              action.questionIndex,
-            );
+            const question = yield* requireCustomQuestion(interaction, batch, action.questionIndex);
             if (!question) {
               return routedNoSignals(sessionId);
             }
@@ -895,12 +896,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
               return routedNoSignals(sessionId);
             }
 
-            const question = yield* requireCustomQuestion(
-              sessionId,
-              interaction,
-              batch,
-              action.questionIndex,
-            );
+            const question = yield* requireCustomQuestion(interaction, batch, action.questionIndex);
             if (!question) {
               return routedNoSignals(sessionId);
             }
@@ -913,39 +909,29 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
               return routedNoSignals(sessionId);
             }
 
-            const updated = yield* tryPersistQuestionBatch(
+            const updated = yield* persistQuestionBatchOrReply({
               sessionId,
-              action.requestID,
-              action.version,
-              interaction.user.id,
-              (current) => {
-                const drafts = [...current.domain.drafts];
-                drafts[action.questionIndex] = setQuestionCustomAnswer(
-                  question,
-                  currentQuestionDraft(current, action.questionIndex),
-                  customAnswer,
-                );
-                return {
-                  ...current,
-                  domain: {
-                    ...current.domain,
-                    page: action.questionIndex,
-                    drafts,
-                  },
-                };
-              },
-            );
-            if (updated.type === "missing") {
-              yield* replyToQuestionInteraction(interaction, "This question prompt has expired.");
-              return routedNoSignals(sessionId);
-            }
-            if (updated.type === "conflict") {
-              yield* replyToQuestionConflict(interaction, updated.batch);
+              interaction,
+              requestId: action.requestID,
+              expectedVersion: action.version,
+              update: (current) =>
+                setQuestionDraft(
+                  current,
+                  action.questionIndex,
+                  setQuestionCustomAnswer(
+                    question,
+                    currentQuestionDraft(current, action.questionIndex),
+                    customAnswer,
+                  ),
+                ),
+              missingMessage: "This question prompt has expired.",
+            });
+            if (!updated) {
               return routedNoSignals(sessionId);
             }
 
             yield* editQuestionMessageLogged(
-              updated.batch,
+              updated,
               "failed to edit question batch after modal submit",
             );
             yield* Effect.promise(() => interaction.deferUpdate()).pipe(Effect.ignore);
@@ -965,7 +951,6 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                       interaction,
                       requestId: action.requestID,
                       expectedVersion: action.version,
-                      actorId: interaction.user.id,
                       invoke: (session, requestId) =>
                         deps.replyToQuestion(
                           session,
@@ -987,7 +972,6 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                       interaction,
                       requestId: action.requestID,
                       expectedVersion: action.version,
-                      actorId: interaction.user.id,
                       invoke: deps.rejectQuestion,
                       followUpFailure: (error) =>
                         `Failed to reject questions: ${deps.formatError(error)}`,

@@ -70,3 +70,25 @@ export const makeTestActiveRun = async (
   });
   return { activeRun, progressQueue };
 };
+
+export const makeTestSessionState = async (input?: {
+  withActiveRun?: boolean;
+  session?: Partial<ChannelSession>;
+  activeRun?: Partial<ActiveRun>;
+}) => {
+  const activeRunState =
+    input?.withActiveRun === false ? null : await makeTestActiveRun(input?.activeRun);
+  const activeRun = activeRunState?.activeRun ?? null;
+  const progressQueue =
+    activeRunState?.progressQueue ?? (await Effect.runPromise(Queue.unbounded<RunProgressEvent>()));
+
+  return {
+    session: makeTestSession({
+      activeRun,
+      ...input?.session,
+    }),
+    activeRun,
+    progressQueue,
+    promptState: activeRun?.promptState ?? (await Effect.runPromise(createPromptState())),
+  };
+};

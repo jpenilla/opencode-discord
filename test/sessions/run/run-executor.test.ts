@@ -7,7 +7,7 @@ import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
 import { executeRunBatch } from "@/sessions/run/run-executor.ts";
 import type { NonEmptyRunRequestBatch } from "@/sessions/run/run-batch.ts";
 import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
-import { appendRef, runTestEffect } from "../../support/runtime.ts";
+import { appendRef, makeRef, readRef, runTestEffect } from "../../support/runtime.ts";
 import { makeRunMessage, makeTestSession } from "../../support/session.ts";
 import { unsafeStub } from "../../support/stub.ts";
 
@@ -20,8 +20,11 @@ const makeInitialRequests = (message: Message): NonEmptyRunRequestBatch => [
 ];
 
 const runExecutorEffect = runTestEffect;
-const makeRef = <A>(value: A) => runTestEffect(Ref.make(value));
-const get = <A>(ref: Ref.Ref<A>) => Effect.runPromise(Ref.get(ref));
+const runBatch = (
+  runtime: Awaited<ReturnType<typeof makeRuntime>>["runtime"],
+  session: ChannelSession,
+  initialRequests: NonEmptyRunRequestBatch,
+) => runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
 const makeRunInput = (messageId = "m-1") => {
   const session = makeTestSession();
   const responseMessage = makeRunMessage(messageId);
@@ -37,7 +40,7 @@ const followUpContext = (
   requestMessages: [replyTargetMessage],
 });
 const expectCalls = (calls: Ref.Ref<string[]>, expected: string[]) =>
-  get(calls).then((seen) => expect(seen).toEqual(expected));
+  readRef(calls).then((seen) => expect(seen).toEqual(expected));
 const makePromptCompletion = (
   replyTargetMessage: Message,
   transcript: string,
@@ -180,7 +183,7 @@ describe("executeRunBatch", () => {
     const { session, initialRequests } = makeRunInput();
     const { runtime, calls } = await makeRuntime();
 
-    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
+    await runBatch(runtime, session, initialRequests);
 
     await expectCalls(calls, [
       "typing:start",
@@ -212,9 +215,9 @@ describe("executeRunBatch", () => {
       },
     });
 
-    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
+    await runBatch(runtime, session, initialRequests);
 
-    expect(await get(finalResponseMessageIds)).toEqual(["follow-up-message"]);
+    expect(await readRef(finalResponseMessageIds)).toEqual(["follow-up-message"]);
   });
 
   test("sends the question UI failure reply for empty transcripts with an unnotified UI failure", async () => {
@@ -232,12 +235,12 @@ describe("executeRunBatch", () => {
       },
     });
 
-    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
+    await runBatch(runtime, session, initialRequests);
 
-    const seen = await get(calls);
+    const seen = await readRef(calls);
     expect(seen).toContain("sendQuestionUiFailure:question failed");
     expect(seen.some((entry) => entry.startsWith("sendFinalResponse:"))).toBe(false);
-    expect(await get(questionUiFailureMessageIds)).toEqual(["question-target"]);
+    expect(await readRef(questionUiFailureMessageIds)).toEqual(["question-target"]);
   });
 
   test("sends a run failure and triggers health recovery after non-interrupt errors", async () => {
@@ -250,7 +253,7 @@ describe("executeRunBatch", () => {
       },
     });
 
-    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
+    await runBatch(runtime, session, initialRequests);
 
     await expectCalls(calls, [
       "typing:start",
@@ -264,7 +267,7 @@ describe("executeRunBatch", () => {
       "setActiveRun:null",
       "ensureSessionHealthAfterFailure",
     ]);
-    expect(await get(runFailureMessageIds)).toEqual(["failure-target"]);
+    expect(await readRef(runFailureMessageIds)).toEqual(["failure-target"]);
   });
 
   test("suppresses run failure and health recovery when the run was intentionally interrupted", async () => {
@@ -276,7 +279,7 @@ describe("executeRunBatch", () => {
       },
     });
 
-    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
+    await runBatch(runtime, session, initialRequests);
 
     await expectCalls(calls, [
       "typing:start",
@@ -300,7 +303,7 @@ describe("executeRunBatch", () => {
       },
     });
 
-    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
+    await runBatch(runtime, session, initialRequests);
 
     await expectCalls(calls, [
       "typing:start",
@@ -323,7 +326,7 @@ describe("executeRunBatch", () => {
       progressBehavior: "exit",
     });
 
-    await runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
+    await runBatch(runtime, session, initialRequests);
 
     await expectCalls(calls, [
       "progress:exit",
@@ -367,9 +370,12 @@ describe("executeRunBatch", () => {
         appendRef(finalResponseMessageIds, message.id).pipe(Effect.andThen(Effect.void)),
     } as const;
 
-    await runExecutorEffect(executeRunBatch(multiRoundRuntime)(session, initialRequests));
+    await runBatch(multiRoundRuntime, session, initialRequests);
 
-    expect(await get(finalResponseMessageIds)).toEqual(["trigger-message", "follow-up-message"]);
+    expect(await readRef(finalResponseMessageIds)).toEqual([
+      "trigger-message",
+      "follow-up-message",
+    ]);
   });
 
   test("sends replies in order across multiple chained follow-up rounds", async () => {
@@ -401,9 +407,9 @@ describe("executeRunBatch", () => {
         appendRef(finalResponseMessageIds, `${message.id}:${text}`),
     } as const;
 
-    await runExecutorEffect(executeRunBatch(chainedRuntime)(session, initialRequests));
+    await runBatch(chainedRuntime, session, initialRequests);
 
-    expect(await get(finalResponseMessageIds)).toEqual([
+    expect(await readRef(finalResponseMessageIds)).toEqual([
       "trigger-message:first reply",
       "follow-up-message-1:second reply",
       "follow-up-message-2:third reply",

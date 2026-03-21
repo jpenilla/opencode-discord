@@ -26,6 +26,10 @@ const logger: LoggerShape = {
 };
 
 const runEffect = runTestEffect;
+const runScoped = <A, E, R>(effect: Effect.Effect<A, E, R>) => runEffect(Effect.scoped(effect));
+const succeedDeferred = <A>(deferred: Deferred.Deferred<A>, value: A) =>
+  runEffect(Deferred.succeed(deferred, value).pipe(Effect.ignore));
+const awaitDeferred = <A>(deferred: Deferred.Deferred<A>) => runEffect(Deferred.await(deferred));
 const testWorkdir = "/tmp/workdir";
 const testSessionTitle = "Session";
 
@@ -269,59 +273,57 @@ describe("makeOpencodeService", () => {
     let abortSeen = false;
     let serverClosed = false;
 
-    await runEffect(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const eventQueue = yield* Queue.unbounded<GlobalEvent>();
-          const createStarted = yield* Deferred.make<void>();
+    await runScoped(
+      Effect.gen(function* () {
+        const eventQueue = yield* Queue.unbounded<GlobalEvent>();
+        const createStarted = yield* Deferred.make<void>();
 
-          const service = yield* makeService({
-            eventQueue,
-            createClient: () =>
-              makeClient({
-                global: {
-                  event: async ({ signal }: { signal: AbortSignal }) => {
-                    signal.addEventListener(
-                      "abort",
-                      () => {
-                        abortSeen = true;
-                      },
-                      { once: true },
-                    );
+        const service = yield* makeService({
+          eventQueue,
+          createClient: () =>
+            makeClient({
+              global: {
+                event: async ({ signal }: { signal: AbortSignal }) => {
+                  signal.addEventListener(
+                    "abort",
+                    () => {
+                      abortSeen = true;
+                    },
+                    { once: true },
+                  );
 
-                    return {
-                      stream: {
-                        async *[Symbol.asyncIterator]() {
-                          yield* [];
-                          await new Promise(() => {});
-                        },
+                  return {
+                    stream: {
+                      async *[Symbol.asyncIterator]() {
+                        yield* [];
+                        await new Promise(() => {});
                       },
-                    };
-                  },
+                    },
+                  };
                 },
-                session: {
-                  create: async () => {
-                    await runEffect(Deferred.succeed(createStarted, undefined).pipe(Effect.ignore));
-                    return await new Promise(() => {});
-                  },
+              },
+              session: {
+                create: async () => {
+                  await succeedDeferred(createStarted, undefined);
+                  return await new Promise(() => {});
                 },
-              }),
-            sandbox: makeTrackedSandbox(() => {
-              serverClosed = true;
+              },
             }),
-          });
+          sandbox: makeTrackedSandbox(() => {
+            serverClosed = true;
+          }),
+        });
 
-          const fiber = yield* createSession(service).pipe(
-            Effect.forkChild({ startImmediately: true }),
-          );
+        const fiber = yield* createSession(service).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
 
-          yield* Deferred.await(createStarted);
-          yield* Fiber.interrupt(fiber);
+        yield* Deferred.await(createStarted);
+        yield* Fiber.interrupt(fiber);
 
-          expect(abortSeen).toBe(true);
-          expect(serverClosed).toBe(true);
-        }),
-      ),
+        expect(abortSeen).toBe(true);
+        expect(serverClosed).toBe(true);
+      }),
     );
   });
 
@@ -338,127 +340,119 @@ describe("makeOpencodeService", () => {
       },
     });
 
-    await runEffect(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const eventQueue = yield* Queue.unbounded<GlobalEvent>();
-          const streamStarted = yield* Deferred.make<void>();
-          const firstEvent = yield* Deferred.make<IteratorResult<GlobalEvent, undefined>>();
-          let firstPull = true;
-          let pendingNext: ((result: IteratorResult<GlobalEvent, undefined>) => void) | null = null;
-          let abortSeen = false;
+    await runScoped(
+      Effect.gen(function* () {
+        const eventQueue = yield* Queue.unbounded<GlobalEvent>();
+        const streamStarted = yield* Deferred.make<void>();
+        const firstEvent = yield* Deferred.make<IteratorResult<GlobalEvent, undefined>>();
+        let firstPull = true;
+        let pendingNext: ((result: IteratorResult<GlobalEvent, undefined>) => void) | null = null;
+        let abortSeen = false;
 
-          const service = yield* makeService({
-            eventQueue,
-            createClient: () =>
-              makeClient({
-                global: {
-                  event: async ({ signal }: { signal: AbortSignal }) => {
-                    signal.addEventListener(
-                      "abort",
-                      () => {
-                        abortSeen = true;
-                        pendingNext?.({ done: true, value: undefined });
-                      },
-                      { once: true },
-                    );
+        const service = yield* makeService({
+          eventQueue,
+          createClient: () =>
+            makeClient({
+              global: {
+                event: async ({ signal }: { signal: AbortSignal }) => {
+                  signal.addEventListener(
+                    "abort",
+                    () => {
+                      abortSeen = true;
+                      pendingNext?.({ done: true, value: undefined });
+                    },
+                    { once: true },
+                  );
 
-                    return {
-                      stream: {
-                        [Symbol.asyncIterator]: () => ({
-                          next: async () => {
-                            await runEffect(
-                              Deferred.succeed(streamStarted, undefined).pipe(Effect.ignore),
-                            );
-                            if (firstPull) {
-                              firstPull = false;
-                              return await runEffect(Deferred.await(firstEvent));
-                            }
-                            return await new Promise<IteratorResult<GlobalEvent, undefined>>(
-                              (resolve) => {
-                                pendingNext = resolve;
-                              },
-                            );
-                          },
-                        }),
-                      },
-                    };
-                  },
+                  return {
+                    stream: {
+                      [Symbol.asyncIterator]: () => ({
+                        next: async () => {
+                          await succeedDeferred(streamStarted, undefined);
+                          if (firstPull) {
+                            firstPull = false;
+                            return await awaitDeferred(firstEvent);
+                          }
+                          return await new Promise<IteratorResult<GlobalEvent, undefined>>(
+                            (resolve) => {
+                              pendingNext = resolve;
+                            },
+                          );
+                        },
+                      }),
+                    },
+                  };
                 },
-              }),
-          });
+              },
+            }),
+        });
 
-          const session = yield* createSession(service);
-          yield* Deferred.await(streamStarted);
-          yield* Deferred.succeed(firstEvent, { done: false, value: event }).pipe(Effect.ignore);
+        const session = yield* createSession(service);
+        yield* Deferred.await(streamStarted);
+        yield* Deferred.succeed(firstEvent, { done: false, value: event }).pipe(Effect.ignore);
 
-          expect(yield* Queue.take(eventQueue)).toEqual(event);
+        expect(yield* Queue.take(eventQueue)).toEqual(event);
 
-          yield* session.close();
-          expect(abortSeen).toBe(true);
-        }),
-      ),
+        yield* session.close();
+        expect(abortSeen).toBe(true);
+      }),
     );
   });
 
   test("does not warn when closing a session aborts a rejecting event stream", async () => {
     const warnings: Array<{ message: string; fields?: Record<string, unknown> }> = [];
 
-    await runEffect(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const eventQueue = yield* Queue.unbounded<GlobalEvent>();
-          const streamStarted = yield* Deferred.make<void>();
-          let rejectNext: ((error: unknown) => void) | null = null;
+    await runScoped(
+      Effect.gen(function* () {
+        const eventQueue = yield* Queue.unbounded<GlobalEvent>();
+        const streamStarted = yield* Deferred.make<void>();
+        let rejectNext: ((error: unknown) => void) | null = null;
 
-          const service = yield* makeService({
-            eventQueue,
-            logger: {
-              info: () => Effect.void,
-              warn: (message, fields) =>
-                Effect.sync(() => {
-                  warnings.push({ message, fields });
-                }),
-              error: () => Effect.void,
-            },
-            createClient: () =>
-              makeClient({
-                global: {
-                  event: async ({ signal }: { signal: AbortSignal }) => {
-                    signal.addEventListener(
-                      "abort",
-                      () => {
-                        rejectNext?.(new DOMException("Aborted", "AbortError"));
-                      },
-                      { once: true },
-                    );
-
-                    return {
-                      stream: {
-                        [Symbol.asyncIterator]: () => ({
-                          next: async () => {
-                            await runEffect(
-                              Deferred.succeed(streamStarted, undefined).pipe(Effect.ignore),
-                            );
-                            return await new Promise<IteratorResult<GlobalEvent, undefined>>(
-                              (_resolve, reject) => {
-                                rejectNext = reject;
-                              },
-                            );
-                          },
-                        }),
-                      },
-                    };
-                  },
-                },
+        const service = yield* makeService({
+          eventQueue,
+          logger: {
+            info: () => Effect.void,
+            warn: (message, fields) =>
+              Effect.sync(() => {
+                warnings.push({ message, fields });
               }),
-          });
+            error: () => Effect.void,
+          },
+          createClient: () =>
+            makeClient({
+              global: {
+                event: async ({ signal }: { signal: AbortSignal }) => {
+                  signal.addEventListener(
+                    "abort",
+                    () => {
+                      rejectNext?.(new DOMException("Aborted", "AbortError"));
+                    },
+                    { once: true },
+                  );
 
-          const session = yield* createSession(service);
-          yield* Deferred.await(streamStarted);
-          yield* session.close();
-        }),
-      ),
+                  return {
+                    stream: {
+                      [Symbol.asyncIterator]: () => ({
+                        next: async () => {
+                          await succeedDeferred(streamStarted, undefined);
+                          return await new Promise<IteratorResult<GlobalEvent, undefined>>(
+                            (_resolve, reject) => {
+                              rejectNext = reject;
+                            },
+                          );
+                        },
+                      }),
+                    },
+                  };
+                },
+              },
+            }),
+        });
+
+        const session = yield* createSession(service);
+        yield* Deferred.await(streamStarted);
+        yield* session.close();
+      }),
     );
 
     expect(
@@ -470,21 +464,19 @@ describe("makeOpencodeService", () => {
     let serverClosed = false;
 
     await expect(
-      runEffect(
-        Effect.scoped(
-          Effect.gen(function* () {
-            const service = yield* makeService({
-              createClient: () => {
-                throw new Error("client init failed");
-              },
-              sandbox: makeTrackedSandbox(() => {
-                serverClosed = true;
-              }),
-            });
+      runScoped(
+        Effect.gen(function* () {
+          const service = yield* makeService({
+            createClient: () => {
+              throw new Error("client init failed");
+            },
+            sandbox: makeTrackedSandbox(() => {
+              serverClosed = true;
+            }),
+          });
 
-            yield* createSession(service);
-          }),
-        ),
+          yield* createSession(service);
+        }),
       ),
     ).rejects.toThrow("client init failed");
 
@@ -492,30 +484,28 @@ describe("makeOpencodeService", () => {
   });
 
   test("surfaces SDK result errors through the Effect failure channel", async () => {
-    await runEffect(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const service = yield* makeService({
-            createClient: () =>
-              makeClient({
-                session: {
-                  abort: async () => ({
-                    data: false,
-                    error: "already stopped",
-                  }),
-                },
-              }),
-          });
-          const session = yield* createSession(service);
+    await runScoped(
+      Effect.gen(function* () {
+        const service = yield* makeService({
+          createClient: () =>
+            makeClient({
+              session: {
+                abort: async () => ({
+                  data: false,
+                  error: "already stopped",
+                }),
+              },
+            }),
+        });
+        const session = yield* createSession(service);
 
-          const result = yield* service.interruptSession(session).pipe(Effect.result);
-          expect(result).toMatchObject({
-            _tag: "Failure",
-          });
+        const result = yield* service.interruptSession(session).pipe(Effect.result);
+        expect(result).toMatchObject({
+          _tag: "Failure",
+        });
 
-          yield* session.close();
-        }),
-      ),
+        yield* session.close();
+      }),
     );
   });
 });

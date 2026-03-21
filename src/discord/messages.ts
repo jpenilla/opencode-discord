@@ -6,9 +6,6 @@ import { normalizeOutgoingMentions } from "@/discord/mentions.ts";
 
 const DISCORD_MESSAGE_LIMIT = 2000;
 
-const summarizeField = (field: APIEmbedField | Embed["fields"][number]) =>
-  `${field.name}: ${field.value}`;
-
 export const summarizeEmbeds = (message: Message) => {
   if (message.embeds.length === 0) {
     return "None";
@@ -21,14 +18,13 @@ export const summarizeEmbeds = (message: Message) => {
       if (embed.description) parts.push(`description=${embed.description}`);
       if (embed.url) parts.push(`url=${embed.url}`);
       if (embed.fields.length > 0)
-        parts.push(`fields=${embed.fields.map(summarizeField).join("; ")}`);
+        parts.push(
+          `fields=${embed.fields.map((field) => `${field.name}: ${field.value}`).join("; ")}`,
+        );
       return `- ${parts.join(" | ")}`;
     })
     .join("\n");
 };
-
-export const summarizeAttachmentAvailability = (message: Message) =>
-  message.attachments.size > 0 ? "yes" : "no";
 
 type PromptMessageContext = {
   userTag: string;
@@ -45,7 +41,7 @@ export const promptMessageContext = (
   userTag: message.author.tag,
   messageId: message.id,
   content: (contentOverride ?? message.content).trim() || "(empty message)",
-  attachmentContext: summarizeAttachmentAvailability(message),
+  attachmentContext: message.attachments.size > 0 ? "yes" : "no",
   embedSummary: summarizeEmbeds(message),
 });
 
@@ -115,6 +111,19 @@ const sendChunks = async (
   }
 };
 
+const sendChannelChunks = (
+  channel: SendableChannels,
+  chunks: ReadonlyArray<string>,
+  options?: { flags?: MessageFlags.SuppressNotifications },
+) =>
+  sendChunks(chunks, async (chunk) => {
+    await channel.send({
+      content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
+      allowedMentions: { parse: ["users", "roles", "everyone"] },
+      flags: options?.flags,
+    });
+  });
+
 export const buildBatchedOpencodePrompt = (prompts: ReadonlyArray<string>) => {
   if (prompts.length === 1) {
     return prompts[0] ?? "";
@@ -150,10 +159,7 @@ export const sendFinalResponse = async (input: { message: Message; text: string 
       return;
     }
 
-    await (input.message.channel as SendableChannels).send({
-      content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
-      allowedMentions: { parse: ["users", "roles", "everyone"] },
-    });
+    await sendChannelChunks(input.message.channel as SendableChannels, [chunk]);
   });
 };
 
@@ -167,12 +173,8 @@ export const sendProgressUpdate = async (message: Message, text: string) => {
     return;
   }
 
-  await sendChunks(chunks, async (chunk) => {
-    await (message.channel as SendableChannels).send({
-      content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
-      allowedMentions: { parse: ["users", "roles", "everyone"] },
-      flags: MessageFlags.SuppressNotifications,
-    });
+  await sendChannelChunks(message.channel as SendableChannels, chunks, {
+    flags: MessageFlags.SuppressNotifications,
   });
 };
 
@@ -186,12 +188,8 @@ export const sendChannelProgressUpdate = async (input: {
     return;
   }
 
-  await sendChunks(chunks, async (chunk) => {
-    await input.channel.send({
-      content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
-      allowedMentions: { parse: ["users", "roles", "everyone"] },
-      flags: MessageFlags.SuppressNotifications,
-    });
+  await sendChannelChunks(input.channel, chunks, {
+    flags: MessageFlags.SuppressNotifications,
   });
 };
 
