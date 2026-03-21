@@ -35,7 +35,9 @@ export const makeSendableChannel = (input: {
     id: input.id ?? "channel-1",
     type: input.type ?? ChannelType.GuildText,
     isSendable: () => true,
-    send: input.send,
+    send:
+      input.send ??
+      (() => Promise.reject(new Error("makeSendableChannel requires a send handler for this test"))),
     sendTyping: input.sendTyping ?? (() => Promise.resolve()),
   });
 

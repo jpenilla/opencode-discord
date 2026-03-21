@@ -146,21 +146,21 @@ export const sendFinalResponse = async (input: { message: Message; text: string 
     emptyFallback: "(no response content)",
   });
 
-  await sendChunks(chunks, async (chunk, index) => {
-    if (index === 0) {
-      await input.message.reply({
-        content: chunk.slice(0, DISCORD_MESSAGE_LIMIT),
-        allowedMentions: { repliedUser: true, parse: ["users", "roles", "everyone"] },
-      });
-      return;
-    }
+  const [firstChunk, ...remainingChunks] = chunks;
+  if (!firstChunk) {
+    return;
+  }
 
-    if (!input.message.channel.isSendable()) {
-      return;
-    }
-
-    await sendChannelChunks(input.message.channel as SendableChannels, [chunk]);
+  await input.message.reply({
+    content: firstChunk.slice(0, DISCORD_MESSAGE_LIMIT),
+    allowedMentions: { repliedUser: true, parse: ["users", "roles", "everyone"] },
   });
+
+  if (!input.message.channel.isSendable() || remainingChunks.length === 0) {
+    return;
+  }
+
+  await sendChannelChunks(input.message.channel as SendableChannels, remainingChunks);
 };
 
 export const sendProgressUpdate = async (message: Message, text: string) => {

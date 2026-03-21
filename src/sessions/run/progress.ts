@@ -96,7 +96,8 @@ const clearRunCompaction = (state: ProgressState) => {
   state.compaction = inactiveRunCompaction();
 };
 
-const isTerminalToolPart = (part: ToolPart) => ["completed", "error"].includes(part.state.status);
+const isTerminalToolPart = (part: ToolPart) =>
+  part.state.status === "completed" || part.state.status === "error";
 
 const toolUpdateKey = (part: ToolPart) => {
   const title =
@@ -181,7 +182,7 @@ const deletePreviousTodoCards = (state: ProgressState, currentCard: Message) =>
   });
 
 const trackLiveToolState = (state: ProgressState, part: ToolPart) => {
-  if (["pending", "running"].includes(part.state.status)) {
+  if (part.state.status === "pending" || part.state.status === "running") {
     state.activeToolParts.set(part.callID, part);
     return;
   }

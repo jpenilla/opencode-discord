@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { BunServices } from "@effect/platform-bun";
 import type {
   Message,
   MessageCreateOptions,
@@ -151,7 +150,7 @@ const runWorkerScenario = async <A>(input: {
 
         return yield* input.collect(input.harness);
       }),
-    ).pipe(Effect.provide(BunServices.layer)),
+    ),
   );
 
 const collectCards = (harness: Awaited<ReturnType<typeof makeHarness>>) =>
