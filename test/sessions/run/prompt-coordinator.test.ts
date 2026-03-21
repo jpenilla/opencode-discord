@@ -12,6 +12,8 @@ import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
 import { makeMessage, makeSessionHandle, makeSilentLogger } from "../../support/fixtures.ts";
 import { failTest } from "../../support/errors.ts";
 
+const session = makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" });
+
 const makeRequest = (
   id: string,
   prompt = `prompt-${id}`,
@@ -54,6 +56,26 @@ const makeActiveRunState = async () => ({
   interruptSource: null,
 });
 
+const makeQueuedSession = async (activeRun: Awaited<ReturnType<typeof makeActiveRunState>>) => ({
+  queue: await Effect.runPromise(Queue.unbounded<RunRequest>()),
+  activeRun,
+});
+
+const runCoordinator = (
+  input: Omit<Parameters<typeof coordinateActiveRunPrompts>[0], "channelId" | "session" | "logger">,
+) =>
+  Effect.runPromise(
+    coordinateActiveRunPrompts({
+      channelId: "c-1",
+      session,
+      logger: makeSilentLogger(),
+      ...input,
+    }),
+  );
+
+const clearQueue = (queue: Queue.Queue<RunRequest>) =>
+  Effect.runPromise(Queue.clear(queue).pipe(Effect.map((items) => [...items])));
+
 describe("coordinateActiveRunPrompts", () => {
   test("prompts the initial batch, absorbs queued follow-ups, and returns the last result", async () => {
     const activeRun = await makeActiveRunState();
@@ -75,24 +97,19 @@ describe("coordinateActiveRunPrompts", () => {
       ]),
     );
 
-    const result = await Effect.runPromise(
-      coordinateActiveRunPrompts({
-        channelId: "c-1",
-        session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
-        activeRun,
-        initialRequests: [makeRequest("m-1", "initial", ["m-1"])],
-        awaitIdleCompaction: () => Effect.void,
-        submitPrompt,
-        handlePromptCompleted: (promptContext, result) =>
-          Effect.sync(() => {
-            completedPrompts.push({
-              kind: promptContext.kind,
-              transcript: result.transcript,
-            });
-          }),
-        logger: makeSilentLogger(),
-      }),
-    );
+    const result = await runCoordinator({
+      activeRun,
+      initialRequests: [makeRequest("m-1", "initial", ["m-1"])],
+      awaitIdleCompaction: () => Effect.void,
+      submitPrompt,
+      handlePromptCompleted: (promptContext, result) =>
+        Effect.sync(() => {
+          completedPrompts.push({
+            kind: promptContext.kind,
+            transcript: result.transcript,
+          });
+        }),
+    });
 
     expect(submitCalls).toEqual(["initial", buildQueuedFollowUpPrompt(["follow-1", "follow-2"])]);
     expect(result).toEqual({
@@ -137,18 +154,13 @@ describe("coordinateActiveRunPrompts", () => {
 
     await Effect.runPromise(Queue.offer(activeRun.followUpQueue, makeRequest("m-2", "follow-up")));
 
-    await Effect.runPromise(
-      coordinateActiveRunPrompts({
-        channelId: "c-1",
-        session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
-        activeRun,
-        initialRequests: [makeRequest("m-1", "initial")],
-        awaitIdleCompaction: () => Effect.void,
-        submitPrompt,
-        handlePromptCompleted: () => Effect.void,
-        logger: makeSilentLogger(),
-      }),
-    );
+    await runCoordinator({
+      activeRun,
+      initialRequests: [makeRequest("m-1", "initial")],
+      awaitIdleCompaction: () => Effect.void,
+      submitPrompt,
+      handlePromptCompleted: () => Effect.void,
+    });
 
     expect(gateSnapshots).toEqual([true, true]);
     expect(await Effect.runPromise(Ref.get(activeRun.acceptFollowUps))).toBe(false);
@@ -156,11 +168,7 @@ describe("coordinateActiveRunPrompts", () => {
 
   test("absorbs a follow-up queued while the first prompt is running", async () => {
     const activeRun = await makeActiveRunState();
-    const sessionQueue = await Effect.runPromise(Queue.unbounded<RunRequest>());
-    const session = {
-      queue: sessionQueue,
-      activeRun,
-    } satisfies Parameters<typeof enqueueRunRequest>[0];
+    const queuedSession = await makeQueuedSession(activeRun);
     const submitCalls: string[] = [];
     const queuedFollowUp = makeRequest("m-2", "later", ["m-2", "m-3"]);
 
@@ -168,7 +176,7 @@ describe("coordinateActiveRunPrompts", () => {
       Effect.gen(function* () {
         const callIndex = submitCalls.push(value);
         if (callIndex === 1) {
-          const destination = yield* enqueueRunRequest(session, queuedFollowUp);
+          const destination = yield* enqueueRunRequest(queuedSession, queuedFollowUp);
           expect(destination).toBe("follow-up");
         }
         yield* resolveCurrentPrompt(activeRun, {
@@ -177,41 +185,33 @@ describe("coordinateActiveRunPrompts", () => {
         });
       });
 
-    const result = await Effect.runPromise(
-      coordinateActiveRunPrompts({
-        channelId: "c-1",
-        session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
-        activeRun,
-        initialRequests: [makeRequest("m-1", "initial", ["m-1"])],
-        awaitIdleCompaction: () => Effect.void,
-        submitPrompt,
-        handlePromptCompleted: () => Effect.void,
-        logger: makeSilentLogger(),
-      }),
-    );
+    const result = await runCoordinator({
+      activeRun,
+      initialRequests: [makeRequest("m-1", "initial", ["m-1"])],
+      awaitIdleCompaction: () => Effect.void,
+      submitPrompt,
+      handlePromptCompleted: () => Effect.void,
+    });
 
     expect(submitCalls).toEqual(["initial", buildQueuedFollowUpPrompt(["later"])]);
     expect(result.messageId).toBe("msg-2");
     expect([...activeRun.attachmentMessagesById.keys()]).toEqual(["m-1", "m-2", "m-3"]);
-    expect(
-      await Effect.runPromise(Queue.clear(sessionQueue).pipe(Effect.map((items) => [...items]))),
-    ).toEqual([]);
+    expect(await clearQueue(queuedSession.queue)).toEqual([]);
   });
 
   test("does not start an absorbed follow-up after interrupt is requested", async () => {
     const activeRun = await makeActiveRunState();
-    const sessionQueue = await Effect.runPromise(Queue.unbounded<RunRequest>());
-    const session = {
-      queue: sessionQueue,
-      activeRun,
-    } satisfies Parameters<typeof enqueueRunRequest>[0];
+    const queuedSession = await makeQueuedSession(activeRun);
     const submitCalls: string[] = [];
 
     const submitPrompt = (_session: SessionHandle, value: string) =>
       Effect.gen(function* () {
         const callIndex = submitCalls.push(value);
         if (callIndex === 1) {
-          const destination = yield* enqueueRunRequest(session, makeRequest("m-2", "follow-up"));
+          const destination = yield* enqueueRunRequest(
+            queuedSession,
+            makeRequest("m-2", "follow-up"),
+          );
           expect(destination).toBe("follow-up");
         }
         yield* resolveCurrentPrompt(activeRun, {
@@ -221,27 +221,20 @@ describe("coordinateActiveRunPrompts", () => {
       });
 
     await expect(
-      Effect.runPromise(
-        coordinateActiveRunPrompts({
-          channelId: "c-1",
-          session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
-          activeRun,
-          initialRequests: [makeRequest("m-1", "initial")],
-          awaitIdleCompaction: () => Effect.void,
-          submitPrompt,
-          handlePromptCompleted: () =>
-            Effect.sync(() => {
-              activeRun.interruptRequested = true;
-            }),
-          logger: makeSilentLogger(),
-        }),
-      ),
+      runCoordinator({
+        activeRun,
+        initialRequests: [makeRequest("m-1", "initial")],
+        awaitIdleCompaction: () => Effect.void,
+        submitPrompt,
+        handlePromptCompleted: () =>
+          Effect.sync(() => {
+            activeRun.interruptRequested = true;
+          }),
+      }),
     ).rejects.toThrow("interrupted");
 
     expect(submitCalls).toEqual(["initial"]);
-    expect(
-      await Effect.runPromise(Queue.clear(sessionQueue).pipe(Effect.map((items) => [...items]))),
-    ).toEqual([]);
+    expect(await clearQueue(queuedSession.queue)).toEqual([]);
   });
 
   test("resets prompt-scoped tracking before each prompt submission", async () => {
@@ -270,18 +263,13 @@ describe("coordinateActiveRunPrompts", () => {
 
     await Effect.runPromise(Queue.offer(activeRun.followUpQueue, makeRequest("m-2", "follow-up")));
 
-    await Effect.runPromise(
-      coordinateActiveRunPrompts({
-        channelId: "c-1",
-        session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
-        activeRun,
-        initialRequests: [makeRequest("m-1", "initial")],
-        awaitIdleCompaction: () => Effect.void,
-        submitPrompt,
-        handlePromptCompleted: () => Effect.void,
-        logger: makeSilentLogger(),
-      }),
-    );
+    await runCoordinator({
+      activeRun,
+      initialRequests: [makeRequest("m-1", "initial")],
+      awaitIdleCompaction: () => Effect.void,
+      submitPrompt,
+      handlePromptCompleted: () => Effect.void,
+    });
 
     expect(snapshots).toEqual([
       {
@@ -303,11 +291,7 @@ describe("coordinateActiveRunPrompts", () => {
 
   test("rotates prompt message lineage across multiple absorbed follow-ups", async () => {
     const activeRun = await makeActiveRunState();
-    const sessionQueue = await Effect.runPromise(Queue.unbounded<RunRequest>());
-    const session = {
-      queue: sessionQueue,
-      activeRun,
-    } satisfies Parameters<typeof enqueueRunRequest>[0];
+    const queuedSession = await makeQueuedSession(activeRun);
     const snapshots: Array<{
       previous: string[];
       current: string[];
@@ -325,7 +309,10 @@ describe("coordinateActiveRunPrompts", () => {
         activeRun.currentPromptMessageIds.add(`assistant-${callIndex}`);
 
         if (callIndex === 2) {
-          const destination = yield* enqueueRunRequest(session, makeRequest("m-3", "follow-2"));
+          const destination = yield* enqueueRunRequest(
+            queuedSession,
+            makeRequest("m-3", "follow-2"),
+          );
           expect(destination).toBe("follow-up");
         }
 
@@ -337,18 +324,13 @@ describe("coordinateActiveRunPrompts", () => {
 
     await Effect.runPromise(Queue.offer(activeRun.followUpQueue, makeRequest("m-2", "follow-1")));
 
-    await Effect.runPromise(
-      coordinateActiveRunPrompts({
-        channelId: "c-1",
-        session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
-        activeRun,
-        initialRequests: [makeRequest("m-1", "initial")],
-        awaitIdleCompaction: () => Effect.void,
-        submitPrompt,
-        handlePromptCompleted: () => Effect.void,
-        logger: makeSilentLogger(),
-      }),
-    );
+    await runCoordinator({
+      activeRun,
+      initialRequests: [makeRequest("m-1", "initial")],
+      awaitIdleCompaction: () => Effect.void,
+      submitPrompt,
+      handlePromptCompleted: () => Effect.void,
+    });
 
     expect(snapshots).toEqual([
       {
@@ -366,27 +348,20 @@ describe("coordinateActiveRunPrompts", () => {
     ]);
     expect([...activeRun.previousPromptMessageIds]).toEqual(["user-2", "assistant-2"]);
     expect([...activeRun.currentPromptMessageIds]).toEqual(["user-3", "assistant-3"]);
-    expect(
-      await Effect.runPromise(Queue.clear(sessionQueue).pipe(Effect.map((items) => [...items]))),
-    ).toEqual([]);
+    expect(await clearQueue(queuedSession.queue)).toEqual([]);
   });
 
   test("fails immediately when prompt submission fails", async () => {
     const activeRun = await makeActiveRunState();
 
     await expect(
-      Effect.runPromise(
-        coordinateActiveRunPrompts({
-          channelId: "c-1",
-          session: makeSessionHandle({ sessionId: "ses-1", workdir: "/tmp/workdir" }),
-          activeRun,
-          initialRequests: [makeRequest("m-1", "initial")],
-          awaitIdleCompaction: () => Effect.void,
-          submitPrompt: () => failTest("submit failed"),
-          handlePromptCompleted: () => Effect.void,
-          logger: makeSilentLogger(),
-        }),
-      ),
+      runCoordinator({
+        activeRun,
+        initialRequests: [makeRequest("m-1", "initial")],
+        awaitIdleCompaction: () => Effect.void,
+        submitPrompt: () => failTest("submit failed"),
+        handlePromptCompleted: () => Effect.void,
+      }),
     ).rejects.toThrow("submit failed");
 
     expect(await Effect.runPromise(Ref.get(activeRun.promptState))).toBeNull();
