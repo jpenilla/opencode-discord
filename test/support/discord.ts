@@ -37,7 +37,8 @@ export const makeSendableChannel = (input: {
     isSendable: () => true,
     send:
       input.send ??
-      (() => Promise.reject(new Error("makeSendableChannel requires a send handler for this test"))),
+      (() =>
+        Promise.reject(new Error("makeSendableChannel requires a send handler for this test"))),
     sendTyping: input.sendTyping ?? (() => Promise.resolve()),
   });
 
