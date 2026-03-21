@@ -52,6 +52,7 @@ const logger = makeSilentLogger();
 
 const runEffect = runTestEffect;
 const makeRef = <A>(value: A) => runEffect(Ref.make(value));
+const makeDeferred = <A = void, E = never>() => runEffect(Deferred.make<A, E>());
 const updateMapRef = <K, V>(ref: Ref.Ref<Map<K, V>>, update: (current: Map<K, V>) => void) =>
   Ref.update(ref, (current) => {
     const next = new Map(current);
@@ -61,6 +62,18 @@ const updateMapRef = <K, V>(ref: Ref.Ref<Map<K, V>>, update: (current: Map<K, V>
 const appendClosed = (closed: Ref.Ref<string[]>, sessionId: string) => {
   Effect.runSync(appendRef(closed, sessionId));
 };
+const readRef = <A>(ref: Ref.Ref<A>) => runEffect(Ref.get(ref));
+const runConcurrent = <A, E1, R1, B, E2, R2>(
+  first: Effect.Effect<A, E1, R1>,
+  second: Effect.Effect<B, E2, R2>,
+) =>
+  runEffect(
+    Effect.gen(function* () {
+      const fiber1 = yield* Effect.forkChild(first);
+      const fiber2 = yield* Effect.forkChild(second);
+      return yield* Effect.all([Fiber.join(fiber1), Fiber.join(fiber2)]);
+    }),
+  );
 
 const makeHarness = async (options?: {
   createOpencodeSession?: (input: {
@@ -173,10 +186,10 @@ const makeHarness = async (options?: {
 
 describe("createSessionRegistry", () => {
   test("single-flights concurrent cold starts for the same channel", async () => {
-    const createStarted = await runEffect(Deferred.make<void>());
-    const releaseCreate = await runEffect(Deferred.make<void>());
-    const created = await runEffect(Ref.make(0));
-    const closed = await runEffect(Ref.make<string[]>([]));
+    const createStarted = await makeDeferred();
+    const releaseCreate = await makeDeferred();
+    const created = await makeRef(0);
+    const closed = await makeRef<string[]>([]);
 
     const { lifecycle } = await makeHarness({
       createOpencodeSession: ({ workdir }) =>
@@ -194,25 +207,23 @@ describe("createSessionRegistry", () => {
     });
     const message = makeRegistryMessage("channel-1");
 
-    const [first, second] = await runEffect(
-      Effect.gen(function* () {
-        const fiber1 = yield* Effect.forkChild(lifecycle.createOrGetSession(message));
-        yield* Deferred.await(createStarted);
-        const fiber2 = yield* Effect.forkChild(lifecycle.createOrGetSession(message));
-        yield* Deferred.succeed(releaseCreate, undefined).pipe(Effect.ignore);
-        return yield* Effect.all([Fiber.join(fiber1), Fiber.join(fiber2)]);
-      }),
+    const [first, second] = await runConcurrent(
+      lifecycle.createOrGetSession(message),
+      Deferred.await(createStarted).pipe(
+        Effect.andThen(Deferred.succeed(releaseCreate, undefined).pipe(Effect.ignore)),
+        Effect.andThen(lifecycle.createOrGetSession(message)),
+      ),
     );
 
     expect(first).toBe(second);
     expect(first.opencode.sessionId).toBe("session-1");
-    expect(await runEffect(Ref.get(created))).toBe(1);
+    expect(await readRef(created)).toBe(1);
   });
 
   test("clears the gate after a failed cold start so a waiting retry can succeed", async () => {
-    const createStarted = await runEffect(Deferred.make<void>());
-    const releaseCreate = await runEffect(Deferred.make<void>());
-    const createCount = await runEffect(Ref.make(0));
+    const createStarted = await makeDeferred();
+    const releaseCreate = await makeDeferred();
+    const createCount = await makeRef(0);
     const { lifecycle, started, removedRoots } = await makeHarness({
       createOpencodeSession: ({ workdir }) =>
         Effect.gen(function* () {
@@ -230,28 +241,22 @@ describe("createSessionRegistry", () => {
     });
     const message = makeRegistryMessage("channel-retry");
 
-    const exits = await runEffect(
-      Effect.gen(function* () {
-        const fiber1 = yield* Effect.forkChild(Effect.exit(lifecycle.createOrGetSession(message)), {
-          startImmediately: true,
-        });
-        yield* Deferred.await(createStarted);
-        const fiber2 = yield* Effect.forkChild(Effect.exit(lifecycle.createOrGetSession(message)), {
-          startImmediately: true,
-        });
-        yield* Deferred.succeed(releaseCreate, undefined).pipe(Effect.ignore);
-        return yield* Effect.all([Fiber.join(fiber1), Fiber.join(fiber2)]);
-      }),
+    const exits = await runConcurrent(
+      Effect.exit(lifecycle.createOrGetSession(message)),
+      Deferred.await(createStarted).pipe(
+        Effect.andThen(Deferred.succeed(releaseCreate, undefined).pipe(Effect.ignore)),
+        Effect.andThen(Effect.exit(lifecycle.createOrGetSession(message))),
+      ),
     );
 
     expect(exits.map((exit) => exit._tag)).toEqual(["Failure", "Success"]);
-    expect(await runEffect(Ref.get(removedRoots))).toEqual(["/tmp/session-root-1"]);
+    expect(await readRef(removedRoots)).toEqual(["/tmp/session-root-1"]);
     const succeeded = exits.find((exit) => exit._tag === "Success");
     expect(succeeded?._tag).toBe("Success");
     expect(
       succeeded && succeeded._tag === "Success" ? succeeded.value.opencode.sessionId : null,
     ).toBe("session-2");
-    expect(await runEffect(Ref.get(started))).toEqual(["session-2"]);
+    expect(await readRef(started)).toEqual(["session-2"]);
   });
 
   test("cleans the new session root when setup fails before activation", async () => {
@@ -263,12 +268,12 @@ describe("createSessionRegistry", () => {
       runEffect(lifecycle.createOrGetSession(makeRegistryMessage("channel-fail"))),
     ).rejects.toThrow("settings unavailable");
 
-    expect(await runEffect(Ref.get(removedRoots))).toEqual(["/tmp/session-root-1"]);
-    expect(await runEffect(Ref.get(started))).toEqual([]);
+    expect(await readRef(removedRoots)).toEqual(["/tmp/session-root-1"]);
+    expect(await readRef(started)).toEqual([]);
   });
 
   test("bypasses health checks for busy sessions by default", async () => {
-    const healthChecks = await runEffect(Ref.make<string[]>([]));
+    const healthChecks = await makeRef<string[]>([]);
     const { lifecycle } = await makeHarness({
       isSessionHealthy: (session) =>
         appendRef(healthChecks, session.sessionId).pipe(Effect.as(true)),
@@ -280,14 +285,14 @@ describe("createSessionRegistry", () => {
     const result = await runEffect(lifecycle.ensureSessionHealth(session, message, "busy"));
 
     expect(result).toBe(session);
-    expect(await runEffect(Ref.get(healthChecks))).toEqual([]);
+    expect(await readRef(healthChecks)).toEqual([]);
   });
 
   test("single-flights recovery and rekeys session indexes", async () => {
-    const recreateStarted = await runEffect(Deferred.make<void>());
-    const releaseRecreate = await runEffect(Deferred.make<void>());
-    const createCount = await runEffect(Ref.make(0));
-    const closed = await runEffect(Ref.make<string[]>([]));
+    const recreateStarted = await makeDeferred();
+    const releaseRecreate = await makeDeferred();
+    const createCount = await makeRef(0);
+    const closed = await makeRef<string[]>([]);
 
     const { lifecycle } = await makeHarness({
       createOpencodeSession: ({ workdir }) =>
@@ -312,24 +317,18 @@ describe("createSessionRegistry", () => {
     const previousSessionId = session.opencode.sessionId;
     await runEffect(lifecycle.setActiveRun(session, makeActiveRun()));
 
-    const [first, second] = await runEffect(
-      Effect.gen(function* () {
-        const fiber1 = yield* Effect.forkChild(
-          lifecycle.ensureSessionHealth(session, message, "recover", false),
-        );
-        yield* Deferred.await(recreateStarted);
-        const fiber2 = yield* Effect.forkChild(
-          lifecycle.ensureSessionHealth(session, message, "recover", false),
-        );
-        yield* Deferred.succeed(releaseRecreate, undefined).pipe(Effect.ignore);
-        return yield* Effect.all([Fiber.join(fiber1), Fiber.join(fiber2)]);
-      }),
+    const [first, second] = await runConcurrent(
+      lifecycle.ensureSessionHealth(session, message, "recover", false),
+      Deferred.await(recreateStarted).pipe(
+        Effect.andThen(Deferred.succeed(releaseRecreate, undefined).pipe(Effect.ignore)),
+        Effect.andThen(lifecycle.ensureSessionHealth(session, message, "recover", false)),
+      ),
     );
 
     expect(first).toBe(session);
     expect(second).toBe(session);
     expect(session.opencode.sessionId).toBe("session-2");
-    expect(await runEffect(Ref.get(createCount))).toBe(2);
+    expect(await readRef(createCount)).toBe(2);
     expect(await runEffect(lifecycle.getSession(message.channelId))).toBe(session);
     expect(await runEffect(lifecycle.getSessionContext(previousSessionId))).toBeNull();
     expect(await runEffect(lifecycle.getSessionContext(session.opencode.sessionId))).toEqual({
@@ -337,7 +336,7 @@ describe("createSessionRegistry", () => {
       activeRun: null,
     });
     expect(await runEffect(lifecycle.getActiveRunBySessionId(previousSessionId))).toBeNull();
-    expect(await runEffect(Ref.get(closed))).toEqual(["session-1"]);
+    expect(await readRef(closed)).toEqual(["session-1"]);
   });
 
   test("shuts down sessions, closes handles, and keeps persistent session roots", async () => {
@@ -347,8 +346,8 @@ describe("createSessionRegistry", () => {
     await runEffect(lifecycle.createOrGetSession(makeRegistryMessage("channel-2")));
     await runEffect(lifecycle.shutdownSessions());
 
-    expect(await runEffect(Ref.get(closed))).toEqual(["session-1", "session-2"]);
-    expect(await runEffect(Ref.get(removedRoots))).toEqual([]);
+    expect(await readRef(closed)).toEqual(["session-1", "session-2"]);
+    expect(await readRef(removedRoots)).toEqual([]);
   });
 
   test("invalidates the loaded session without deleting the session root", async () => {
@@ -360,15 +359,15 @@ describe("createSessionRegistry", () => {
       await runEffect(lifecycle.invalidateSession("channel-1", "user requested /new-session")),
     ).toBe(true);
 
-    expect(await runEffect(Ref.get(closed))).toEqual([session.opencode.sessionId]);
+    expect(await readRef(closed)).toEqual([session.opencode.sessionId]);
     expect(await runEffect(lifecycle.getSession("channel-1"))).toBeUndefined();
-    expect(await runEffect(Ref.get(persisted))).toEqual(new Map());
-    expect(await runEffect(Ref.get(removedRoots))).toEqual([]);
+    expect(await readRef(persisted)).toEqual(new Map());
+    expect(await readRef(removedRoots)).toEqual([]);
   });
 
   test("invalidates a session that was still being created", async () => {
-    const createStarted = await runEffect(Deferred.make<void>());
-    const releaseCreate = await runEffect(Deferred.make<void>());
+    const createStarted = await makeDeferred();
+    const releaseCreate = await makeDeferred();
     const { lifecycle, closed, persisted } = await makeHarness({
       createOpencodeSession: ({ workdir }) =>
         Effect.gen(function* () {
@@ -381,23 +380,19 @@ describe("createSessionRegistry", () => {
     });
     const message = makeRegistryMessage("channel-race");
 
-    const [created, invalidated] = await runEffect(
-      Effect.gen(function* () {
-        const createFiber = yield* Effect.forkChild(lifecycle.createOrGetSession(message));
-        yield* Deferred.await(createStarted);
-        const invalidateFiber = yield* Effect.forkChild(
-          lifecycle.invalidateSession("channel-race", "user requested /new-session"),
-        );
-        yield* Deferred.succeed(releaseCreate, undefined).pipe(Effect.ignore);
-        return yield* Effect.all([Fiber.join(createFiber), Fiber.join(invalidateFiber)]);
-      }),
+    const [created, invalidated] = await runConcurrent(
+      lifecycle.createOrGetSession(message),
+      Deferred.await(createStarted).pipe(
+        Effect.andThen(Deferred.succeed(releaseCreate, undefined).pipe(Effect.ignore)),
+        Effect.andThen(lifecycle.invalidateSession("channel-race", "user requested /new-session")),
+      ),
     );
 
     expect(created.opencode.sessionId).toBe("session-race");
     expect(invalidated).toBe(true);
     expect(await runEffect(lifecycle.getSession("channel-race"))).toBeUndefined();
-    expect(await runEffect(Ref.get(persisted))).toEqual(new Map());
-    expect(await runEffect(Ref.get(closed))).toEqual(["session-race"]);
+    expect(await readRef(persisted)).toEqual(new Map());
+    expect(await readRef(closed)).toEqual(["session-race"]);
   });
 
   test("does not invalidate a loaded session while it is busy", async () => {
@@ -411,7 +406,7 @@ describe("createSessionRegistry", () => {
       await runEffect(lifecycle.invalidateSession("channel-1", "user requested /new-session")),
     ).toBe(false);
 
-    expect(await runEffect(Ref.get(closed))).toEqual([]);
+    expect(await readRef(closed)).toEqual([]);
     expect(await runEffect(lifecycle.getSession("channel-1"))).toBe(session);
     expect(await runEffect(Ref.get(persisted))).toEqual(
       new Map([
@@ -440,7 +435,7 @@ describe("createSessionRegistry", () => {
 
     await runEffect(lifecycle.closeExpiredSessions(30 * 60 * 1_000 + 1));
 
-    expect(await runEffect(Ref.get(closed))).toEqual([]);
+    expect(await readRef(closed)).toEqual([]);
     expect(await runEffect(lifecycle.getSession(session.channelId))).toBe(session);
   });
 });
