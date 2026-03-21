@@ -35,6 +35,13 @@ const discordUploadFailure = {
 } as const;
 const makeUploadMetadataHeader = (value: Record<string, unknown>) =>
   Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+const bridgeInternalFailure = (message: string) => ({
+  status: 500,
+  body: {
+    error: `Discord bridge failed while performing file upload: ${message}`,
+    kind: "bridge-internal",
+  },
+});
 
 const makeLogger = (errors: Array<Record<string, unknown>>): LoggerShape => ({
   info: () => Effect.void,
@@ -127,6 +134,18 @@ const makeUploadRequest = (input: {
   return request;
 };
 
+const makeDefaultUploadRequest = (
+  input: Omit<Parameters<typeof makeUploadRequest>[0], "bridgeToken" | "uploadMetadata"> & {
+    uploadMetadata?: Record<string, unknown>;
+  } = {},
+) =>
+  makeUploadRequest({
+    bridgeToken,
+    uploadMetadata: input.uploadMetadata ?? uploadMetadata,
+    chunks: input.chunks,
+    requestFactory: input.requestFactory,
+  });
+
 const makeSessions = (
   activeRun: ActiveRun | null,
 ): Pick<SessionRuntimeShape, "getActiveRunBySessionId"> => ({
@@ -191,15 +210,39 @@ const expectPromptResponse = <A, E>(effect: Effect.Effect<A, E>, onTimeout: stri
     }),
   );
 
+const expectBridgeRequestErrorLog = (
+  loggedErrors: Array<Record<string, unknown>>,
+  input: {
+    kind: string;
+    error: string;
+    cause?: string;
+  },
+) => {
+  expect(loggedErrors).toHaveLength(1);
+  expect(loggedErrors[0]).toMatchObject({
+    message: "tool bridge request failed",
+    context: {
+      pathname: uploadPath,
+      operation: "file upload",
+      kind: input.kind,
+      error: input.error,
+    },
+  });
+  if (input.cause) {
+    expect(loggedErrors[0]?.context).toEqual(
+      expect.objectContaining({
+        cause: expect.stringContaining(input.cause),
+      }),
+    );
+  }
+};
+
 describe("handleToolBridgeRequest", () => {
   for (const scenario of [
     {
       name: "returns unauthorized when the bridge token is invalid",
       input: {
-        request: makeUploadRequest({
-          bridgeToken: "wrong-token",
-          uploadMetadata,
-        }),
+        request: makeUploadRequest({ bridgeToken: "wrong-token", uploadMetadata }),
       },
       expected: { status: 401, body: { error: "unauthorized" } },
     },
@@ -216,9 +259,7 @@ describe("handleToolBridgeRequest", () => {
     {
       name: "returns direct request validation failures without bridge classification",
       input: {
-        request: makeUploadRequest({
-          bridgeToken,
-        }),
+        request: makeUploadRequest({ bridgeToken }),
       },
       expected: { status: 400, body: { error: "missing upload metadata" } },
     },
@@ -237,8 +278,7 @@ describe("handleToolBridgeRequest", () => {
   for (const scenario of [
     {
       name: "formats Discord API upload failures through the server error path",
-      request: makeUploadRequest({
-        bridgeToken,
+      request: makeDefaultUploadRequest({
         uploadMetadata: {
           ...uploadMetadata,
           displayPath: "./large.zip",
@@ -253,21 +293,10 @@ describe("handleToolBridgeRequest", () => {
     },
     {
       name: "classifies local upload failures as bridge-internal with the resolved route operation",
-      request: makeUploadRequest({
-        bridgeToken,
-        uploadMetadata,
-        chunks: [Buffer.from("payload")],
-      }),
+      request: makeDefaultUploadRequest({ chunks: [Buffer.from("payload")] }),
       send: async (_payload: MessageCreateOptions) =>
         Promise.reject(new Error("socket closed before response")),
-      expectedResponse: {
-        status: 500,
-        body: {
-          error:
-            "Discord bridge failed while performing file upload: socket closed before response",
-          kind: "bridge-internal",
-        },
-      },
+      expectedResponse: bridgeInternalFailure("socket closed before response"),
       expectedKind: "bridge-internal",
       expectedError:
         "Discord bridge failed while performing file upload: socket closed before response",
@@ -287,23 +316,11 @@ describe("handleToolBridgeRequest", () => {
 
       expect(sendCalls).toBe(1);
       expect(response).toEqual(scenario.expectedResponse);
-      expect(loggedErrors).toHaveLength(1);
-      expect(loggedErrors[0]).toMatchObject({
-        message: "tool bridge request failed",
-        context: {
-          pathname: "/tool/send-file",
-          operation: "file upload",
-          kind: scenario.expectedKind,
-          error: scenario.expectedError,
-        },
+      expectBridgeRequestErrorLog(loggedErrors, {
+        kind: scenario.expectedKind,
+        error: scenario.expectedError,
+        cause: scenario.expectedCause,
       });
-      if (scenario.expectedCause) {
-        expect(loggedErrors[0]?.context).toEqual(
-          expect.objectContaining({
-            cause: expect.stringContaining(scenario.expectedCause),
-          }),
-        );
-      }
     });
   }
 
@@ -344,9 +361,7 @@ describe("handleToolBridgeRequest", () => {
         const secondChunkRequested = yield* Deferred.make<void>();
         const fiber = yield* handleToolBridgeRequest(
           makeHandlerInput({
-            request: makeUploadRequest({
-              bridgeToken,
-              uploadMetadata,
+            request: makeDefaultUploadRequest({
               requestFactory: () => ({
                 next: async () => {
                   nextCalls += 1;
@@ -389,9 +404,7 @@ describe("handleToolBridgeRequest", () => {
     const response = await expectPromptResponse(
       handleToolBridgeRequest(
         makeHandlerInput({
-          request: makeUploadRequest({
-            bridgeToken,
-            uploadMetadata,
+          request: makeDefaultUploadRequest({
             requestFactory: () => ({
               next: async () => {
                 nextCalls += 1;
@@ -426,24 +439,14 @@ describe("handleToolBridgeRequest", () => {
     );
 
     expect(nextCalls).toBe(2);
-    expect(response).toEqual({
-      status: 500,
-      body: {
-        error: "Discord bridge failed while performing file upload: request stream failed",
-        kind: "bridge-internal",
-      },
-    });
+    expect(response).toEqual(bridgeInternalFailure("request stream failed"));
   });
 
   test("returns a bridge failure when Discord closes a backpressured attachment stream", async () => {
     const response = await expectPromptResponse(
       handleToolBridgeRequest(
         makeHandlerInput({
-          request: makeUploadRequest({
-            bridgeToken,
-            uploadMetadata,
-            chunks: [Buffer.alloc(1024 * 1024, 1)],
-          }),
+          request: makeDefaultUploadRequest({ chunks: [Buffer.alloc(1024 * 1024, 1)] }),
           activeRun: makeActiveRun(async (payload: MessageCreateOptions) => {
             const attachment = (
               payload.files?.[0] as
@@ -484,14 +487,9 @@ describe("handleToolBridgeRequest", () => {
       "destroyed backpressured attachment stream did not return promptly",
     );
 
-    expect(response).toEqual({
-      status: 500,
-      body: {
-        error:
-          "Discord bridge failed while performing file upload: writable closed before the pending write completed",
-        kind: "bridge-internal",
-      },
-    });
+    expect(response).toEqual(
+      bridgeInternalFailure("writable closed before the pending write completed"),
+    );
   });
 });
 
