@@ -33,6 +33,8 @@ const discordUploadFailure = {
     kind: "discord-api",
   },
 } as const;
+const makeUploadMetadataHeader = (value: Record<string, unknown>) =>
+  Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
 
 const makeLogger = (errors: Array<Record<string, unknown>>): LoggerShape => ({
   info: () => Effect.void,
@@ -86,10 +88,7 @@ const makeUploadRequest = (input: {
       "x-opencode-discord-token": input.bridgeToken,
       ...(input.uploadMetadata
         ? {
-            [uploadMetadataHeader]: Buffer.from(
-              JSON.stringify(input.uploadMetadata),
-              "utf8",
-            ).toString("base64url"),
+            [uploadMetadataHeader]: makeUploadMetadataHeader(input.uploadMetadata),
           }
         : {}),
     },
@@ -145,6 +144,28 @@ const makeActiveRun = (send: (payload: MessageCreateOptions) => Promise<unknown>
     },
   });
 
+const makeHandlerInput = (input: {
+  request?: IncomingMessage;
+  pathname?: string;
+  activeRun?: ActiveRun | null;
+  loggedErrors?: Array<Record<string, unknown>>;
+  configBridgeToken?: string;
+}) => {
+  const configBridgeToken = input.configBridgeToken ?? bridgeToken;
+  return {
+    request:
+      input.request ??
+      makeUploadRequest({
+        bridgeToken: configBridgeToken,
+        uploadMetadata,
+      }),
+    pathname: input.pathname ?? uploadPath,
+    config: makeConfig(configBridgeToken),
+    sessions: makeSessions(input.activeRun ?? null),
+    logger: makeLogger(input.loggedErrors ?? []),
+  } as const;
+};
+
 const runBridgeRequest = (
   input: {
     request?: IncomingMessage;
@@ -154,21 +175,7 @@ const runBridgeRequest = (
     configBridgeToken?: string;
   } = {},
 ) => {
-  const configBridgeToken = input.configBridgeToken ?? bridgeToken;
-  return Effect.runPromise(
-    handleToolBridgeRequest({
-      request:
-        input.request ??
-        makeUploadRequest({
-          bridgeToken: configBridgeToken,
-          uploadMetadata,
-        }),
-      pathname: input.pathname ?? uploadPath,
-      config: makeConfig(configBridgeToken),
-      sessions: makeSessions(input.activeRun ?? null),
-      logger: makeLogger(input.loggedErrors ?? []),
-    }),
-  );
+  return Effect.runPromise(handleToolBridgeRequest(makeHandlerInput(input)));
 };
 
 const expectPromptResponse = <A, E>(effect: Effect.Effect<A, E>, onTimeout: string) =>
@@ -306,20 +313,17 @@ describe("handleToolBridgeRequest", () => {
     request.headers = {
       "content-type": "application/octet-stream",
       "x-opencode-discord-token": bridgeToken,
-      [uploadMetadataHeader]: Buffer.from(JSON.stringify(uploadMetadata), "utf8").toString(
-        "base64url",
-      ),
+      [uploadMetadataHeader]: makeUploadMetadataHeader(uploadMetadata),
     };
 
     const response = await expectPromptResponse(
       Effect.gen(function* () {
-        const fiber = yield* handleToolBridgeRequest({
-          request,
-          pathname: uploadPath,
-          config: makeConfig(bridgeToken),
-          sessions: makeSessions(makeActiveRun(() => Promise.reject(makeDiscordApiError()))),
-          logger: makeLogger([]),
-        }).pipe(Effect.forkChild);
+        const fiber = yield* handleToolBridgeRequest(
+          makeHandlerInput({
+            request,
+            activeRun: makeActiveRun(() => Promise.reject(makeDiscordApiError())),
+          }),
+        ).pipe(Effect.forkChild);
 
         request.push(Buffer.from("chunk-1"));
         return yield* Fiber.join(fiber);
@@ -338,35 +342,34 @@ describe("handleToolBridgeRequest", () => {
     const response = await expectPromptResponse(
       Effect.gen(function* () {
         const secondChunkRequested = yield* Deferred.make<void>();
-        const fiber = yield* handleToolBridgeRequest({
-          request: makeUploadRequest({
-            bridgeToken,
-            uploadMetadata,
-            requestFactory: () => ({
-              next: async () => {
-                nextCalls += 1;
-                if (nextCalls === 1) {
+        const fiber = yield* handleToolBridgeRequest(
+          makeHandlerInput({
+            request: makeUploadRequest({
+              bridgeToken,
+              uploadMetadata,
+              requestFactory: () => ({
+                next: async () => {
+                  nextCalls += 1;
+                  if (nextCalls === 1) {
+                    return {
+                      done: false,
+                      value: Buffer.from("chunk-1"),
+                    };
+                  }
+
+                  await Effect.runPromise(
+                    Deferred.succeed(secondChunkRequested, undefined).pipe(Effect.ignore),
+                  );
                   return {
                     done: false,
-                    value: Buffer.from("chunk-1"),
+                    value: Buffer.from("chunk-2"),
                   };
-                }
-
-                await Effect.runPromise(
-                  Deferred.succeed(secondChunkRequested, undefined).pipe(Effect.ignore),
-                );
-                return {
-                  done: false,
-                  value: Buffer.from("chunk-2"),
-                };
-              },
+                },
+              }),
             }),
+            activeRun: makeActiveRun(() => Promise.reject(discordApiError)),
           }),
-          pathname: uploadPath,
-          config: makeConfig(bridgeToken),
-          sessions: makeSessions(makeActiveRun(() => Promise.reject(discordApiError))),
-          logger: makeLogger([]),
-        }).pipe(Effect.forkChild);
+        ).pipe(Effect.forkChild);
 
         const result = yield* Fiber.join(fiber);
 
@@ -384,28 +387,26 @@ describe("handleToolBridgeRequest", () => {
     let nextCalls = 0;
 
     const response = await expectPromptResponse(
-      handleToolBridgeRequest({
-        request: makeUploadRequest({
-          bridgeToken,
-          uploadMetadata,
-          requestFactory: () => ({
-            next: async () => {
-              nextCalls += 1;
-              if (nextCalls === 1) {
-                return {
-                  done: false,
-                  value: Buffer.from("chunk-1"),
-                };
-              }
+      handleToolBridgeRequest(
+        makeHandlerInput({
+          request: makeUploadRequest({
+            bridgeToken,
+            uploadMetadata,
+            requestFactory: () => ({
+              next: async () => {
+                nextCalls += 1;
+                if (nextCalls === 1) {
+                  return {
+                    done: false,
+                    value: Buffer.from("chunk-1"),
+                  };
+                }
 
-              throw new Error("request stream failed");
-            },
+                throw new Error("request stream failed");
+              },
+            }),
           }),
-        }),
-        pathname: uploadPath,
-        config: makeConfig(bridgeToken),
-        sessions: makeSessions(
-          makeActiveRun(async (payload: MessageCreateOptions) => {
+          activeRun: makeActiveRun(async (payload: MessageCreateOptions) => {
             const attachment = (
               payload.files?.[0] as { attachment?: NodeJS.ReadableStream } | undefined
             )?.attachment;
@@ -419,9 +420,8 @@ describe("handleToolBridgeRequest", () => {
               attachment.resume?.();
             });
           }),
-        ),
-        logger: makeLogger([]),
-      }),
+        }),
+      ),
       "request stream failure did not return promptly",
     );
 
@@ -437,16 +437,14 @@ describe("handleToolBridgeRequest", () => {
 
   test("returns a bridge failure when Discord closes a backpressured attachment stream", async () => {
     const response = await expectPromptResponse(
-      handleToolBridgeRequest({
-        request: makeUploadRequest({
-          bridgeToken,
-          uploadMetadata,
-          chunks: [Buffer.alloc(1024 * 1024, 1)],
-        }),
-        pathname: uploadPath,
-        config: makeConfig(bridgeToken),
-        sessions: makeSessions(
-          makeActiveRun(async (payload: MessageCreateOptions) => {
+      handleToolBridgeRequest(
+        makeHandlerInput({
+          request: makeUploadRequest({
+            bridgeToken,
+            uploadMetadata,
+            chunks: [Buffer.alloc(1024 * 1024, 1)],
+          }),
+          activeRun: makeActiveRun(async (payload: MessageCreateOptions) => {
             const attachment = (
               payload.files?.[0] as
                 | {
@@ -481,9 +479,8 @@ describe("handleToolBridgeRequest", () => {
               poll();
             });
           }),
-        ),
-        logger: makeLogger([]),
-      }),
+        }),
+      ),
       "destroyed backpressured attachment stream did not return promptly",
     );
 
@@ -506,17 +503,15 @@ describe("runToolBridgeHttpRequest", () => {
         throw new Error("socket already closed");
       },
     });
+    const requestInput = makeHandlerInput({});
 
     const result = await Effect.runPromise(
       runToolBridgeHttpRequest({
-        request: makeUploadRequest({
-          bridgeToken,
-          uploadMetadata,
-        }),
+        request: requestInput.request,
         response,
-        pathname: uploadPath,
-        config: makeConfig(bridgeToken),
-        sessions: makeSessions(null),
+        pathname: requestInput.pathname,
+        config: requestInput.config,
+        sessions: requestInput.sessions,
         logger: makeLogger(loggedErrors),
       }),
     );
