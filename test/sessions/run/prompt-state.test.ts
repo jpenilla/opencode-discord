@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2";
-import { Deferred, Effect, Option, Ref } from "effect";
+import { Deferred, Option } from "effect";
 
 import {
   beginPendingPrompt,
@@ -9,7 +9,11 @@ import {
   handleSessionStatusUpdated,
   handleUserMessageUpdated,
 } from "@/sessions/run/prompt-state.ts";
+import { readRef, runTestEffect } from "../../support/runtime.ts";
 import { unsafeStub } from "../../support/stub.ts";
+
+const run = runTestEffect;
+const poll = <A, E>(deferred: Deferred.Deferred<A, E>) => run(Deferred.poll(deferred));
 
 const makeAssistantMessage = (input: {
   id: string;
@@ -71,11 +75,11 @@ const makeUserMessage = (id: string): UserMessage =>
 
 describe("prompt-state", () => {
   test("ignores auto-compaction summaries parented to the original user message", async () => {
-    const state = await Effect.runPromise(createPromptState());
-    const completion = await Effect.runPromise(beginPendingPrompt(state));
-    await Effect.runPromise(handleUserMessageUpdated(state, makeUserMessage("user-1")));
+    const state = await run(createPromptState());
+    const completion = await run(beginPendingPrompt(state));
+    await run(handleUserMessageUpdated(state, makeUserMessage("user-1")));
 
-    const summaryActions = await Effect.runPromise(
+    const summaryActions = await run(
       handleAssistantMessageUpdated(
         state,
         makeAssistantMessage({
@@ -89,11 +93,11 @@ describe("prompt-state", () => {
     );
 
     expect(summaryActions).toEqual([]);
-    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
-    expect(await Effect.runPromise(Ref.get(state))).not.toBeNull();
+    expect(Option.isNone(await poll(completion))).toBe(true);
+    expect(await readRef(state)).not.toBeNull();
 
-    await Effect.runPromise(handleUserMessageUpdated(state, makeUserMessage("user-2")));
-    const finalActions = await Effect.runPromise(
+    await run(handleUserMessageUpdated(state, makeUserMessage("user-2")));
+    const finalActions = await run(
       handleAssistantMessageUpdated(
         state,
         makeAssistantMessage({
@@ -105,11 +109,9 @@ describe("prompt-state", () => {
     );
 
     expect(finalActions).toEqual([]);
-    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+    expect(Option.isNone(await poll(completion))).toBe(true);
 
-    const idleActions = await Effect.runPromise(
-      handleSessionStatusUpdated(state, { type: "idle" }),
-    );
+    const idleActions = await run(handleSessionStatusUpdated(state, { type: "idle" }));
 
     expect(idleActions).toHaveLength(1);
     const action = idleActions[0];
@@ -121,13 +123,13 @@ describe("prompt-state", () => {
   });
 
   test("waits for session.status idle before completing a prompt", async () => {
-    const state = await Effect.runPromise(createPromptState());
-    const completion = await Effect.runPromise(beginPendingPrompt(state));
+    const state = await run(createPromptState());
+    const completion = await run(beginPendingPrompt(state));
 
-    await Effect.runPromise(handleUserMessageUpdated(state, makeUserMessage("user-1")));
+    await run(handleUserMessageUpdated(state, makeUserMessage("user-1")));
 
     expect(
-      await Effect.runPromise(
+      await run(
         handleAssistantMessageUpdated(
           state,
           makeAssistantMessage({
@@ -139,16 +141,12 @@ describe("prompt-state", () => {
         ),
       ),
     ).toEqual([]);
-    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+    expect(Option.isNone(await poll(completion))).toBe(true);
 
-    expect(await Effect.runPromise(handleSessionStatusUpdated(state, { type: "busy" }))).toEqual(
-      [],
-    );
-    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+    expect(await run(handleSessionStatusUpdated(state, { type: "busy" }))).toEqual([]);
+    expect(Option.isNone(await poll(completion))).toBe(true);
 
-    const idleActions = await Effect.runPromise(
-      handleSessionStatusUpdated(state, { type: "idle" }),
-    );
+    const idleActions = await run(handleSessionStatusUpdated(state, { type: "idle" }));
 
     expect(idleActions).toHaveLength(1);
     const action = idleActions[0];
@@ -157,17 +155,17 @@ describe("prompt-state", () => {
       throw new Error("expected a completion action");
     }
     expect(action.messageId).toBe("assistant-1");
-    expect(await Effect.runPromise(Ref.get(state))).toBeNull();
+    expect(await readRef(state)).toBeNull();
   });
 
   test("waits for the follow-up assistant after a tool-calls turn", async () => {
-    const state = await Effect.runPromise(createPromptState());
-    const completion = await Effect.runPromise(beginPendingPrompt(state));
+    const state = await run(createPromptState());
+    const completion = await run(beginPendingPrompt(state));
 
-    await Effect.runPromise(handleUserMessageUpdated(state, makeUserMessage("user-1")));
+    await run(handleUserMessageUpdated(state, makeUserMessage("user-1")));
 
     expect(
-      await Effect.runPromise(
+      await run(
         handleAssistantMessageUpdated(
           state,
           makeAssistantMessage({
@@ -179,9 +177,9 @@ describe("prompt-state", () => {
         ),
       ),
     ).toEqual([]);
-    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+    expect(Option.isNone(await poll(completion))).toBe(true);
 
-    const actions = await Effect.runPromise(
+    const actions = await run(
       handleAssistantMessageUpdated(
         state,
         makeAssistantMessage({
@@ -194,11 +192,9 @@ describe("prompt-state", () => {
     );
 
     expect(actions).toEqual([]);
-    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
+    expect(Option.isNone(await poll(completion))).toBe(true);
 
-    const idleActions = await Effect.runPromise(
-      handleSessionStatusUpdated(state, { type: "idle" }),
-    );
+    const idleActions = await run(handleSessionStatusUpdated(state, { type: "idle" }));
 
     expect(idleActions).toHaveLength(1);
     const action = idleActions[0];
@@ -207,14 +203,14 @@ describe("prompt-state", () => {
       throw new Error("expected a completion action");
     }
     expect(action.messageId).toBe("assistant-2");
-    expect(await Effect.runPromise(Ref.get(state))).toBeNull();
+    expect(await readRef(state)).toBeNull();
   });
 
   test("waits to bind the server-created user message before session.status idle completes the prompt", async () => {
-    const state = await Effect.runPromise(createPromptState());
-    const completion = await Effect.runPromise(beginPendingPrompt(state));
+    const state = await run(createPromptState());
+    const completion = await run(beginPendingPrompt(state));
 
-    await Effect.runPromise(
+    await run(
       handleAssistantMessageUpdated(
         state,
         makeAssistantMessage({
@@ -225,14 +221,10 @@ describe("prompt-state", () => {
       ),
     );
 
-    expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
-    expect(await Effect.runPromise(handleSessionStatusUpdated(state, { type: "idle" }))).toEqual(
-      [],
-    );
+    expect(Option.isNone(await poll(completion))).toBe(true);
+    expect(await run(handleSessionStatusUpdated(state, { type: "idle" }))).toEqual([]);
 
-    const actions = await Effect.runPromise(
-      handleUserMessageUpdated(state, makeUserMessage("user-1")),
-    );
+    const actions = await run(handleUserMessageUpdated(state, makeUserMessage("user-1")));
 
     expect(actions).toHaveLength(1);
     const action = actions[0];

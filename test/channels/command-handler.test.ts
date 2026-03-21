@@ -467,6 +467,9 @@ const runInteraction = async (
   return harness;
 };
 
+const runCommand = (commandName: string, options?: HarnessOptions) =>
+  makeHarness(options).then((harness) => runInteraction(harness, commandName));
+
 const expectDeferredEdit = async (
   harness: Awaited<ReturnType<typeof makeHarness>>,
   expectedEdit: string,
@@ -481,7 +484,7 @@ const freshSessionMessage =
 
 describe("createCommandHandler", () => {
   test("rejects unhealthy compact requests after deferring", async () => {
-    const harness = await runInteraction(await makeHarness({ sessionHealthy: false }), "compact");
+    const harness = await runCommand("compact", { sessionHealthy: false });
     await expectDeferredEdit(
       harness,
       "This channel session is unavailable right now. Send a normal message to recreate it.",
@@ -490,7 +493,7 @@ describe("createCommandHandler", () => {
   });
 
   test("starts compaction, posts the idle card, and clears it after completion", async () => {
-    const harness = await runInteraction(await makeHarness(), "compact");
+    const harness = await runCommand("compact");
     await runEffect(Deferred.await(harness.compactStarted));
     expect(harness.readDefers()).toBe(1);
     expect(harness.upsertedInfoCards).toEqual([
@@ -524,7 +527,7 @@ describe("createCommandHandler", () => {
     },
   ]) {
     test(scenario.name, async () => {
-      const harness = await runInteraction(await makeHarness(scenario.options), "interrupt");
+      const harness = await runCommand("interrupt", scenario.options);
       expect(harness.activeRun.interruptRequested).toBe(scenario.expectActiveRunInterrupted);
       expect(harness.readTypingStopCount()).toBe(0);
       await expectDeferredEdit(harness, scenario.expectedEdit);
@@ -532,13 +535,10 @@ describe("createCommandHandler", () => {
   }
 
   test("reports a lost interrupt when questions become pending right after the interrupt request succeeds", async () => {
-    const harness = await runInteraction(
-      await makeHarness({
-        hasActiveRun: true,
-        hasPendingQuestionsSequence: [false, true],
-      }),
-      "interrupt",
-    );
+    const harness = await runCommand("interrupt", {
+      hasActiveRun: true,
+      hasPendingQuestionsSequence: [false, true],
+    });
     expect(harness.activeRun.interruptRequested).toBe(false);
     await expectDeferredEdit(harness, QUESTION_PENDING_INTERRUPT_MESSAGE);
   });
@@ -570,7 +570,7 @@ describe("createCommandHandler", () => {
   });
 
   test("clears the channel session for the next triggered message", async () => {
-    const harness = await runInteraction(await makeHarness({ hasSession: false }), "new-session");
+    const harness = await runCommand("new-session", { hasSession: false });
     expect(harness.invalidatedSessions).toEqual([
       {
         channelId: "channel-1",
@@ -587,13 +587,10 @@ describe("createCommandHandler", () => {
   });
 
   test("logs and still replies when the fresh session info card cannot be posted", async () => {
-    const harness = await runInteraction(
-      await makeHarness({
-        hasSession: false,
-        failInfoCardUpsert: true,
-      }),
-      "new-session",
-    );
+    const harness = await runCommand("new-session", {
+      hasSession: false,
+      failInfoCardUpsert: true,
+    });
     await expectDeferredEdit(harness, freshSessionMessage);
     expect(harness.warnings).toEqual(["failed to post fresh session info card"]);
   });
@@ -616,22 +613,16 @@ describe("createCommandHandler", () => {
   });
 
   test("rechecks busy state when /new-session loses the invalidate race", async () => {
-    const harness = await runInteraction(
-      await makeHarness({
-        invalidateResult: "busy",
-        hasPendingQuestionsSequence: [false, true],
-      }),
-      "new-session",
-    );
+    const harness = await runCommand("new-session", {
+      invalidateResult: "busy",
+      hasPendingQuestionsSequence: [false, true],
+    });
     await expectDeferredEdit(harness, QUESTION_PENDING_NEW_SESSION_MESSAGE);
     expect(harness.invalidatedSessions).toEqual([]);
   });
 
   test("toggles thinking visibility for a channel without requiring a session", async () => {
-    const harness = await runInteraction(
-      await makeHarness({ hasSession: false }),
-      "toggle-thinking",
-    );
+    const harness = await runCommand("toggle-thinking", { hasSession: false });
     expect(harness.replies).toEqual(["Thinking messages are now disabled in this channel."]);
     expect(harness.persistedSettings).toEqual(
       new Map([
@@ -648,7 +639,7 @@ describe("createCommandHandler", () => {
   });
 
   test("toggles compaction summary visibility and updates the loaded session", async () => {
-    const harness = await runInteraction(await makeHarness(), "toggle-compaction-summaries");
+    const harness = await runCommand("toggle-compaction-summaries");
     expect(harness.replies).toEqual(["Compaction summaries are now disabled in this channel."]);
     expect(harness.session.channelSettings).toEqual({
       showThinking: true,
