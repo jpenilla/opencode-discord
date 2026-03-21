@@ -38,6 +38,48 @@ const finalReply = (messageId: string): PromptResult => ({
 
 const readFinalReply = (_session: SessionHandle, messageId: string) =>
   Effect.succeed(finalReply(messageId));
+const assistantEvent = (
+  id = "assistant-1",
+  parentId = "user-1",
+  extra: Omit<Parameters<typeof makeAssistantMessageUpdatedEvent>[0], "id" | "parentId"> = {},
+) => makeAssistantMessageUpdatedEvent({ id, parentId, ...extra });
+const completedAssistant = (id = "assistant-1", parentId = "user-1") =>
+  assistantEvent(id, parentId, { completed: true });
+const userEvent = (id?: string) => makeUserMessageUpdatedEvent(id);
+const idleEvent = (sessionId = "session-1") => makeSessionStatusEvent(sessionId, "idle");
+const toolEvent = (status: "running" | "completed", messageId = "assistant-1", callId = "call-1") =>
+  status === "running" && messageId === "assistant-1" && callId === "call-1"
+    ? makeToolEvent(status)
+    : makeToolEvent(status, { messageId, callId });
+const handleEvents = (
+  runtime: ReturnType<typeof makeRuntime>,
+  ...events: Array<Parameters<ReturnType<typeof makeRuntime>["handleEvent"]>[0]>
+) =>
+  events.reduce(
+    (promise, event) => promise.then(() => Effect.runPromise(runtime.handleEvent(event))),
+    Promise.resolve(),
+  );
+const awaitCompletion = <A, E>(completion: Deferred.Deferred<A, E>) =>
+  Effect.runPromise(Deferred.await(completion));
+const expectFinalReply = async (
+  completion: Deferred.Deferred<PromptResult, unknown>,
+  messageId = "assistant-1",
+) => {
+  expect(await awaitCompletion(completion)).toEqual(finalReply(messageId));
+};
+const expectNoProgress = async (
+  progressQueue: { takeAll?: never } & Parameters<typeof clearQueue>[0],
+) => {
+  expect(await clearQueue(progressQueue)).toEqual([]);
+};
+const expectRunningToolProgress = async (progressQueue: Parameters<typeof takeAll>[0]) => {
+  expect(await takeAll(progressQueue)).toEqual([
+    {
+      type: "tool-updated",
+      part: makeToolPart("running"),
+    },
+  ]);
+};
 const expectPending = async <A, E>(completion: Deferred.Deferred<A, E>) => {
   expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
 };
@@ -61,6 +103,45 @@ const noopIdleCompactionWorkflow = {
 };
 
 const unexpectedPromptResultLoad = () => failTest("unexpected prompt result load");
+const makeSummaryHarness = async (
+  transcriptFor: (messageId: string) => string = () => "summary text",
+) => {
+  const readPromptCalls = await makeRef<string[]>([]);
+  const sentSummaries = await makeRef<string[]>([]);
+
+  return {
+    readPromptCalls,
+    sentSummaries,
+    readPromptResult: (_session: SessionHandle, messageId: string) =>
+      appendRef(readPromptCalls, messageId).pipe(
+        Effect.as({
+          messageId,
+          transcript: transcriptFor(messageId),
+        }),
+      ),
+    sendCompactionSummary: (_session: ChannelSession, text: string) =>
+      appendRef(sentSummaries, text).pipe(Effect.asVoid),
+  };
+};
+const beginPendingRuntime = async (input?: {
+  idleCompactionWorkflow?: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">;
+  readPromptResult?: (
+    session: SessionHandle,
+    messageId: string,
+  ) => Effect.Effect<PromptResult, unknown>;
+}) => {
+  const pending = await beginPendingRun();
+  return {
+    ...pending,
+    runtime: makeRuntime({
+      session: pending.session,
+      activeRun: pending.activeRun,
+      idleCompactionWorkflow: input?.idleCompactionWorkflow,
+      readPromptResult: input?.readPromptResult,
+    }),
+  };
+};
+const beginDefaultPendingRuntime = () => beginPendingRuntime({ readPromptResult: readFinalReply });
 
 const makeRuntime = (input: {
   session?: ChannelSession | null;
@@ -221,332 +302,177 @@ describe("createEventHandler", () => {
 
   test("emits a late compaction summary once even after the active run is gone", async () => {
     const { session } = await makeSession(false);
-    const readPromptCalls = await makeRef<string[]>([]);
-    const sentSummaries = await makeRef<string[]>([]);
-
-    const readPromptResult = (_session: SessionHandle, messageId: string) =>
-      appendRef(readPromptCalls, messageId).pipe(
-        Effect.as({
-          messageId,
-          transcript: "summary text",
-        }),
-      );
-    const sendCompactionSummary = (_session: ChannelSession, text: string) =>
-      appendRef(sentSummaries, text).pipe(Effect.asVoid);
+    const summary = await makeSummaryHarness();
 
     const runtime = makeRuntime({
       session,
-      idleCompactionWorkflow: makeSummaryWorkflow({ readPromptResult, sendCompactionSummary }),
-      readPromptResult,
+      idleCompactionWorkflow: makeSummaryWorkflow(summary),
+      readPromptResult: summary.readPromptResult,
     });
 
-    const summaryEvent = makeAssistantMessageUpdatedEvent({
-      id: "summary-1",
-      parentId: "synthetic-1",
+    const summaryEvent = assistantEvent("summary-1", "synthetic-1", {
       summary: true,
       mode: "compaction",
       completed: true,
     });
 
-    await Effect.runPromise(runtime.handleEvent(summaryEvent));
-    await Effect.runPromise(runtime.handleEvent(summaryEvent));
+    await handleEvents(runtime, summaryEvent, summaryEvent);
 
-    expect(await getRef(readPromptCalls)).toEqual(["summary-1"]);
-    expect(await getRef(sentSummaries)).toEqual(["summary text"]);
+    expect(await getRef(summary.readPromptCalls)).toEqual(["summary-1"]);
+    expect(await getRef(summary.sentSummaries)).toEqual(["summary text"]);
   });
 
   test("suppresses compaction summaries when the channel has them disabled", async () => {
     const { session } = await makeSession(false, false);
-    const readPromptCalls = await makeRef<string[]>([]);
-    const sentSummaries = await makeRef<string[]>([]);
-
-    const readPromptResult = (_session: SessionHandle, messageId: string) =>
-      appendRef(readPromptCalls, messageId).pipe(
-        Effect.as({
-          messageId,
-          transcript: "summary text",
-        }),
-      );
-    const sendCompactionSummary = (_session: ChannelSession, text: string) =>
-      appendRef(sentSummaries, text).pipe(Effect.asVoid);
+    const summary = await makeSummaryHarness();
 
     const runtime = makeRuntime({
       session,
-      idleCompactionWorkflow: makeSummaryWorkflow({ readPromptResult, sendCompactionSummary }),
-      readPromptResult,
+      idleCompactionWorkflow: makeSummaryWorkflow(summary),
+      readPromptResult: summary.readPromptResult,
     });
 
-    await Effect.runPromise(
-      runtime.handleEvent(
-        makeAssistantMessageUpdatedEvent({
-          id: "summary-1",
-          parentId: "synthetic-1",
-          summary: true,
-          mode: "compaction",
-          completed: true,
-        }),
-      ),
+    await handleEvents(
+      runtime,
+      assistantEvent("summary-1", "synthetic-1", {
+        summary: true,
+        mode: "compaction",
+        completed: true,
+      }),
     );
 
-    expect(await getRef(readPromptCalls)).toEqual([]);
-    expect(await getRef(sentSummaries)).toEqual([]);
+    expect(await getRef(summary.readPromptCalls)).toEqual([]);
+    expect(await getRef(summary.sentSummaries)).toEqual([]);
     expect(session.emittedCompactionSummaryMessageIds.has("summary-1")).toBe(true);
   });
 
   test("keeps waiting for the follow-up assistant after an auto-compaction summary on the original user message", async () => {
-    const { session, activeRun, progressQueue, completion } = await beginPendingRun();
-    const readPromptCalls = await makeRef<string[]>([]);
-    const sentSummaries = await makeRef<string[]>([]);
-
-    const readPromptResult = (_session: SessionHandle, messageId: string) =>
-      appendRef(readPromptCalls, messageId).pipe(
-        Effect.as(
-          messageId === "summary-1"
-            ? {
-                messageId,
-                transcript: "summary text",
-              }
-            : {
-                messageId,
-                transcript: "final reply",
-              },
-        ),
-      );
-    const sendCompactionSummary = (_session: ChannelSession, text: string) =>
-      appendRef(sentSummaries, text).pipe(Effect.asVoid);
-
-    const runtime = makeRuntime({
-      session,
-      activeRun,
-      idleCompactionWorkflow: makeSummaryWorkflow({ readPromptResult, sendCompactionSummary }),
-      readPromptResult,
-    });
-
-    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
-    await Effect.runPromise(
-      runtime.handleEvent(
-        makeAssistantMessageUpdatedEvent({
-          id: "summary-1",
-          parentId: "user-1",
-          summary: true,
-          mode: "compaction",
-          completed: true,
-        }),
-      ),
+    const summary = await makeSummaryHarness((messageId) =>
+      messageId === "summary-1" ? "summary text" : "final reply",
     );
 
-    expect(await getRef(readPromptCalls)).toEqual(["summary-1"]);
-    expect(await getRef(sentSummaries)).toEqual(["summary text"]);
-    expect(await clearQueue(progressQueue)).toEqual([]);
-    await expectPending(completion);
+    const { progressQueue, completion, runtime } = await beginPendingRuntime({
+      idleCompactionWorkflow: makeSummaryWorkflow(summary),
+      readPromptResult: summary.readPromptResult,
+    });
 
-    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent("user-2")));
-    await Effect.runPromise(
-      runtime.handleEvent(
-        makeAssistantMessageUpdatedEvent({
-          id: "assistant-1",
-          parentId: "user-2",
-          completed: true,
-        }),
-      ),
+    await handleEvents(
+      runtime,
+      userEvent(),
+      assistantEvent("summary-1", "user-1", {
+        summary: true,
+        mode: "compaction",
+        completed: true,
+      }),
     );
 
-    expect(await getRef(readPromptCalls)).toEqual(["summary-1"]);
+    expect(await getRef(summary.readPromptCalls)).toEqual(["summary-1"]);
+    expect(await getRef(summary.sentSummaries)).toEqual(["summary text"]);
+    await expectNoProgress(progressQueue);
     await expectPending(completion);
 
-    await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent("session-1", "idle")));
+    await handleEvents(
+      runtime,
+      userEvent("user-2"),
+      assistantEvent("assistant-1", "user-2", { completed: true }),
+    );
 
-    expect(await getRef(readPromptCalls)).toEqual(["summary-1", "assistant-1"]);
-    expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
-      messageId: "assistant-1",
-      transcript: "final reply",
-    });
+    expect(await getRef(summary.readPromptCalls)).toEqual(["summary-1"]);
+    await expectPending(completion);
+
+    await handleEvents(runtime, idleEvent());
+
+    expect(await getRef(summary.readPromptCalls)).toEqual(["summary-1", "assistant-1"]);
+    await expectFinalReply(completion);
   });
 
   test("completes once session.status becomes idle even when tool progress was already observed", async () => {
-    const { session, activeRun, progressQueue, completion } = await beginPendingRun();
+    const { progressQueue, completion, runtime } = await beginDefaultPendingRuntime();
 
-    const runtime = makeRuntime({
-      session,
-      activeRun,
-      readPromptResult: readFinalReply,
-    });
+    await handleEvents(runtime, userEvent(), toolEvent("running"), completedAssistant());
 
-    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
-    await Effect.runPromise(runtime.handleEvent(makeToolEvent("running")));
-    await Effect.runPromise(
-      runtime.handleEvent(
-        makeAssistantMessageUpdatedEvent({
-          id: "assistant-1",
-          parentId: "user-1",
-          completed: true,
-        }),
-      ),
-    );
-
-    expect(await takeAll(progressQueue)).toEqual([
-      {
-        type: "tool-updated",
-        part: makeToolPart("running"),
-      },
-    ]);
+    await expectRunningToolProgress(progressQueue);
     await expectPending(completion);
 
-    await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent("session-1", "idle")));
+    await handleEvents(runtime, idleEvent());
 
-    expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
-      messageId: "assistant-1",
-      transcript: "final reply",
-    });
+    await expectFinalReply(completion);
   });
 
   test("ignores completed tool updates that do not belong to the active run", async () => {
-    const { session, activeRun, progressQueue, completion } = await beginPendingRun();
+    const { activeRun, progressQueue, completion, runtime } = await beginDefaultPendingRuntime();
 
-    const runtime = makeRuntime({
-      session,
-      activeRun,
-      readPromptResult: readFinalReply,
-    });
-
-    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
-    await Effect.runPromise(
-      runtime.handleEvent(
-        makeAssistantMessageUpdatedEvent({
-          id: "assistant-current",
-          parentId: "user-1",
-        }),
-      ),
+    await handleEvents(
+      runtime,
+      userEvent(),
+      assistantEvent("assistant-current"),
+      toolEvent("completed", "assistant-old", "call-old"),
     );
 
-    await Effect.runPromise(
-      runtime.handleEvent(
-        makeToolEvent("completed", {
-          messageId: "assistant-old",
-          callId: "call-old",
-        }),
-      ),
-    );
-
-    expect(await clearQueue(progressQueue)).toEqual([]);
+    await expectNoProgress(progressQueue);
     expect(activeRun?.observedToolCallIds.size).toBe(0);
     await expectPending(completion);
   });
 
   test("ignores terminal tool updates for stale assistants seen before prompt binding", async () => {
-    const { session, activeRun, progressQueue, completion } = await beginPendingRun();
+    const { activeRun, progressQueue, completion, runtime } = await beginDefaultPendingRuntime();
 
-    const runtime = makeRuntime({
-      session,
-      activeRun,
-      readPromptResult: readFinalReply,
-    });
-
-    await Effect.runPromise(
-      runtime.handleEvent(
-        makeAssistantMessageUpdatedEvent({
-          id: "assistant-old",
-          parentId: "user-old",
-          completed: true,
-        }),
-      ),
-    );
-    await Effect.runPromise(
-      runtime.handleEvent(
-        makeToolEvent("completed", {
-          messageId: "assistant-old",
-          callId: "call-old",
-        }),
-      ),
+    await handleEvents(
+      runtime,
+      completedAssistant("assistant-old", "user-old"),
+      toolEvent("completed", "assistant-old", "call-old"),
     );
 
-    expect(await clearQueue(progressQueue)).toEqual([]);
+    await expectNoProgress(progressQueue);
     expect(activeRun?.observedToolCallIds.size).toBe(0);
     await expectPending(completion);
 
-    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
+    await handleEvents(runtime, userEvent());
 
-    expect(await clearQueue(progressQueue)).toEqual([]);
+    await expectNoProgress(progressQueue);
     await expectPending(completion);
   });
 
   test("emits in-flight tool updates before the assistant message is bound", async () => {
-    const { session, activeRun, progressQueue, completion } = await beginPendingRun();
+    const { activeRun, progressQueue, completion, runtime } = await beginDefaultPendingRuntime();
 
-    const runtime = makeRuntime({
-      session,
-      activeRun,
-      readPromptResult: readFinalReply,
-    });
+    await handleEvents(runtime, completedAssistant(), toolEvent("running"));
 
-    await Effect.runPromise(
-      runtime.handleEvent(
-        makeAssistantMessageUpdatedEvent({
-          id: "assistant-1",
-          parentId: "user-1",
-          completed: true,
-        }),
-      ),
-    );
-    await Effect.runPromise(
-      runtime.handleEvent(
-        makeToolEvent("running", {
-          messageId: "assistant-1",
-          callId: "call-1",
-        }),
-      ),
-    );
-
-    expect(await takeAll(progressQueue)).toEqual([
-      {
-        type: "tool-updated",
-        part: makeToolPart("running"),
-      },
-    ]);
+    await expectRunningToolProgress(progressQueue);
     expect(activeRun?.observedToolCallIds.has("call-1")).toBe(true);
     await expectPending(completion);
 
-    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
+    await handleEvents(runtime, userEvent());
 
-    expect(await clearQueue(progressQueue)).toEqual([]);
+    await expectNoProgress(progressQueue);
     await expectPending(completion);
 
-    await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent("session-1", "idle")));
+    await handleEvents(runtime, idleEvent());
 
-    expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
-      messageId: "assistant-1",
-      transcript: "final reply",
-    });
+    await expectFinalReply(completion);
   });
 
   test("fails the pending prompt when the correlated assistant aborts", async () => {
-    const { session, activeRun, completion } = await beginPendingRun();
     const readPromptCalls = await makeRef(0);
-
-    const runtime = makeRuntime({
-      session,
-      activeRun,
+    const { completion, runtime } = await beginPendingRuntime({
       readPromptResult: () =>
         Ref.update(readPromptCalls, (count) => count + 1).pipe(
           Effect.flatMap(() => failTest("unexpected prompt result load")),
         ),
     });
 
-    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
-    await Effect.runPromise(
-      runtime.handleEvent(
-        makeAssistantMessageUpdatedEvent({
-          id: "assistant-1",
-          parentId: "user-1",
-          completed: true,
-          error: {
-            name: "MessageAbortedError",
-            data: {
-              message: "aborted",
-            },
+    await handleEvents(
+      runtime,
+      userEvent(),
+      assistantEvent("assistant-1", "user-1", {
+        completed: true,
+        error: {
+          name: "MessageAbortedError",
+          data: {
+            message: "aborted",
           },
-        }),
-      ),
+        },
+      }),
     );
 
     const exit = await Effect.runPromise(Effect.exit(Deferred.await(completion)));
@@ -555,33 +481,16 @@ describe("createEventHandler", () => {
   });
 
   test("can bind the server-created user message after an assistant event arrives first", async () => {
-    const { session, activeRun, completion } = await beginPendingRun();
+    const { completion, runtime } = await beginDefaultPendingRuntime();
 
-    const runtime = makeRuntime({
-      session,
-      activeRun,
-      readPromptResult: readFinalReply,
-    });
-
-    await Effect.runPromise(
-      runtime.handleEvent(
-        makeAssistantMessageUpdatedEvent({
-          id: "assistant-1",
-          parentId: "user-1",
-          completed: true,
-        }),
-      ),
-    );
+    await handleEvents(runtime, completedAssistant());
     await expectPending(completion);
 
-    await Effect.runPromise(runtime.handleEvent(makeUserMessageUpdatedEvent()));
+    await handleEvents(runtime, userEvent());
 
     await expectPending(completion);
-    await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent("session-1", "idle")));
+    await handleEvents(runtime, idleEvent());
 
-    expect(await Effect.runPromise(Deferred.await(completion))).toEqual({
-      messageId: "assistant-1",
-      transcript: "final reply",
-    });
+    await expectFinalReply(completion);
   });
 });

@@ -800,8 +800,6 @@ export const SessionRuntimeLayer = Layer.unwrap(
     });
     questionRuntime = questions;
 
-    const hasPendingQuestions = (sessionId: string) => questions.hasPendingQuestions(sessionId);
-
     const reconcileQuestionTypingForSession = (sessionId: string) =>
       getSessionContext(sessionId).pipe(
         Effect.flatMap((context) => {
@@ -817,7 +815,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
             });
           }
 
-          return hasPendingQuestions(sessionId).pipe(
+          return questions.hasPendingQuestions(sessionId).pipe(
             Effect.flatMap((pending) =>
               Ref.modify(questionTypingPausedRef, (current) => {
                 const wasPaused = current.has(sessionId);
@@ -852,20 +850,12 @@ export const SessionRuntimeLayer = Layer.unwrap(
         Effect.andThen(reconcileQuestionTypingForSession(sessionId)),
       );
 
-    const handleRoutedQuestionSignals = (
-      effect: Effect.Effect<RoutedQuestionSignals | null, unknown>,
-    ) =>
+    const routeQuestionSignals = (effect: Effect.Effect<RoutedQuestionSignals | null, unknown>) =>
       effect.pipe(
         Effect.flatMap((routed) =>
           !routed ? Effect.void : applyQuestionWorkflowSignals(routed.sessionId, routed.signals),
         ),
       );
-
-    const handleQuestionEvent = (event: { sessionId: string } & QuestionWorkflowEvent) =>
-      handleRoutedQuestionSignals(questions.handleEvent(event));
-
-    const routeQuestionInteraction = (interaction: Interaction) =>
-      handleRoutedQuestionSignals(questions.routeInteraction(interaction));
 
     const serviceLayer = Layer.mergeAll(
       Layer.succeed(Logger, logger),
@@ -877,7 +867,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
 
     const eventHandler = createEventHandler({
       getSessionContext,
-      handleQuestionEvent,
+      handleQuestionEvent: (event) => routeQuestionSignals(questions.handleEvent(event)),
       idleCompactionWorkflow: idleCompaction,
       readPromptResult: opencode.readPromptResult,
       logger,
@@ -958,9 +948,6 @@ export const SessionRuntimeLayer = Layer.unwrap(
       formatError,
     });
 
-    const drainQueuedRunRequestsForShutdown = (session: ChannelSession) =>
-      Queue.clear(session.queue).pipe(Effect.asVoid);
-
     const worker = (
       session: ChannelSession,
     ): Effect.Effect<never, never, FileSystem.FileSystem | Path.Path> =>
@@ -982,23 +969,17 @@ export const SessionRuntimeLayer = Layer.unwrap(
         ),
       );
 
-    const getUsableSession = (message: Message, reason: string) =>
-      createOrGetSession(message).pipe(
-        Effect.flatMap((session) => ensureSessionHealth(session, message, reason)),
-      );
-
-    const startShutdown = (): Effect.Effect<boolean> =>
-      Ref.modify(shutdownStartedRef, (started): readonly [boolean, boolean] => [!started, true]);
-
     const shutdown = createSessionShutdown({
-      startShutdown,
+      startShutdown: () =>
+        Ref.modify(shutdownStartedRef, (started): readonly [boolean, boolean] => [!started, true]),
       getState: () => Ref.get(stateRef),
       questionRuntime: questions,
       idleCompactionWorkflow: idleCompaction,
       opencode,
       logger,
       infoCards,
-      drainQueuedRunRequestsForShutdown,
+      drainQueuedRunRequestsForShutdown: (session) =>
+        Queue.clear(session.queue).pipe(Effect.asVoid),
       interruptSessionWorkers: () => FiberSet.clear(fiberSet),
       shutdownSessions,
       formatError,
@@ -1008,7 +989,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
       session: ChannelSession,
     ): Effect.Effect<SessionActivity, unknown> =>
       Effect.all({
-        hasPendingQuestions: hasPendingQuestions(session.opencode.sessionId),
+        hasPendingQuestions: questions.hasPendingQuestions(session.opencode.sessionId),
         hasIdleCompaction: idleCompaction.hasActive(session.opencode.sessionId),
         hasQueuedWork: Queue.size(session.queue).pipe(Effect.map((size) => size > 0)),
         isBusy: isSessionBusy(session),
@@ -1097,14 +1078,16 @@ export const SessionRuntimeLayer = Layer.unwrap(
         Effect.flatMap((session) => (session ? onPresent(session) : onMissing())),
       );
 
-    const sessionRuntime = {
+    return Layer.succeed(SessionRuntime, {
       readLoadedChannelActivity: (channelId) => readChannelActivity(getSession(channelId)),
       readRestoredChannelActivity: (channelId) =>
         readChannelActivity(getOrRestoreSession(channelId)),
       getActiveRunBySessionId,
       queueMessageRunRequest: (message, request, reason) =>
         Effect.gen(function* () {
-          const session = yield* getUsableSession(message, reason);
+          const session = yield* createOrGetSession(message).pipe(
+            Effect.flatMap((session) => ensureSessionHealth(session, message, reason)),
+          );
           session.progressChannel = message.channel.isSendable()
             ? (message.channel as SendableChannels)
             : null;
@@ -1116,7 +1099,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
           } satisfies QueuedMessageRunRequest;
         }),
       routeQuestionInteraction: (interaction) =>
-        routeQuestionInteraction(interaction).pipe(Effect.asVoid),
+        routeQuestionSignals(questions.routeInteraction(interaction)).pipe(Effect.asVoid),
       invalidate: invalidateSession,
       updateLoadedChannelSettings: (channelId, settings) =>
         getSession(channelId).pipe(
@@ -1157,8 +1140,6 @@ export const SessionRuntimeLayer = Layer.unwrap(
             } satisfies IdleCompactionWorkflowInterruptResult),
         ),
       shutdown,
-    } satisfies SessionRuntimeShape;
-
-    return Layer.succeed(SessionRuntime, sessionRuntime);
+    } satisfies SessionRuntimeShape);
   }),
 );

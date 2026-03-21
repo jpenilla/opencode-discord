@@ -19,17 +19,15 @@ const makeInitialRequests = (message: Message): NonEmptyRunRequestBatch => [
   },
 ];
 
-const runExecutorEffect = runTestEffect;
 const runBatch = (
   runtime: Awaited<ReturnType<typeof makeRuntime>>["runtime"],
   session: ChannelSession,
   initialRequests: NonEmptyRunRequestBatch,
-) => runExecutorEffect(executeRunBatch(runtime)(session, initialRequests));
-const makeRunInput = (messageId = "m-1") => {
-  const session = makeTestSession();
-  const responseMessage = makeRunMessage(messageId);
-  return { session, initialRequests: makeInitialRequests(responseMessage) };
-};
+) => runTestEffect(executeRunBatch(runtime)(session, initialRequests));
+const makeRunBatchInput = (message: Message) => ({
+  session: makeTestSession(),
+  initialRequests: makeInitialRequests(message),
+});
 const followUpContext = (
   replyTargetMessage: Message,
   prompt = "follow-up",
@@ -41,6 +39,30 @@ const followUpContext = (
 });
 const expectCalls = (calls: Ref.Ref<string[]>, expected: string[]) =>
   readRef(calls).then((seen) => expect(seen).toEqual(expected));
+const runWith = async (
+  options?: Parameters<typeof makeRuntime>[0],
+  input = makeRunBatchInput(makeRunMessage("m-1")),
+) => {
+  const runtimeState = await makeRuntime(options);
+  await runBatch(runtimeState.runtime, input.session, input.initialRequests);
+  return {
+    ...input,
+    ...runtimeState,
+  };
+};
+const makeInitialPromptCompletion = (
+  replyTargetMessage: Message,
+  transcript: string,
+  messageId: string,
+) => ({
+  promptContext: {
+    kind: "initial",
+    prompt: "initial",
+    replyTargetMessage,
+    requestMessages: [replyTargetMessage],
+  } satisfies AdmittedPromptContext,
+  result: { messageId, transcript } satisfies PromptResult,
+});
 const makePromptCompletion = (
   replyTargetMessage: Message,
   transcript: string,
@@ -49,6 +71,21 @@ const makePromptCompletion = (
   promptContext: followUpContext(replyTargetMessage),
   result: { messageId, transcript } satisfies PromptResult,
 });
+const makeResponseRecordingRuntime = async (
+  promptCompletions: NonNullable<Parameters<typeof makeRuntime>[0]>["promptCompletions"],
+  record: (message: Message, text: string) => string,
+) => {
+  const finalResponseMessageIds = await makeRef<string[]>([]);
+  const { runtime } = await makeRuntime({ promptCompletions });
+  return {
+    finalResponseMessageIds,
+    runtime: {
+      ...runtime,
+      sendFinalResponse: (message: Message, text: string) =>
+        appendRef(finalResponseMessageIds, record(message, text)),
+    } as const,
+  };
+};
 
 const makeRuntime = async (options?: {
   promptResult?: PromptResult;
@@ -180,10 +217,7 @@ const makeRuntime = async (options?: {
 
 describe("executeRunBatch", () => {
   test("runs a successful batch through progress finalization and final reply", async () => {
-    const { session, initialRequests } = makeRunInput();
-    const { runtime, calls } = await makeRuntime();
-
-    await runBatch(runtime, session, initialRequests);
+    const { session, calls } = await runWith();
 
     await expectCalls(calls, [
       "typing:start",
@@ -201,29 +235,28 @@ describe("executeRunBatch", () => {
   });
 
   test("sends the final Discord reply against the current prompt reply target", async () => {
-    const { session } = makeRunInput();
     const originMessage = makeRunMessage("trigger-message");
     const replyTargetMessage = makeRunMessage("follow-up-message");
-    const initialRequests = makeInitialRequests(originMessage);
-    const { runtime, finalResponseMessageIds } = await makeRuntime({
-      promptResult: {
-        messageId: "assistant-after-auto-compaction",
-        transcript: "final transcript",
+    const input = makeRunBatchInput(originMessage);
+    const { finalResponseMessageIds } = await runWith(
+      {
+        promptResult: {
+          messageId: "assistant-after-auto-compaction",
+          transcript: "final transcript",
+        },
+        configureActiveRun: (activeRun) => {
+          activeRun.currentPromptContext = followUpContext(replyTargetMessage);
+        },
       },
-      configureActiveRun: (activeRun) => {
-        activeRun.currentPromptContext = followUpContext(replyTargetMessage);
-      },
-    });
-
-    await runBatch(runtime, session, initialRequests);
+      input,
+    );
 
     expect(await readRef(finalResponseMessageIds)).toEqual(["follow-up-message"]);
   });
 
   test("sends the question UI failure reply for empty transcripts with an unnotified UI failure", async () => {
-    const { session, initialRequests } = makeRunInput();
     const replyTargetMessage = makeRunMessage("question-target");
-    const { runtime, calls, questionUiFailureMessageIds } = await makeRuntime({
+    const { calls, questionUiFailureMessageIds } = await runWith({
       promptResult: { messageId: "msg-1", transcript: "" },
       configureActiveRun: (activeRun) => {
         activeRun.currentPromptContext = followUpContext(replyTargetMessage);
@@ -235,8 +268,6 @@ describe("executeRunBatch", () => {
       },
     });
 
-    await runBatch(runtime, session, initialRequests);
-
     const seen = await readRef(calls);
     expect(seen).toContain("sendQuestionUiFailure:question failed");
     expect(seen.some((entry) => entry.startsWith("sendFinalResponse:"))).toBe(false);
@@ -244,16 +275,13 @@ describe("executeRunBatch", () => {
   });
 
   test("sends a run failure and triggers health recovery after non-interrupt errors", async () => {
-    const { session, initialRequests } = makeRunInput();
     const replyTargetMessage = makeRunMessage("failure-target");
-    const { runtime, calls, runFailureMessageIds } = await makeRuntime({
+    const { calls, runFailureMessageIds } = await runWith({
       promptFailure: new Error("boom"),
       configureActiveRun: (activeRun) => {
         activeRun.currentPromptContext = followUpContext(replyTargetMessage);
       },
     });
-
-    await runBatch(runtime, session, initialRequests);
 
     await expectCalls(calls, [
       "typing:start",
@@ -271,15 +299,12 @@ describe("executeRunBatch", () => {
   });
 
   test("suppresses run failure and health recovery when the run was intentionally interrupted", async () => {
-    const { session, initialRequests } = makeRunInput();
-    const { runtime, calls } = await makeRuntime({
+    const { calls } = await runWith({
       promptFailure: new Error("interrupted"),
       configureActiveRun: (activeRun) => {
         activeRun.interruptRequested = true;
       },
     });
-
-    await runBatch(runtime, session, initialRequests);
 
     await expectCalls(calls, [
       "typing:start",
@@ -296,14 +321,11 @@ describe("executeRunBatch", () => {
   });
 
   test("clears a stale interrupt request when the run still completes successfully", async () => {
-    const { session, initialRequests } = makeRunInput();
-    const { runtime, calls } = await makeRuntime({
+    const { calls } = await runWith({
       configureActiveRun: (activeRun) => {
         activeRun.interruptRequested = true;
       },
     });
-
-    await runBatch(runtime, session, initialRequests);
 
     await expectCalls(calls, [
       "typing:start",
@@ -321,12 +343,9 @@ describe("executeRunBatch", () => {
   });
 
   test("warns when the progress worker already exited before finalization", async () => {
-    const { session, initialRequests } = makeRunInput();
-    const { runtime, calls } = await makeRuntime({
+    const { calls } = await runWith({
       progressBehavior: "exit",
     });
-
-    await runBatch(runtime, session, initialRequests);
 
     await expectCalls(calls, [
       "progress:exit",
@@ -346,31 +365,16 @@ describe("executeRunBatch", () => {
   test("sends a Discord reply for each completed prompt round in the same run", async () => {
     const originMessage = makeRunMessage("trigger-message");
     const followUpMessage = makeRunMessage("follow-up-message");
-    const { session } = makeRunInput();
-    const initialRequests = makeInitialRequests(originMessage);
-    const finalResponseMessageIds = await makeRef<string[]>([]);
-    const { runtime } = await makeRuntime({
-      promptCompletions: [
-        {
-          promptContext: {
-            kind: "initial",
-            prompt: "initial",
-            replyTargetMessage: originMessage,
-            requestMessages: [originMessage],
-          },
-          result: { messageId: "msg-1", transcript: "first reply" },
-        },
+    const { session, initialRequests } = makeRunBatchInput(originMessage);
+    const { finalResponseMessageIds, runtime } = await makeResponseRecordingRuntime(
+      [
+        makeInitialPromptCompletion(originMessage, "first reply", "msg-1"),
         makePromptCompletion(followUpMessage, "second reply", "msg-2"),
       ],
-    });
+      (message) => message.id,
+    );
 
-    const multiRoundRuntime = {
-      ...runtime,
-      sendFinalResponse: (message: Message, text: string) =>
-        appendRef(finalResponseMessageIds, message.id).pipe(Effect.andThen(Effect.void)),
-    } as const;
-
-    await runBatch(multiRoundRuntime, session, initialRequests);
+    await runBatch(runtime, session, initialRequests);
 
     expect(await readRef(finalResponseMessageIds)).toEqual([
       "trigger-message",
@@ -382,32 +386,17 @@ describe("executeRunBatch", () => {
     const originMessage = makeRunMessage("trigger-message");
     const followUpMessageOne = makeRunMessage("follow-up-message-1");
     const followUpMessageTwo = makeRunMessage("follow-up-message-2");
-    const { session } = makeRunInput();
-    const initialRequests = makeInitialRequests(originMessage);
-    const finalResponseMessageIds = await makeRef<string[]>([]);
-    const { runtime } = await makeRuntime({
-      promptCompletions: [
-        {
-          promptContext: {
-            kind: "initial",
-            prompt: "initial",
-            replyTargetMessage: originMessage,
-            requestMessages: [originMessage],
-          },
-          result: { messageId: "msg-1", transcript: "first reply" },
-        },
+    const { session, initialRequests } = makeRunBatchInput(originMessage);
+    const { finalResponseMessageIds, runtime } = await makeResponseRecordingRuntime(
+      [
+        makeInitialPromptCompletion(originMessage, "first reply", "msg-1"),
         makePromptCompletion(followUpMessageOne, "second reply", "msg-2"),
         makePromptCompletion(followUpMessageTwo, "third reply", "msg-3"),
       ],
-    });
+      (message, text) => `${message.id}:${text}`,
+    );
 
-    const chainedRuntime = {
-      ...runtime,
-      sendFinalResponse: (message: Message, text: string) =>
-        appendRef(finalResponseMessageIds, `${message.id}:${text}`),
-    } as const;
-
-    await runBatch(chainedRuntime, session, initialRequests);
+    await runBatch(runtime, session, initialRequests);
 
     expect(await readRef(finalResponseMessageIds)).toEqual([
       "trigger-message:first reply",
