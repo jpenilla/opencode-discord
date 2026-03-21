@@ -318,13 +318,13 @@ const renderQuestionContainer = (input: PendingQuestionBatchView) => {
     container,
     lines(
       `**${STATUS_TITLES[input.status]}**`,
-      input.status === "active" || input.status === "submitting"
+      ["active", "submitting"].includes(input.status)
         ? renderQuestionMeta(input)
         : terminalStatusSummary(input),
     ),
   );
 
-  if (input.status === "answered" || input.status === "rejected" || input.status === "expired") {
+  if (["answered", "rejected", "expired"].includes(input.status)) {
     const resolvedSections = renderResolvedQuestionSections(input).filter(Boolean);
     for (const [index, section] of resolvedSections.entries()) {
       if (index > 0) {

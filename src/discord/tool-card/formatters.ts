@@ -265,14 +265,13 @@ const formatTodoInputLines: ToolInputFormatter = ({ input }) => {
       (typeof record.state === "string" && record.state) ||
       (typeof record.done === "boolean" ? (record.done ? "done" : "pending") : "");
     const normalizedStatus = status.toLowerCase();
-    const emoji =
-      normalizedStatus === "done" || normalizedStatus === "completed"
-        ? "✅"
-        : normalizedStatus === "in_progress" || normalizedStatus === "in progress"
-          ? "⏳"
-          : normalizedStatus === "cancelled" || normalizedStatus === "canceled"
-            ? "⛔"
-            : "🕒";
+    const emoji = ["done", "completed"].includes(normalizedStatus)
+      ? "✅"
+      : ["in_progress", "in progress"].includes(normalizedStatus)
+        ? "⏳"
+        : ["cancelled", "canceled"].includes(normalizedStatus)
+          ? "⛔"
+          : "🕒";
 
     lines.push(todoLine(`${emoji} ${truncate(singleLine(content), 120)}`));
   }

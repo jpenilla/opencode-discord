@@ -11,8 +11,6 @@ import type { RunRequest } from "@/sessions/session.ts";
 import { makeMessage } from "../../support/fixtures.ts";
 import { runTestEffect } from "../../support/runtime.ts";
 
-const run = runTestEffect;
-
 const makeRequest = (prompt: string, attachmentMessages: ReadonlyArray<Message>): RunRequest => ({
   message: attachmentMessages[0]!,
   prompt,
@@ -131,15 +129,15 @@ describe("admitRequestBatchToActiveRun", () => {
 
 describe("takeQueuedRunBatch", () => {
   test("caps the queued batch size and preserves remaining requests for the next drain", async () => {
-    const queue = await run(Queue.unbounded<RunRequest>());
+    const queue = await runTestEffect(Queue.unbounded<RunRequest>());
     const requests = Array.from({ length: maxQueuedRunBatchSize + 5 }, (_, index) =>
       makeRequest(`prompt-${index + 1}`, [makeMessage(`m-${index + 1}`)]),
     );
 
-    await run(Queue.offerAll(queue, requests));
+    await runTestEffect(Queue.offerAll(queue, requests));
 
-    const firstBatch = await run(takeQueuedRunBatch(queue));
-    const secondBatch = await run(takeQueuedRunBatch(queue));
+    const firstBatch = await runTestEffect(takeQueuedRunBatch(queue));
+    const secondBatch = await runTestEffect(takeQueuedRunBatch(queue));
 
     expect(firstBatch).toHaveLength(maxQueuedRunBatchSize);
     expect(firstBatch[0]?.prompt).toBe("prompt-1");

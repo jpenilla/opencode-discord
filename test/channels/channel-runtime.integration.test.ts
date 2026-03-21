@@ -66,8 +66,6 @@ import { unsafeEffect, unsafeStub } from "../support/stub.ts";
 
 const TEST_STATE_DIR = join(tmpdir(), `.opencode-discord-test-storage-${process.pid}`);
 
-const runEffect = runTestEffect;
-
 const makeConfig = (): AppConfigShape =>
   makeTestConfig({
     stateDir: TEST_STATE_DIR,
@@ -198,9 +196,68 @@ const completeWith = (
   transcript: string,
 ) => completePrompt({ messageId, transcript });
 
+const assistantEvent = (
+  id: string,
+  parentId: string,
+  extra: Omit<Parameters<typeof makeAssistantMessageUpdatedEvent>[0], "id" | "parentId"> = {},
+) => makeAssistantMessageUpdatedEvent({ id, parentId, ...extra });
+const userEvent = (
+  id: string,
+  extra: Omit<Parameters<typeof makeUserMessageUpdatedEvent>[0], "id"> = {},
+) => makeUserMessageUpdatedEvent({ id, ...extra });
+const toolUpdatedEvent = (
+  status: "running" | "error",
+  sessionId: string,
+  messageId = "assistant-1",
+) => makeToolUpdatedEvent({ sessionId, messageId, status });
+const expectCardText = (payloads: unknown[], text: string) =>
+  expect(payloads.map(cardText)).toContain(text);
+const hasCardText = (payloads: unknown[], text: string) =>
+  payloads.some((payload) => cardText(payload).includes(text));
+
+const makeBlockedPromptHarness = async (input: {
+  transcript: string;
+  failComponentReplies?: boolean;
+}) => {
+  const promptStarted = await makeDeferred();
+  const allowPromptToFinish = await makeDeferred();
+  const harness = await makeHarness({
+    promptImpl: ({ completePrompt }) =>
+      Deferred.succeed(promptStarted, undefined).pipe(
+        Effect.andThen(Deferred.await(allowPromptToFinish)),
+        Effect.andThen(completeWith(completePrompt, "assistant-1", input.transcript)),
+      ),
+    failComponentReplies: input.failComponentReplies,
+  });
+
+  return {
+    harness,
+    promptStarted,
+    allowPromptToFinish,
+    message: makePromptMessage(harness, { id: "message-1", prompt: "hello" }),
+  };
+};
+
 const waitForQuestionCard = (replyPayloads: unknown[]) =>
   waitForReplyPayload(replyPayloads, (payload) =>
     cardText(payload).includes("❓ Questions need answers"),
+  );
+
+const waitForQuestionUiFailure = (sessions: RuntimeServices["sessions"]) =>
+  sessions.getActiveRunBySessionId("session-1").pipe(
+    Effect.flatMap((activeRun) =>
+      activeRun && activeRun.questionOutcome._tag === "ui-failure"
+        ? Effect.void
+        : failTest("question UI failure not recorded yet"),
+    ),
+    Effect.eventually,
+    Effect.timeoutOrElse({
+      duration: "1 second",
+      onTimeout: () =>
+        Effect.fail(
+          timeoutTestError("Timed out waiting for the current question UI failure state"),
+        ),
+    }),
   );
 
 const nextTick = () => Effect.promise(() => Bun.sleep(0));
@@ -210,7 +267,7 @@ const withHarness = <A>(
   harness: Harness,
   run: (services: RuntimeServices) => Effect.Effect<A, unknown, FileSystem.FileSystem | Path.Path>,
 ) =>
-  runEffect(
+  runTestEffect(
     Effect.scoped(
       Effect.gen(function* () {
         const channels = yield* ChannelRuntime;
@@ -254,7 +311,7 @@ const makeHarness = async (options: {
   let compactCalls = 0;
   let interruptCalls = 0;
   let createSessionCount = 0;
-  const [replyEvents, eventQueue] = await runEffect(
+  const [replyEvents, eventQueue] = await runTestEffect(
     Effect.all([Queue.unbounded<string>(), Queue.unbounded<GlobalEvent>()]),
   );
   const replyPayloads: unknown[] = [];
@@ -277,7 +334,7 @@ const makeHarness = async (options: {
       }
       const content = payload.content;
       if (content) {
-        return runEffect(Queue.offer(replyEvents, String(content))).then(() =>
+        return runTestEffect(Queue.offer(replyEvents, String(content))).then(() =>
           nextPostedMessage(`sent-${Date.now()}`),
         );
       }
@@ -303,15 +360,7 @@ const makeHarness = async (options: {
 
   const completePrompt = (sessionId: string, userMessageId: string, result: PromptResult) =>
     storePromptResult(result).pipe(
-      Effect.andThen(
-        publishEvent(
-          makeAssistantMessageUpdatedEvent({
-            id: result.messageId,
-            sessionId,
-            parentId: userMessageId,
-          }),
-        ),
-      ),
+      Effect.andThen(publishEvent(assistantEvent(result.messageId, userMessageId, { sessionId }))),
       Effect.andThen(publishEvent(makeSessionIdleEvent(sessionId))),
     );
 
@@ -353,7 +402,7 @@ const makeHarness = async (options: {
               }
               if (payload.content) {
                 replies.push(String(payload.content));
-                await runEffect(Queue.offer(replyEvents, String(payload.content)));
+                await runTestEffect(Queue.offer(replyEvents, String(payload.content)));
               }
               return nextPostedMessage(`reply-${input.id}`);
             }),
@@ -459,12 +508,7 @@ const makeHarness = async (options: {
         Effect.flatMap((callIndex) =>
           Effect.gen(function* () {
             const messageId = `user-${callIndex}`;
-            yield* publishEvent(
-              makeUserMessageUpdatedEvent({
-                id: messageId,
-                sessionId: _session.sessionId,
-              }),
-            );
+            yield* publishEvent(userEvent(messageId, { sessionId: _session.sessionId }));
             yield* options.promptImpl({
               prompt,
               callIndex,
@@ -557,9 +601,9 @@ const makeHarness = async (options: {
     makeCommandInteraction,
     makeQuestionButtonInteraction,
     storePromptResult: (result: PromptResult) =>
-      runEffect(storePromptResult(result)).then(() => undefined),
+      runTestEffect(storePromptResult(result)).then(() => undefined),
     publishEvent: (event: Event | GlobalEvent) =>
-      runEffect(publishEvent(event)).then(() => undefined),
+      runTestEffect(publishEvent(event)).then(() => undefined),
   };
 };
 
@@ -639,15 +683,7 @@ describe("ChannelRuntimeLayer integration", () => {
               messageId: "assistant-1",
               transcript: "intermediate",
             }).pipe(
-              Effect.andThen(
-                publishEvent(
-                  makeAssistantMessageUpdatedEvent({
-                    id: "assistant-1",
-                    sessionId,
-                    parentId: messageId,
-                  }),
-                ),
-              ),
+              Effect.andThen(publishEvent(assistantEvent("assistant-1", messageId, { sessionId }))),
               Effect.andThen(Deferred.succeed(assistantFinished, undefined).pipe(Effect.ignore)),
               Effect.andThen(Deferred.await(allowIdleStatus)),
               Effect.andThen(publishEvent(makeSessionIdleEvent(sessionId))),
@@ -699,21 +735,8 @@ describe("ChannelRuntimeLayer integration", () => {
               Effect.andThen(Deferred.await(allowFirstPromptToFinish)),
               Effect.andThen(completeWith(completePrompt, "assistant-1", "stale-final")),
             )
-          : publishEvent(
-              makeAssistantMessageUpdatedEvent({
-                id: "assistant-1",
-                sessionId,
-                parentId: "user-1",
-              }),
-            ).pipe(
-              Effect.andThen(
-                publishEvent(
-                  makeUserMessageUpdatedEvent({
-                    id: "user-1",
-                    sessionId,
-                  }),
-                ),
-              ),
+          : publishEvent(assistantEvent("assistant-1", "user-1", { sessionId })).pipe(
+              Effect.andThen(publishEvent(userEvent("user-1", { sessionId }))),
               Effect.andThen(completeWith(completePrompt, "assistant-2", "follow-up-final")),
             ),
     });
@@ -743,10 +766,8 @@ describe("ChannelRuntimeLayer integration", () => {
         }).pipe(
           Effect.andThen(
             publishEvent(
-              makeAssistantMessageUpdatedEvent({
-                id: "summary-1",
+              assistantEvent("summary-1", "synthetic-1", {
                 sessionId,
-                parentId: "synthetic-1",
                 summary: true,
                 mode: "compaction",
               }),
@@ -790,9 +811,7 @@ describe("ChannelRuntimeLayer integration", () => {
         );
         yield* publishHarnessEvent(
           harness,
-          makeAssistantMessageUpdatedEvent({
-            id: "summary-1",
-            parentId: "synthetic-1",
+          assistantEvent("summary-1", "synthetic-1", {
             summary: true,
             mode: "compaction",
           }),
@@ -811,33 +830,9 @@ describe("ChannelRuntimeLayer integration", () => {
           messageId: "assistant-1",
           transcript: "done",
         }).pipe(
-          Effect.andThen(
-            publishEvent(
-              makeToolUpdatedEvent({
-                sessionId,
-                messageId: "assistant-1",
-                status: "running",
-              }),
-            ),
-          ),
-          Effect.andThen(
-            publishEvent(
-              makeAssistantMessageUpdatedEvent({
-                id: "assistant-1",
-                sessionId,
-                parentId: messageId,
-              }),
-            ),
-          ),
-          Effect.andThen(
-            publishEvent(
-              makeToolUpdatedEvent({
-                sessionId,
-                messageId: "assistant-1",
-                status: "error",
-              }),
-            ),
-          ),
+          Effect.andThen(publishEvent(toolUpdatedEvent("running", sessionId))),
+          Effect.andThen(publishEvent(assistantEvent("assistant-1", messageId, { sessionId }))),
+          Effect.andThen(publishEvent(toolUpdatedEvent("error", sessionId))),
           Effect.andThen(publishEvent(makeSessionIdleEvent(sessionId))),
         ),
     });
@@ -850,10 +845,9 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(harness.sentPayloads.map(cardText)).toContain(
-      "**💻 🛠️ `bash` Running**\n`pwd`\nPrint cwd",
-    );
-    expect(harness.editedPayloads.map(cardText)).toContain(
+    expectCardText(harness.sentPayloads, "**💻 🛠️ `bash` Running**\n`pwd`\nPrint cwd");
+    expectCardText(
+      harness.editedPayloads,
       "**💻 ❌ `bash` Failed in 0.00s**\n`pwd`\nError: `aborted`",
     );
   });
@@ -889,7 +883,8 @@ describe("ChannelRuntimeLayer integration", () => {
 
     expect(harness.readInterruptCalls()).toBe(1);
     expect(harness.replies).toEqual([]);
-    expect(harness.sentPayloads.map(cardText)).toContain(
+    expectCardText(
+      harness.sentPayloads,
       "**‼️ Run interrupted**\nOpenCode stopped the active run in this channel.",
     );
   });
@@ -933,14 +928,8 @@ describe("ChannelRuntimeLayer integration", () => {
     expect(harness.readInterruptCalls()).toBe(1);
     expect(command.readInteractionDefers()).toBe(1);
     expect(command.interactionEdits).toHaveLength(1);
-    expect(
-      harness.replyPayloads.some((payload) =>
-        cardText(payload).includes("❓ Questions need answers"),
-      ),
-    ).toBe(true);
-    expect(
-      harness.sentPayloads.some((payload) => cardText(payload).includes("‼️ Run interrupted")),
-    ).toBe(false);
+    expect(hasCardText(harness.replyPayloads, "❓ Questions need answers")).toBe(true);
+    expect(hasCardText(harness.sentPayloads, "‼️ Run interrupted")).toBe(false);
   });
 
   test("runs /new-session through ChannelRuntimeLayer and recreates the next message on the same workdir", async () => {
@@ -1000,7 +989,8 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(harness.editedPayloads.map(cardText)).toContain(
+    expectCardText(
+      harness.editedPayloads,
       "**‼️ Compaction interrupted**\nOpenCode stopped compacting this session because the run was interrupted.",
     );
   });
@@ -1111,16 +1101,11 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("processes queued question events through ChannelRuntimeLayer and finalizes the question card", async () => {
-    const promptStarted = await makeDeferred();
-    const allowPromptToFinish = await makeDeferred();
-    const harness = await makeHarness({
-      promptImpl: ({ completePrompt }) =>
-        Deferred.succeed(promptStarted, undefined).pipe(
-          Effect.andThen(Deferred.await(allowPromptToFinish)),
-          Effect.andThen(completeWith(completePrompt, "assistant-1", "question complete")),
-        ),
-    });
-    const message = makePromptMessage(harness, { id: "message-1", prompt: "hello" });
+    const { harness, promptStarted, allowPromptToFinish, message } = await makeBlockedPromptHarness(
+      {
+        transcript: "question complete",
+      },
+    );
 
     await withHarness(harness, ({ channels }) =>
       Effect.gen(function* () {
@@ -1134,23 +1119,19 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(harness.replyPayloads.map(cardText)).toContain(
+    expectCardText(
+      harness.replyPayloads,
       "**❓ Questions need answers**\nQuestion 1/1 • 0/1 answered • Pick one • Other allowed • 1 option",
     );
-    expect(harness.editedPayloads.map(cardText)).toContain("**✅ Questions answered**\n1 question");
+    expectCardText(harness.editedPayloads, "**✅ Questions answered**\n1 question");
   });
 
   test("routes question interactions through ChannelRuntimeLayer after command handling falls through", async () => {
-    const promptStarted = await makeDeferred();
-    const allowPromptToFinish = await makeDeferred();
-    const harness = await makeHarness({
-      promptImpl: ({ completePrompt }) =>
-        Deferred.succeed(promptStarted, undefined).pipe(
-          Effect.andThen(Deferred.await(allowPromptToFinish)),
-          Effect.andThen(completeWith(completePrompt, "assistant-1", "done")),
-        ),
-    });
-    const message = makePromptMessage(harness, { id: "message-1", prompt: "hello" });
+    const { harness, promptStarted, allowPromptToFinish, message } = await makeBlockedPromptHarness(
+      {
+        transcript: "done",
+      },
+    );
     const questionInteraction = harness.makeQuestionButtonInteraction();
 
     await withHarness(harness, ({ channels }) =>
@@ -1183,15 +1164,7 @@ describe("ChannelRuntimeLayer integration", () => {
               transcript: "",
             }),
           ),
-          Effect.andThen(
-            publishEvent(
-              makeAssistantMessageUpdatedEvent({
-                id: "assistant-1",
-                sessionId,
-                parentId: messageId,
-              }),
-            ),
-          ),
+          Effect.andThen(publishEvent(assistantEvent("assistant-1", messageId, { sessionId }))),
           Effect.andThen(Deferred.await(interruptStarted)),
           Effect.andThen(Deferred.await(allowIdleStatus)),
           Effect.andThen(publishEvent(makeSessionIdleEvent(sessionId))),
@@ -1212,8 +1185,9 @@ describe("ChannelRuntimeLayer integration", () => {
         yield* nextTick();
 
         expect(
-          harness.editedPayloads.some((payload) =>
-            cardText(payload).includes("This question prompt expired before it was answered."),
+          hasCardText(
+            harness.editedPayloads,
+            "This question prompt expired before it was answered.",
           ),
         ).toBe(false);
 
@@ -1223,9 +1197,7 @@ describe("ChannelRuntimeLayer integration", () => {
     );
 
     expect(
-      harness.editedPayloads.some((payload) =>
-        cardText(payload).includes("This question prompt expired before it was answered."),
-      ),
+      hasCardText(harness.editedPayloads, "This question prompt expired before it was answered."),
     ).toBe(true);
   });
 
@@ -1251,7 +1223,8 @@ describe("ChannelRuntimeLayer integration", () => {
       }),
     );
 
-    expect(harness.sentPayloads.map(cardText)).toContain(
+    expectCardText(
+      harness.sentPayloads,
       "**🛑 Run interrupted**\nOpenCode stopped the active run in this channel because the bot is shutting down.",
     );
   });
@@ -1279,48 +1252,25 @@ describe("ChannelRuntimeLayer integration", () => {
   });
 
   test("surfaces a question UI failure reply when posting the question card fails", async () => {
-    const promptStarted = await makeDeferred();
-    const allowPromptToFinish = await makeDeferred();
-    const harness = await makeHarness({
-      promptImpl: ({ completePrompt }) =>
-        Deferred.succeed(promptStarted, undefined).pipe(
-          Effect.andThen(Deferred.await(allowPromptToFinish)),
-          Effect.andThen(completeWith(completePrompt, "assistant-1", "")),
-        ),
-      failComponentReplies: true,
-    });
-    const message = makePromptMessage(harness, { id: "message-1", prompt: "hello" });
+    const { harness, promptStarted, allowPromptToFinish, message } = await makeBlockedPromptHarness(
+      {
+        transcript: "",
+        failComponentReplies: true,
+      },
+    );
 
     await withHarness(harness, ({ channels, sessions }) =>
       Effect.gen(function* () {
         yield* submitPrompt(channels, message, "hello");
         yield* Deferred.await(promptStarted);
         yield* publishHarnessEvent(harness, makeQuestionAskedEvent());
-        yield* sessions.getActiveRunBySessionId("session-1").pipe(
-          Effect.flatMap((activeRun) =>
-            activeRun && activeRun.questionOutcome._tag === "ui-failure"
-              ? Effect.void
-              : failTest("question UI failure not recorded yet"),
-          ),
-          Effect.eventually,
-          Effect.timeoutOrElse({
-            duration: "1 second",
-            onTimeout: () =>
-              Effect.fail(
-                timeoutTestError("Timed out waiting for the current question UI failure state"),
-              ),
-          }),
-        );
+        yield* waitForQuestionUiFailure(sessions);
         yield* Deferred.succeed(allowPromptToFinish, undefined).pipe(Effect.ignore);
         expect(yield* Queue.take(harness.replyEvents)).toContain("Failed to show questions");
       }),
     );
 
     expect(harness.replies).toHaveLength(1);
-    expect(
-      harness.replyPayloads.some((payload) =>
-        cardText(payload).includes("❓ Questions need answers"),
-      ),
-    ).toBe(true);
+    expect(hasCardText(harness.replyPayloads, "❓ Questions need answers")).toBe(true);
   });
 });
