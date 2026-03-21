@@ -86,7 +86,7 @@ const forceCloseSessionHandle = (
   reason: string,
 ) =>
   session.opencode.close().pipe(
-    catchShutdownWarn(deps, "failed to force-close opencode session during shutdown", (error) => ({
+    catchShutdownWarn(deps, "failed to force-close opencode session during shutdown", () => ({
       channelId: session.channelId,
       sessionId: session.opencode.sessionId,
       reason,
@@ -174,7 +174,7 @@ const interruptIdleCompactionForShutdown = (deps: SessionShutdownDeps, session: 
               catchShutdownWarn(
                 deps,
                 "failed to finalize idle compaction after forced shutdown",
-                (finalizeError) => ({
+                () => ({
                   channelId: session.channelId,
                   sessionId: session.opencode.sessionId,
                 }),
@@ -279,7 +279,7 @@ const finalizeShutdownCleanup = (deps: SessionShutdownDeps) =>
             catchShutdownWarn(
               deps,
               "failed to finalize interrupted run progress during shutdown",
-              (error) => ({
+              () => ({
                 sessionId,
               }),
             ),
@@ -291,7 +291,7 @@ const finalizeShutdownCleanup = (deps: SessionShutdownDeps) =>
               "OpenCode stopped the active run in this channel because the bot is shutting down.",
             )
             .pipe(
-              catchShutdownWarn(deps, "failed to post shutdown interrupt info card", (error) => ({
+              catchShutdownWarn(deps, "failed to post shutdown interrupt info card", () => ({
                 channelId: activeRun.originMessage.channelId,
                 sessionId,
               })),
@@ -305,7 +305,7 @@ const finalizeShutdownCleanup = (deps: SessionShutdownDeps) =>
       idleCompactionSessionIds,
       (sessionId) =>
         deps.idleCompactionWorkflow.handleInterrupted(sessionId).pipe(
-          catchShutdownWarn(deps, "failed to finalize idle compaction on shutdown", (error) => ({
+          catchShutdownWarn(deps, "failed to finalize idle compaction on shutdown", () => ({
             sessionId,
           })),
         ),

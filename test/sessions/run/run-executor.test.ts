@@ -9,7 +9,6 @@ import type { NonEmptyRunRequestBatch } from "@/sessions/run/run-batch.ts";
 import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
 import { appendRef, makeRef, readRef, runTestEffect } from "../../support/runtime.ts";
 import { makeRunMessage, makeTestSession } from "../../support/session.ts";
-import { unsafeStub } from "../../support/stub.ts";
 
 const makeInitialRequests = (message: Message): NonEmptyRunRequestBatch => [
   {

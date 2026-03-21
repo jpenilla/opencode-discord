@@ -22,6 +22,22 @@ export type RunRequest = {
   attachmentMessages: ReadonlyArray<Message>;
 };
 
+export type SessionCreateSpec = {
+  workdir: string;
+  title: string;
+  systemPromptAppend?: string;
+};
+
+export const buildSessionCreateSpec = (input: {
+  channelId: string;
+  workdir: string;
+  systemPromptAppend?: string;
+}): SessionCreateSpec => ({
+  workdir: input.workdir,
+  title: `Discord #${input.channelId}`,
+  systemPromptAppend: input.systemPromptAppend,
+});
+
 export type QuestionOutcome =
   | { _tag: "none" }
   | { _tag: "user-rejected" }

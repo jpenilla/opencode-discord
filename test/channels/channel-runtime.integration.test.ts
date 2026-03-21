@@ -7,9 +7,8 @@ import {
   type Message,
   type MessageCreateOptions,
   type MessageEditOptions,
-  type SendableChannels,
 } from "discord.js";
-import { Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, Ref } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
 import {

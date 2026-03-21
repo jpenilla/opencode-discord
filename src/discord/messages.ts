@@ -1,4 +1,4 @@
-import type { APIEmbedField, Embed, Message, SendableChannels } from "discord.js";
+import type { Message, SendableChannels } from "discord.js";
 import { MessageFlags } from "discord.js";
 
 import { splitDiscordMessage } from "@/discord/formatting.ts";

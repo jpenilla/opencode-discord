@@ -28,12 +28,16 @@ import {
   makeQuestionRuntime,
   type QuestionRuntime,
   type RoutedQuestionSignals,
-  type QuestionWorkflowEvent,
 } from "@/sessions/question/question-runtime.ts";
 import { enqueueRunRequest, type RunRequestDestination } from "@/sessions/request-routing.ts";
 import { executeRunBatch } from "@/sessions/run/run-executor.ts";
 import { takeQueuedRunBatch } from "@/sessions/run/run-batch.ts";
-import { type ActiveRun, type ChannelSession, type RunRequest } from "@/sessions/session.ts";
+import {
+  buildSessionCreateSpec,
+  type ActiveRun,
+  type ChannelSession,
+  type RunRequest,
+} from "@/sessions/session.ts";
 import { createSessionShutdown } from "@/sessions/session-shutdown.ts";
 import {
   defaultChannelSettings,
@@ -360,10 +364,11 @@ export const createSessionRegistry = (deps: SessionLifecycleDeps) => {
     deleteNewRootOnFailure?: boolean;
   }): Effect.Effect<ChannelSession, unknown, FileSystem.FileSystem | Path.Path> =>
     Effect.gen(function* () {
+      const createSpec = buildSessionCreateSpec(input);
       const opencodeSession = yield* deps.createOpencodeSession(
-        input.workdir,
-        `Discord #${input.channelId}`,
-        input.systemPromptAppend,
+        createSpec.workdir,
+        createSpec.title,
+        createSpec.systemPromptAppend,
       );
       const session = yield* buildSession({
         channelId: input.channelId,

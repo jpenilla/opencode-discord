@@ -28,7 +28,7 @@ import { makeRecordedCommandInteraction, makeSendableChannel } from "../support/
 import { makeMessage, makeSessionHandle } from "../support/fixtures.ts";
 import { makeTestConfig } from "../support/config.ts";
 import { failTest } from "../support/errors.ts";
-import { appendRef, makeDeferred, runTestEffect } from "../support/runtime.ts";
+import { makeDeferred, runTestEffect } from "../support/runtime.ts";
 import { makeTestActiveRun, makeTestSession } from "../support/session.ts";
 import { unsafeStub } from "../support/stub.ts";
 
@@ -233,7 +233,7 @@ const makeHarness = async (options?: HarnessOptions) => {
         return { type: "started" } satisfies IdleCompactionWorkflowStartResult;
       }),
     requestInterrupt: () =>
-      Effect.gen(function* () {
+      Effect.sync(() => {
         idleInterruptRequested = true;
         compactionUpdates.push({
           title: "‼️ Interrupting compaction",

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Message } from "discord.js";
-import { Effect, Queue } from "effect";
+import { Queue } from "effect";
 
 import {
   admitRequestBatchToActiveRun,
