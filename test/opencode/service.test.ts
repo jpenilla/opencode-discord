@@ -8,6 +8,7 @@ import { summarizeOpencodeEventForLog, summarizePermissionForLog } from "@/openc
 import {
   OpencodeClientFactory,
   makeOpencodeService,
+  type OpencodeServiceShape,
   type SessionHandle,
 } from "@/opencode/service.ts";
 import { SandboxBackend } from "@/sandbox/common.ts";
@@ -25,6 +26,8 @@ const logger: LoggerShape = {
 };
 
 const runEffect = runTestEffect;
+const testWorkdir = "/tmp/workdir";
+const testSessionTitle = "Session";
 
 const ok = <A>(data: A) => ({ data });
 const emptyEventStream = () => ({
@@ -125,6 +128,17 @@ const makeService = (input: {
         }),
       ),
   );
+
+const createSession = (service: OpencodeServiceShape) =>
+  service.createSession(testWorkdir, testSessionTitle, undefined);
+
+const makeTrackedSandbox = (onClose: () => void) => ({
+  launchServer: async () => ({
+    url: "http://opencode.invalid",
+    backend: "unsafe-dev" as const,
+    close: onClose,
+  }),
+});
 
 describe("opencode log summaries", () => {
   test("logs a compact summary for tool events without raw tool payloads", () => {
@@ -292,20 +306,14 @@ describe("makeOpencodeService", () => {
                   },
                 },
               }),
-            sandbox: {
-              launchServer: async () => ({
-                url: "http://opencode.invalid",
-                backend: "unsafe-dev",
-                close: () => {
-                  serverClosed = true;
-                },
-              }),
-            },
+            sandbox: makeTrackedSandbox(() => {
+              serverClosed = true;
+            }),
           });
 
-          const fiber = yield* service
-            .createSession("/tmp/workdir", "Session", undefined)
-            .pipe(Effect.forkChild({ startImmediately: true }));
+          const fiber = yield* createSession(service).pipe(
+            Effect.forkChild({ startImmediately: true }),
+          );
 
           yield* Deferred.await(createStarted);
           yield* Fiber.interrupt(fiber);
@@ -380,7 +388,7 @@ describe("makeOpencodeService", () => {
               }),
           });
 
-          const session = yield* service.createSession("/tmp/workdir", "Session", undefined);
+          const session = yield* createSession(service);
           yield* Deferred.await(streamStarted);
           yield* Deferred.succeed(firstEvent, { done: false, value: event }).pipe(Effect.ignore);
 
@@ -446,7 +454,7 @@ describe("makeOpencodeService", () => {
               }),
           });
 
-          const session = yield* service.createSession("/tmp/workdir", "Session", undefined);
+          const session = yield* createSession(service);
           yield* Deferred.await(streamStarted);
           yield* session.close();
         }),
@@ -469,18 +477,12 @@ describe("makeOpencodeService", () => {
               createClient: () => {
                 throw new Error("client init failed");
               },
-              sandbox: {
-                launchServer: async () => ({
-                  url: "http://opencode.invalid",
-                  backend: "unsafe-dev",
-                  close: () => {
-                    serverClosed = true;
-                  },
-                }),
-              },
+              sandbox: makeTrackedSandbox(() => {
+                serverClosed = true;
+              }),
             });
 
-            yield* service.createSession("/tmp/workdir", "Session", undefined);
+            yield* createSession(service);
           }),
         ),
       ),
@@ -504,7 +506,7 @@ describe("makeOpencodeService", () => {
                 },
               }),
           });
-          const session = yield* service.createSession("/tmp/workdir", "Session", undefined);
+          const session = yield* createSession(service);
 
           const result = yield* service.interruptSession(session).pipe(Effect.result);
           expect(result).toMatchObject({
