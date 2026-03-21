@@ -47,6 +47,7 @@ const makeHarness = async (options?: {
 }) => {
   const postedPayloads: MessageCreateOptions[] = [];
   const editedPayloads: MessageEditOptions[] = [];
+  const interactionUpdates: unknown[] = [];
   const interactionReplies: Array<{ content?: string | null }> = [];
   const sentQuestionUiFailures: string[] = [];
   const questionReplyTargetIds: string[] = [];
@@ -148,6 +149,8 @@ const makeHarness = async (options?: {
     Promise.resolve(push(interactionReplies, payload as { content?: string | null })).then(
       () => undefined,
     );
+  const recordInteractionUpdate = (payload: unknown) =>
+    Promise.resolve(push(interactionUpdates, payload)).then(() => undefined);
 
   const reconcileTyping = () =>
     rawRuntime.hasPendingQuestions(session.opencode.sessionId).pipe(
@@ -196,6 +199,7 @@ const makeHarness = async (options?: {
     postedPayloads,
     editedPayloads,
     interactionReplies,
+    interactionUpdates,
     sentQuestionUiFailures,
     questionReplyTargetIds,
     questionUiFailureTargetIds,
@@ -208,6 +212,7 @@ const makeHarness = async (options?: {
       makeRecordedComponentInteraction("button", {
         ...input,
         onReply: recordInteractionReply,
+        onUpdate: recordInteractionUpdate,
         update: () => Promise.resolve(questionMessage),
         followUp: () => Promise.resolve(questionMessage),
       }) as Interaction,
@@ -220,6 +225,7 @@ const makeHarness = async (options?: {
       makeRecordedComponentInteraction("select", {
         ...input,
         onReply: recordInteractionReply,
+        onUpdate: recordInteractionUpdate,
         update: () => Promise.resolve(questionMessage),
       }) as Interaction,
     makeModalInteraction: (input: { customId: string; value: string; userId?: string }) =>
@@ -386,6 +392,9 @@ describe("makeQuestionRuntime", () => {
     const harness = await askHarness();
 
     await select(harness, "select:0", ["Yes"]);
+
+    expect(harness.interactionUpdates).toHaveLength(1);
+
     await modal(harness, "modal:0", "Other", "intruder");
 
     expectStaleStateReply(harness);
