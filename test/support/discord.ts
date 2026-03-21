@@ -108,6 +108,12 @@ export const makeRecordedComponentInteraction = (
     onUpdate?: (payload: unknown) => Promise<void>;
   },
 ) => {
+  const requireAck = () => {
+    if (!interaction.replied && !interaction.deferred) {
+      throw new Error("followUp requires an acknowledged interaction");
+    }
+  };
+
   const interaction = unsafeStub<Interaction & { replied: boolean; deferred: boolean }>({
     customId: input.customId,
     values: input.values,
@@ -124,6 +130,7 @@ export const makeRecordedComponentInteraction = (
       return input.onReply?.(payload) ?? Promise.resolve();
     },
     update: (payload: unknown) => {
+      interaction.replied = true;
       const updated = input.onUpdate?.(payload) ?? Promise.resolve();
       return updated.then(
         () =>
@@ -131,11 +138,21 @@ export const makeRecordedComponentInteraction = (
           Promise.resolve(makePostedMessage(input.messageId ?? "question-message")),
       );
     },
-    followUp: (payload: unknown) =>
-      input.followUp?.(payload) ??
-      Promise.resolve(makePostedMessage(input.messageId ?? "question-message")),
-    showModal: (payload: unknown) => input.showModal?.(payload) ?? Promise.resolve(),
-    deferUpdate: () => input.deferUpdate?.() ?? Promise.resolve(),
+    followUp: (payload: unknown) => {
+      requireAck();
+      return (
+        input.followUp?.(payload) ??
+        Promise.resolve(makePostedMessage(input.messageId ?? "question-message"))
+      );
+    },
+    showModal: (payload: unknown) => {
+      interaction.replied = true;
+      return input.showModal?.(payload) ?? Promise.resolve();
+    },
+    deferUpdate: () => {
+      interaction.deferred = true;
+      return input.deferUpdate?.() ?? Promise.resolve();
+    },
     fields: {
       getTextInputValue: () => input.value ?? "",
     },

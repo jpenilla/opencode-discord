@@ -1,11 +1,12 @@
 import type { Message } from "discord.js";
-import { Effect, Queue } from "effect";
+import { Effect, Queue, Ref } from "effect";
 
 import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import {
   noQuestionOutcome,
   type ActiveRun,
   type ChannelSession,
+  type RunRequest,
   type RunProgressEvent,
 } from "@/sessions/session.ts";
 import { makeMessage, makeSessionHandle } from "./fixtures.ts";
@@ -33,7 +34,7 @@ export const makeTestSession = (overrides: Partial<ChannelSession> = {}): Channe
     progressChannel: null,
     progressMentionContext: null,
     emittedCompactionSummaryMessageIds: new Set<string>(),
-    queue: {} as ChannelSession["queue"],
+    queue: Effect.runSync(Queue.unbounded<RunRequest>()),
     activeRun: null,
     ...overrides,
   });
@@ -43,6 +44,8 @@ export const makeTestActiveRun = async (
 ): Promise<{ activeRun: ActiveRun; progressQueue: Queue.Queue<RunProgressEvent> }> => {
   const progressQueue = overrides.progressQueue ?? (await Effect.runPromise(Queue.unbounded()));
   const promptState = overrides.promptState ?? (await Effect.runPromise(createPromptState()));
+  const followUpQueue = overrides.followUpQueue ?? (await Effect.runPromise(Queue.unbounded()));
+  const acceptFollowUps = overrides.acceptFollowUps ?? (await Effect.runPromise(Ref.make(true)));
   const activeRun = unsafeStub<ActiveRun>({
     originMessage: makeRunMessage("discord-message"),
     workdir: "/home/opencode/workspace",
@@ -55,8 +58,8 @@ export const makeTestActiveRun = async (
     observedToolCallIds: new Set<string>(),
     progressQueue,
     promptState,
-    followUpQueue: {} as ActiveRun["followUpQueue"],
-    acceptFollowUps: {} as ActiveRun["acceptFollowUps"],
+    followUpQueue,
+    acceptFollowUps,
     typing: {
       pause: () => Promise.resolve(),
       resume: () => {},
