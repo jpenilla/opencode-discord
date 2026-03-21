@@ -21,7 +21,6 @@ import { getRef, makeSessionHandle, makeSilentLogger } from "../support/fixtures
 import { failTest } from "../support/errors.ts";
 import { appendRef, clearQueue, makeRef, takeAll } from "../support/runtime.ts";
 import { makeTestSessionState } from "../support/session.ts";
-import { unsafeStub } from "../support/stub.ts";
 
 const beginPendingRun = async () => {
   const state = await makeSession(true);

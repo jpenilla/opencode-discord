@@ -7,7 +7,7 @@ import type {
   SendableChannels,
 } from "discord.js";
 import type { CompactionPart, ToolPart } from "@opencode-ai/sdk/v2";
-import { Deferred, Effect, Fiber, Queue, Ref } from "effect";
+import { Deferred, Effect, Fiber, Queue } from "effect";
 
 import {
   maxProgressBatchSize,

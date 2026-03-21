@@ -18,8 +18,6 @@ import {
 } from "@/sessions/session.ts";
 import type { TypingLoop } from "@/discord/messages.ts";
 import type { LoggerShape } from "@/util/logging.ts";
-import { ChannelSettings } from "@/state/channel-settings";
-import { ResolvedSandboxBackend } from "@/sandbox/common";
 
 type RunExecutorPromptInput = {
   channelId: string;

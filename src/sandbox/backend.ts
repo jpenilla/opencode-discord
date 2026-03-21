@@ -1,6 +1,6 @@
 import { createServer } from "node:net";
 
-import { Effect, FileSystem, Layer, Path, Scope } from "effect";
+import { Effect, FileSystem, Layer, Path } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
 import { launchBwrapServer } from "@/sandbox/bwrap.ts";

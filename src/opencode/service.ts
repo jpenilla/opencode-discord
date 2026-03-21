@@ -16,7 +16,7 @@ import {
   Scope,
   ServiceMap,
 } from "effect";
-import { AppConfig, type AppConfigShape } from "@/config.ts";
+import { AppConfig } from "@/config.ts";
 import { OpencodeEventQueue } from "@/opencode/events.ts";
 import { summarizeOpencodeEventForLog, summarizePermissionForLog } from "@/opencode/log-summary.ts";
 import {
@@ -28,10 +28,8 @@ import { requestData, requestOk, requestTrue } from "@/opencode/request.ts";
 import { renderTranscript } from "@/opencode/transcript.ts";
 import {
   SandboxBackend,
-  type SandboxBackendShape,
   type SandboxSession,
   type ResolvedSandboxBackend,
-  type SandboxStartupFailed,
   resolveSandboxBackend,
 } from "@/sandbox/common.ts";
 import { forkOwned } from "@/util/fork-owned.ts";
