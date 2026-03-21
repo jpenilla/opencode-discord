@@ -1,5 +1,5 @@
 import type { Message, SendableChannels } from "discord.js";
-import { Deferred, Effect, Fiber, FileSystem, Path, Queue, Ref } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Option, Path, Queue, Ref, Result } from "effect";
 
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
 import type { PendingPrompt } from "@/sessions/run/prompt-state.ts";
@@ -78,7 +78,7 @@ const finishProgressWorker = (
       const finalizingResult = yield* Deferred.await(finalizingAck).pipe(
         Effect.timeoutOption("2 seconds"),
       );
-      if (finalizingResult._tag === "None") {
+      if (Option.isNone(finalizingResult)) {
         yield* deps.logger.warn("progress worker finalization timed out", {
           channelId: session.channelId,
           sessionId: session.opencode.sessionId,
@@ -191,7 +191,7 @@ export const executeRunBatch =
         });
       }).pipe(Effect.result);
 
-      if (runResult._tag === "Failure") {
+      if (Result.isFailure(runResult)) {
         const error = runResult.failure;
         if (activeRun.interruptRequested) {
           const interruptSource = activeRun.interruptSource ?? "user";

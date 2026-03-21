@@ -1,5 +1,5 @@
 import type { Event, QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
-import { Data, Effect, Ref } from "effect";
+import { Data, Effect, Option, Ref, Result } from "effect";
 import { type Interaction, type Message } from "discord.js";
 
 import {
@@ -23,6 +23,7 @@ import {
   activateQuestionBatch,
   attachQuestionMessage,
   createQuestionWorkflowBatch,
+  isAttachedQuestionBatchAttachment,
   isPendingQuestionBatch,
   isTerminalQuestionBatch,
   persistQuestionBatchUpdate,
@@ -36,6 +37,7 @@ import type { SessionContext } from "@/sessions/session-runtime.ts";
 import {
   currentPromptReplyTargetMessage,
   questionUiFailureOutcome,
+  userRejectedQuestionOutcome,
   type ActiveRun,
   type ChannelSession,
 } from "@/sessions/session.ts";
@@ -387,7 +389,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
 
     const editQuestionMessage = (batch: QuestionWorkflowBatch) => {
       const attachment = batch.runtime.attachment;
-      return attachment._tag !== "attached"
+      return !isAttachedQuestionBatchAttachment(attachment)
         ? Effect.void
         : Effect.tryPromise({
             try: () => attachment.message.edit(createQuestionMessageEdit(questionBatchView(batch))),
@@ -424,7 +426,8 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
       );
 
     const finalizeBatchIfAttached = (batch: QuestionWorkflowBatch) =>
-      !isTerminalQuestionBatch(batch) || batch.runtime.attachment._tag !== "attached"
+      !isTerminalQuestionBatch(batch) ||
+      !isAttachedQuestionBatchAttachment(batch.runtime.attachment)
         ? Effect.void
         : editQuestionMessageLogged(batch, "failed to edit finalized question batch");
 
@@ -692,7 +695,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
           Effect.result,
         );
 
-        if (questionMessage._tag === "Success") {
+        if (Result.isSuccess(questionMessage)) {
           yield* attachPostedQuestionMessage(sessionId, request.id, questionMessage.success);
           return signals;
         }
@@ -710,7 +713,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         const rejectResult = yield* deps
           .rejectQuestion(session.opencode, request.id)
           .pipe(Effect.result);
-        if (rejectResult._tag === "Failure") {
+        if (Result.isFailure(rejectResult)) {
           yield* deps.logger.error("failed to reject question batch after UI failure", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
@@ -721,7 +724,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
           const failureReply = yield* deps
             .sendQuestionUiFailure(batch.runtime.replyTargetMessage, questionUiFailure)
             .pipe(Effect.result);
-          if (failureReply._tag === "Failure") {
+          if (Result.isFailure(failureReply)) {
             yield* deps.logger.error("failed to send question UI failure message", {
               channelId: session.channelId,
               sessionId: session.opencode.sessionId,
@@ -734,7 +737,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
             signals,
             signal({
               type: "set-run-question-outcome",
-              outcome: questionUiFailureOutcome(questionUiFailure, failureReply._tag === "Success"),
+              outcome: questionUiFailureOutcome(questionUiFailure, Result.isSuccess(failureReply)),
             }),
           );
         }
@@ -775,7 +778,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         const { batch, sessionId } = routed;
         if (
           (interaction.isButton() || interaction.isStringSelectMenu()) &&
-          batch.runtime.attachment._tag === "attached" &&
+          isAttachedQuestionBatchAttachment(batch.runtime.attachment) &&
           interaction.message.id !== batch.runtime.attachment.message.id
         ) {
           yield* replyToQuestionInteraction(interaction, "This question prompt has been replaced.");
@@ -982,7 +985,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                               signals,
                               signal({
                                 type: "set-run-question-outcome",
-                                outcome: { _tag: "user-rejected" },
+                                outcome: userRejectedQuestionOutcome(),
                               }),
                             ),
                           ),
@@ -1004,7 +1007,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                   deps.rejectQuestion(context.session.opencode, requestId).pipe(
                     Effect.timeoutOption(SHUTDOWN_QUESTION_RPC_TIMEOUT),
                     Effect.flatMap((result) =>
-                      result._tag === "Some"
+                      Option.isSome(result)
                         ? Effect.void
                         : Effect.fail(
                             questionRuntimeError(`Timed out rejecting question ${requestId}`),
@@ -1015,7 +1018,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                 { concurrency: "unbounded", discard: false },
               ).pipe(
                 Effect.flatMap((results) => {
-                  const failure = results.find((result) => result._tag === "Failure");
+                  const failure = results.find(Result.isFailure);
                   if (!failure) {
                     return Effect.void;
                   }
@@ -1035,7 +1038,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
       Effect.forEach(
         batches,
         (batch) =>
-          batch.runtime.attachment._tag !== "attached"
+          !isAttachedQuestionBatchAttachment(batch.runtime.attachment)
             ? Effect.void
             : editQuestionMessageLogged(batch, "failed to terminate question batch message"),
         { concurrency: "unbounded", discard: true },

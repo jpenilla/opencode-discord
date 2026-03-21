@@ -2,7 +2,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import { PassThrough } from "node:stream";
 
 import { AttachmentBuilder } from "discord.js";
-import { Effect, Fiber, Schema } from "effect";
+import { Effect, Fiber, Result, Schema } from "effect";
 
 import { requireSendableChannel, sendBridgeMessage } from "@/tools/bridge/handlers/shared.ts";
 import type { ToolBridgeHandlerContext } from "@/tools/bridge/routes.ts";
@@ -96,7 +96,7 @@ const handleUpload = (context: ToolBridgeHandlerContext<UploadPayload>, kind: "f
       content: caption,
       files: [attachment],
     }).pipe(Effect.result);
-    if (sendResult._tag === "Failure") {
+    if (Result.isFailure(sendResult)) {
       return yield* failUpload(context.request, uploadStream, sendResult.failure);
     }
 

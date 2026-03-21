@@ -44,11 +44,21 @@ export type QuestionOutcome =
   | { _tag: "ui-failure"; message: string; notified: boolean };
 
 export const noQuestionOutcome = (): QuestionOutcome => ({ _tag: "none" });
+export const userRejectedQuestionOutcome = (): QuestionOutcome => ({ _tag: "user-rejected" });
 export const questionUiFailureOutcome = (message: string, notified = false): QuestionOutcome => ({
   _tag: "ui-failure",
   message,
   notified,
 });
+export const isQuestionOutcomeNone = (outcome: QuestionOutcome): outcome is { _tag: "none" } =>
+  outcome._tag === "none";
+export const isQuestionOutcomeUserRejected = (
+  outcome: QuestionOutcome,
+): outcome is { _tag: "user-rejected" } => outcome._tag === "user-rejected";
+export const isQuestionOutcomeUiFailure = (
+  outcome: QuestionOutcome,
+): outcome is { _tag: "ui-failure"; message: string; notified: boolean } =>
+  outcome._tag === "ui-failure";
 
 export type RunInterruptSource = "user" | "shutdown";
 
