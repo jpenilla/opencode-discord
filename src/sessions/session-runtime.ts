@@ -295,11 +295,11 @@ const createSessionLifecycle = (
       const previousSessionId = session.opencode.sessionId;
       return Effect.sync(() => {
         session.opencode = replacement;
+        session.activeRun = null;
       }).pipe(
         Effect.andThen(
           sessionIndex.updateSession(session, {
             previousSessionId,
-            activeRun: null,
           }),
         ),
       );
@@ -725,9 +725,6 @@ export const SessionRuntimeLayer = Layer.unwrap(
     let readSessionBusy: (session: ChannelSession) => Effect.Effect<boolean, unknown> = () =>
       Effect.succeed(false);
 
-    const isSessionBusy = (session: ChannelSession) =>
-      session.activeRun ? Effect.succeed(true) : readSessionBusy(session);
-
     const sendQuestionUiFailure = (message: Message, error: unknown) =>
       Effect.promise(() =>
         message.reply({
@@ -743,7 +740,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
       config.sessionInstructions,
       config.triggerPhrase,
       config.sessionIdleTimeoutMs,
-      isSessionBusy,
+      readSessionBusy,
     ).pipe(Effect.provide(SessionStoreLayer));
     const {
       getSession,
@@ -850,7 +847,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
             responseMessage,
             "run failed with unhealthy opencode session",
             false,
-          ),
+          ).pipe(Effect.asVoid),
       }),
     );
 
@@ -1151,18 +1148,17 @@ export const SessionRuntimeLayer = Layer.unwrap(
         hasPendingQuestions: questions.hasPendingQuestions(session.opencode.sessionId),
         hasIdleCompaction: idleCompaction.hasActive(session.opencode.sessionId),
         hasQueuedWork: Queue.size(session.queue).pipe(Effect.map((size) => size > 0)),
-        isBusy: isSessionBusy(session),
       }).pipe(
-        Effect.map(
-          ({ hasPendingQuestions, hasIdleCompaction, hasQueuedWork, isBusy }) =>
-            ({
-              hasActiveRun: Boolean(session.activeRun),
-              hasPendingQuestions,
-              hasIdleCompaction,
-              hasQueuedWork,
-              isBusy,
-            }) satisfies SessionActivity,
-        ),
+        Effect.map(({ hasPendingQuestions, hasIdleCompaction, hasQueuedWork }) => {
+          const hasActiveRun = Boolean(session.activeRun);
+          return {
+            hasActiveRun,
+            hasPendingQuestions,
+            hasIdleCompaction,
+            hasQueuedWork,
+            isBusy: hasActiveRun || hasPendingQuestions || hasIdleCompaction || hasQueuedWork,
+          } satisfies SessionActivity;
+        }),
       );
 
     const readChannelActivity = <R>(
