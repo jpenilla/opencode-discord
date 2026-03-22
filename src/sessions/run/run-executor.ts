@@ -1,9 +1,16 @@
 import type { Message, SendableChannels } from "discord.js";
 import { Deferred, Effect, Fiber, FileSystem, Option, Path, Queue, Ref, Result } from "effect";
 
+import { formatErrorResponse } from "@/discord/formatting.ts";
+import { InfoCards } from "@/discord/info-card.ts";
+import { sendFinalResponse, startTypingLoop, type TypingLoop } from "@/discord/messages.ts";
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
-import type { PendingPrompt } from "@/sessions/run/prompt-state.ts";
+import { OpencodeService } from "@/opencode/service.ts";
+import { IdleCompactionWorkflow } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
+import { coordinateActiveRunPrompts } from "@/sessions/run/prompt-coordinator.ts";
+import { runProgressWorker } from "@/sessions/run/progress.ts";
+import type { PendingPrompt } from "@/sessions/run/prompt-state.ts";
 import type { NonEmptyRunRequestBatch } from "@/sessions/run/run-batch.ts";
 import { decideRunCompletion } from "@/sessions/run/run-completion.ts";
 import {
@@ -16,22 +23,10 @@ import {
   type RunProgressEvent,
   type RunRequest,
 } from "@/sessions/session.ts";
-import type { TypingLoop } from "@/discord/messages.ts";
 import { formatError } from "@/util/errors.ts";
-import type { LoggerShape } from "@/util/logging.ts";
+import { Logger, type LoggerShape } from "@/util/logging.ts";
 
 type FsEnv = FileSystem.FileSystem | Path.Path;
-
-type RunExecutorPromptInput = {
-  channelId: string;
-  session: SessionHandle;
-  activeRun: ActiveRun;
-  initialRequests: NonEmptyRunRequestBatch;
-  handlePromptCompleted: (
-    promptContext: AdmittedPromptContext,
-    result: PromptResult,
-  ) => Effect.Effect<void, unknown>;
-};
 
 const finishProgressWorker = (
   session: ChannelSession,
@@ -70,8 +65,17 @@ const finishProgressWorker = (
 
 export const executeRunBatch =
   (
-    runPrompts: (input: RunExecutorPromptInput) => Effect.Effect<PromptResult, unknown>,
-    runProgressWorker: (
+    runPrompts: (input: {
+      channelId: string;
+      session: SessionHandle;
+      activeRun: ActiveRun;
+      initialRequests: NonEmptyRunRequestBatch;
+      handlePromptCompleted: (
+        promptContext: AdmittedPromptContext,
+        result: PromptResult,
+      ) => Effect.Effect<void, unknown>;
+    }) => Effect.Effect<PromptResult, unknown>,
+    runProgress: (
       channel: SendableChannels,
       channelSession: Pick<ChannelSession, "channelSettings" | "opencode" | "workdir">,
       message: Message,
@@ -82,18 +86,15 @@ export const executeRunBatch =
       session: ChannelSession,
       activeRun: ActiveRun | null,
     ) => Effect.Effect<void, unknown>,
-    terminateQuestionBatches: (sessionId: string) => Effect.Effect<void, unknown>,
-    ensureSessionHealthAfterFailure: (
+    terminateQuestions: (sessionId: string) => Effect.Effect<void, unknown>,
+    recoverSession: (
       session: ChannelSession,
       responseMessage: Message,
     ) => Effect.Effect<void, unknown, FsEnv>,
-    sendRunInterruptedInfo: (
-      message: Message,
-      source: RunInterruptSource,
-    ) => Effect.Effect<void, unknown>,
-    sendFinalResponse: (message: Message, text: string) => Effect.Effect<void, unknown>,
+    sendInterrupted: (message: Message, source: RunInterruptSource) => Effect.Effect<void, unknown>,
+    sendFinal: (message: Message, text: string) => Effect.Effect<void, unknown>,
     sendRunFailure: (message: Message, error: unknown) => Effect.Effect<void, unknown>,
-    sendQuestionUiFailure: (message: Message, error: unknown) => Effect.Effect<void, unknown>,
+    sendUiFailure: (message: Message, error: unknown) => Effect.Effect<void, unknown>,
     logger: LoggerShape,
   ) =>
   (
@@ -110,7 +111,7 @@ export const executeRunBatch =
       if (!originChannel.isSendable()) {
         return yield* Effect.fail("Channel is not sendable");
       }
-      const progressFiber = yield* runProgressWorker(
+      const progressFiber = yield* runProgress(
         originChannel,
         session,
         originMessage,
@@ -152,10 +153,10 @@ export const executeRunBatch =
 
           switch (completion.type) {
             case "send-final-response":
-              yield* sendFinalResponse(promptContext.replyTargetMessage, result.transcript);
+              yield* sendFinal(promptContext.replyTargetMessage, result.transcript);
               break;
             case "send-question-ui-failure":
-              yield* sendQuestionUiFailure(promptContext.replyTargetMessage, completion.message);
+              yield* sendUiFailure(promptContext.replyTargetMessage, completion.message);
               break;
             case "suppress-response":
               break;
@@ -204,7 +205,7 @@ export const executeRunBatch =
           });
           yield* stopTyping;
           yield* finalizeProgress("interrupted");
-          yield* sendRunInterruptedInfo(originMessage, interruptSource);
+          yield* sendInterrupted(originMessage, interruptSource);
         } else {
           yield* logger.error("run failed", {
             channelId: session.channelId,
@@ -218,11 +219,78 @@ export const executeRunBatch =
       }
 
       yield* stopTyping;
-      yield* terminateQuestionBatches(session.opencode.sessionId);
+      yield* terminateQuestions(session.opencode.sessionId);
       yield* setActiveRun(session, null);
       yield* Fiber.interrupt(progressFiber);
 
       if (failed) {
-        yield* ensureSessionHealthAfterFailure(session, originMessage).pipe(Effect.ignore);
+        yield* recoverSession(session, originMessage).pipe(Effect.ignore);
       }
     });
+
+export const makeRunOrchestrator = (input: {
+  setActiveRun: (
+    session: ChannelSession,
+    activeRun: ActiveRun | null,
+  ) => Effect.Effect<void, unknown>;
+  terminateQuestions: (sessionId: string) => Effect.Effect<void, unknown>;
+  recoverSession: (
+    session: ChannelSession,
+    responseMessage: Message,
+  ) => Effect.Effect<void, unknown, FsEnv>;
+}) =>
+  Effect.gen(function* () {
+    const idleCompaction = yield* IdleCompactionWorkflow;
+    const infoCards = yield* InfoCards;
+    const logger = yield* Logger;
+    const opencode = yield* OpencodeService;
+
+    const replyWithError = (title: string) => (message: Message, error: unknown) =>
+      Effect.promise(() =>
+        message.reply({
+          content: formatErrorResponse(title, formatError(error)),
+          allowedMentions: { repliedUser: false, parse: [] },
+        }),
+      );
+
+    return executeRunBatch(
+      ({ channelId, session, activeRun, initialRequests, handlePromptCompleted }) =>
+        coordinateActiveRunPrompts({
+          channelId,
+          session,
+          activeRun,
+          initialRequests,
+          awaitIdleCompaction: idleCompaction.awaitCompletion,
+          submitPrompt: opencode.submitPrompt,
+          handlePromptCompleted,
+          logger,
+        }),
+      runProgressWorker,
+      (message) => startTypingLoop(message.channel),
+      input.setActiveRun,
+      input.terminateQuestions,
+      input.recoverSession,
+      (message, source) =>
+        infoCards
+          .send(
+            message.channel as SendableChannels,
+            source === "shutdown" ? "🛑 Run interrupted" : "‼️ Run interrupted",
+            source === "shutdown"
+              ? "OpenCode stopped the active run in this channel because the bot is shutting down."
+              : "OpenCode stopped the active run in this channel.",
+          )
+          .pipe(
+            Effect.catch((error) =>
+              logger.warn("failed to post interrupt info card", {
+                channelId: message.channelId,
+                error: formatError(error),
+              }),
+            ),
+            Effect.ignore,
+          ),
+      (message, text) => Effect.promise(() => sendFinalResponse({ message, text })),
+      replyWithError("## ❌ Opencode failed"),
+      replyWithError("## ❌ Failed to show questions"),
+      logger,
+    );
+  });

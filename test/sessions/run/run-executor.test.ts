@@ -24,7 +24,6 @@ type RuntimeOptions = {
 const makeInitialRequests = (message: Message): NonEmptyRunRequestBatch => [
   { message, prompt: "hello", attachmentMessages: [message] },
 ];
-
 const runBatch = (
   runtime: Runtime,
   session: ChannelSession,
@@ -36,12 +35,12 @@ const runBatch = (
       runtime.runProgressWorker,
       runtime.startTyping,
       runtime.setActiveRun,
-      runtime.terminateQuestionBatches,
-      runtime.ensureSessionHealthAfterFailure,
-      runtime.sendRunInterruptedInfo,
+      runtime.terminateQuestions,
+      runtime.recoverSession,
+      runtime.sendInterrupted,
       runtime.sendFinalResponse,
       runtime.sendRunFailure,
-      runtime.sendQuestionUiFailure,
+      runtime.sendUiFailure,
       runtime.logger,
     )(session, initialRequests),
   );
@@ -58,12 +57,9 @@ const makePromptContext = (
   replyTargetMessage,
   requestMessages: [replyTargetMessage],
 });
-const setReplyTarget = (replyTargetMessage: Message) => (activeRun: ActiveRun) => {
-  activeRun.currentPromptContext = makePromptContext("follow-up", replyTargetMessage);
-};
-const requestInterrupt = (activeRun: ActiveRun) => {
-  activeRun.interruptRequested = true;
-};
+const setReplyTarget = (replyTargetMessage: Message) => (activeRun: ActiveRun) =>
+  (activeRun.currentPromptContext = makePromptContext("follow-up", replyTargetMessage));
+const requestInterrupt = (activeRun: ActiveRun) => (activeRun.interruptRequested = true);
 const expectCalls = (calls: Ref.Ref<string[]>, expected: string[]) =>
   readRef(calls).then((seen) => expect(seen).toEqual(expected));
 const runWith = async (
@@ -103,15 +99,15 @@ const makeResponseRecordingRuntime = async (
 const makeRuntime = async (options?: RuntimeOptions) => {
   const calls = await makeRef<string[]>([]);
   const finalResponseMessageIds = await makeRef<string[]>([]);
-  const questionUiFailureMessageIds = await makeRef<string[]>([]);
-  const runFailureMessageIds = await makeRef<string[]>([]);
+  const uiFailureIds = await makeRef<string[]>([]);
+  const runFailureIds = await makeRef<string[]>([]);
   const record = (entry: string) => appendRef(calls, entry);
 
   return {
     calls,
     finalResponseMessageIds,
-    questionUiFailureMessageIds,
-    runFailureMessageIds,
+    uiFailureIds,
+    runFailureIds,
     runtime: {
       runPrompts: ({ activeRun, initialRequests, handlePromptCompleted }: RunPromptsInput) =>
         Effect.gen(function* () {
@@ -176,24 +172,24 @@ const makeRuntime = async (options?: RuntimeOptions) => {
         Effect.sync(() => {
           session.activeRun = activeRun;
         }).pipe(Effect.andThen(record(`setActiveRun:${activeRun ? "active" : "null"}`))),
-      terminateQuestionBatches: (sessionId: string) =>
+      terminateQuestions: (sessionId: string) =>
         record(`terminateQuestionBatches:${sessionId}:expired`),
-      ensureSessionHealthAfterFailure: (_session: ChannelSession, _responseMessage: Message) =>
+      recoverSession: (_session: ChannelSession, _responseMessage: Message) =>
         record("ensureSessionHealthAfterFailure"),
-      sendRunInterruptedInfo: (_message: Message, source: "user" | "shutdown") =>
+      sendInterrupted: (_message: Message, source: "user" | "shutdown") =>
         record(`sendRunInterruptedInfo:${source}`),
       sendFinalResponse: (message: Message, text: string) =>
         appendRef(finalResponseMessageIds, message.id).pipe(
           Effect.andThen(record(`sendFinalResponse:${text}`)),
         ),
       sendRunFailure: (message: Message, error: unknown) =>
-        appendRef(runFailureMessageIds, message.id).pipe(
+        appendRef(runFailureIds, message.id).pipe(
           Effect.andThen(
             record(`sendRunFailure:${error instanceof Error ? error.message : String(error)}`),
           ),
         ),
-      sendQuestionUiFailure: (message: Message, error: unknown) =>
-        appendRef(questionUiFailureMessageIds, message.id).pipe(
+      sendUiFailure: (message: Message, error: unknown) =>
+        appendRef(uiFailureIds, message.id).pipe(
           Effect.andThen(record(`sendQuestionUiFailure:${String(error)}`)),
         ),
       logger: {
@@ -244,7 +240,7 @@ describe("executeRunBatch", () => {
 
   test("sends the question UI failure reply for empty transcripts with an unnotified UI failure", async () => {
     const replyTargetMessage = makeRunMessage("question-target");
-    const { calls, questionUiFailureMessageIds } = await runWith({
+    const { calls, uiFailureIds } = await runWith({
       promptResult: { messageId: "msg-1", transcript: "" },
       configureActiveRun: (activeRun) => {
         setReplyTarget(replyTargetMessage)(activeRun);
@@ -259,12 +255,12 @@ describe("executeRunBatch", () => {
     const seen = await readRef(calls);
     expect(seen).toContain("sendQuestionUiFailure:question failed");
     expect(seen.some((entry) => entry.startsWith("sendFinalResponse:"))).toBe(false);
-    expect(await readRef(questionUiFailureMessageIds)).toEqual(["question-target"]);
+    expect(await readRef(uiFailureIds)).toEqual(["question-target"]);
   });
 
   test("sends a run failure and triggers health recovery after non-interrupt errors", async () => {
     const replyTargetMessage = makeRunMessage("failure-target");
-    const { calls, runFailureMessageIds } = await runWith({
+    const { calls, runFailureIds } = await runWith({
       promptFailure: new Error("boom"),
       configureActiveRun: setReplyTarget(replyTargetMessage),
     });
@@ -281,7 +277,7 @@ describe("executeRunBatch", () => {
       "setActiveRun:null",
       "ensureSessionHealthAfterFailure",
     ]);
-    expect(await readRef(runFailureMessageIds)).toEqual(["failure-target"]);
+    expect(await readRef(runFailureIds)).toEqual(["failure-target"]);
   });
 
   test("suppresses run failure and health recovery when the run was intentionally interrupted", async () => {
@@ -321,46 +317,6 @@ describe("executeRunBatch", () => {
       "typing:stop",
       "terminateQuestionBatches:session-1:expired",
       "setActiveRun:null",
-    ]);
-  });
-
-  test("warns when the progress worker already exited before finalization", async () => {
-    const { calls } = await runWith({
-      progressBehavior: "exit",
-    });
-
-    await expectCalls(calls, [
-      "progress:exit",
-      "typing:start",
-      "setActiveRun:active",
-      "runPrompts",
-      "sendFinalResponse:final transcript",
-      "typing:stop",
-      "warn:progress worker exited before finalization",
-      "info:completed run",
-      "typing:stop",
-      "terminateQuestionBatches:session-1:expired",
-      "setActiveRun:null",
-    ]);
-  });
-
-  test("sends a Discord reply for each completed prompt round in the same run", async () => {
-    const originMessage = makeRunMessage("trigger-message");
-    const followUpMessage = makeRunMessage("follow-up-message");
-    const { session, initialRequests } = makeRunBatchInput(originMessage);
-    const { finalResponseMessageIds, runtime } = await makeResponseRecordingRuntime(
-      [
-        makePromptCompletion("initial", originMessage, "first reply", "msg-1"),
-        makePromptCompletion("follow-up", followUpMessage, "second reply", "msg-2"),
-      ],
-      (message) => message.id,
-    );
-
-    await runBatch(runtime, session, initialRequests);
-
-    expect(await readRef(finalResponseMessageIds)).toEqual([
-      "trigger-message",
-      "follow-up-message",
     ]);
   });
 

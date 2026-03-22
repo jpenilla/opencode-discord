@@ -4,7 +4,6 @@ import { Effect, FiberSet, FileSystem, Layer, Path, Queue, Ref, Result, ServiceM
 import { AppConfig } from "@/config.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { InfoCards } from "@/discord/info-card.ts";
-import { sendFinalResponse, startTypingLoop } from "@/discord/messages.ts";
 import { buildSessionSystemAppend } from "@/discord/system-context.ts";
 import { OpencodeEventQueue } from "@/opencode/events.ts";
 import type { SessionHandle } from "@/opencode/service.ts";
@@ -17,8 +16,6 @@ import {
   makeIdleCompactionWorkflow,
 } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import { createEventHandler } from "@/sessions/event-handler.ts";
-import { coordinateActiveRunPrompts } from "@/sessions/run/prompt-coordinator.ts";
-import { runProgressWorker } from "@/sessions/run/progress.ts";
 import {
   applyQuestionSignals,
   questionTypingAction,
@@ -33,7 +30,7 @@ import {
   type RoutedQuestionSignals,
 } from "@/sessions/question/question-runtime.ts";
 import { enqueueRunRequest, type RunRequestDestination } from "@/sessions/request-routing.ts";
-import { executeRunBatch } from "@/sessions/run/run-executor.ts";
+import { makeRunOrchestrator } from "@/sessions/run/run-executor.ts";
 import { takeQueuedRunBatch } from "@/sessions/run/run-batch.ts";
 import {
   buildSessionCreateSpec,
@@ -689,7 +686,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
       activeRunsBySessionId: new Map(),
     });
     const shutdownStartedRef = yield* Ref.make(false);
-    const questionTypingPausedRef = yield* Ref.make(new Set<string>());
+    const typingPausedRef = yield* Ref.make(new Set<string>());
     const fiberSet = yield* FiberSet.make();
     let idleCompactionWorkflow: IdleCompactionWorkflowShape | null = null;
     let questionRuntime: QuestionRuntimeShape | null = null;
@@ -710,19 +707,13 @@ export const SessionRuntimeLayer = Layer.unwrap(
               : false;
           });
 
-    const sendErrorReply = (message: Message, title: string, error: unknown) =>
+    const sendQuestionUiFailure = (message: Message, error: unknown) =>
       Effect.promise(() =>
         message.reply({
-          content: formatErrorResponse(title, formatError(error)),
+          content: formatErrorResponse("## ❌ Failed to show questions", formatError(error)),
           allowedMentions: { repliedUser: false, parse: [] },
         }),
       );
-
-    const sendRunFailure = (message: Message, error: unknown) =>
-      sendErrorReply(message, "## ❌ Opencode failed", error);
-
-    const sendQuestionUiFailure = (message: Message, error: unknown) =>
-      sendErrorReply(message, "## ❌ Failed to show questions", error);
 
     const sessionLifecycle = yield* createSessionLifecycle(
       sessionIndex,
@@ -763,12 +754,12 @@ export const SessionRuntimeLayer = Layer.unwrap(
     );
     questionRuntime = questions;
 
-    const reconcileQuestionTypingForSession = (sessionId: string) =>
+    const syncTyping = (sessionId: string) =>
       getSessionContext(sessionId).pipe(
         Effect.flatMap((context) => {
           const activeRun = context?.activeRun ?? null;
           if (!activeRun) {
-            return Ref.update(questionTypingPausedRef, (current) => {
+            return Ref.update(typingPausedRef, (current) => {
               if (!current.has(sessionId)) {
                 return current;
               }
@@ -780,7 +771,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
 
           return questions.hasPendingQuestions(sessionId).pipe(
             Effect.flatMap((pending) =>
-              Ref.modify(questionTypingPausedRef, (current) => {
+              Ref.modify(typingPausedRef, (current) => {
                 const wasPaused = current.has(sessionId);
                 const next = new Set(current);
                 if (pending) {
@@ -804,19 +795,19 @@ export const SessionRuntimeLayer = Layer.unwrap(
         }),
       );
 
-    const applyQuestionWorkflowSignals = (
+    const applySessionSignals = (
       sessionId: string,
       signals: ReadonlyArray<QuestionWorkflowSignal>,
     ) =>
       getSessionContext(sessionId).pipe(
         Effect.flatMap((context) => applyQuestionSignals(context?.activeRun ?? null, signals)),
-        Effect.andThen(reconcileQuestionTypingForSession(sessionId)),
+        Effect.andThen(syncTyping(sessionId)),
       );
 
-    const routeQuestionSignals = (effect: Effect.Effect<RoutedQuestionSignals | null, unknown>) =>
+    const routeSignals = (effect: Effect.Effect<RoutedQuestionSignals | null, unknown>) =>
       effect.pipe(
         Effect.flatMap((routed) =>
-          !routed ? Effect.void : applyQuestionWorkflowSignals(routed.sessionId, routed.signals),
+          !routed ? Effect.void : applySessionSignals(routed.sessionId, routed.signals),
         ),
       );
 
@@ -830,7 +821,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
 
     const eventHandler = createEventHandler(
       getSessionContext,
-      (event) => routeQuestionSignals(questions.handleEvent(event)),
+      (event) => routeSignals(questions.handleEvent(event)),
       idleCompaction,
       opencode.readPromptResult,
       logger,
@@ -858,55 +849,20 @@ export const SessionRuntimeLayer = Layer.unwrap(
       Effect.forkScoped,
     );
 
-    const runExecutor = executeRunBatch(
-      ({ channelId, session, activeRun, initialRequests, handlePromptCompleted }) =>
-        coordinateActiveRunPrompts({
-          channelId,
-          session,
-          activeRun,
-          initialRequests,
-          awaitIdleCompaction: idleCompaction.awaitCompletion,
-          submitPrompt: opencode.submitPrompt,
-          handlePromptCompleted,
-          logger,
-        }),
-      runProgressWorker,
-      (message) => startTypingLoop(message.channel),
+    const runBatch = yield* makeRunOrchestrator({
       setActiveRun,
-      (sessionId) =>
+      terminateQuestions: (sessionId) =>
         questions
           .terminateSession(sessionId)
-          .pipe(Effect.flatMap((signals) => applyQuestionWorkflowSignals(sessionId, signals))),
-      (session, responseMessage) =>
+          .pipe(Effect.flatMap((signals) => applySessionSignals(sessionId, signals))),
+      recoverSession: (session, responseMessage) =>
         ensureSessionHealth(
           session,
           responseMessage,
           "run failed with unhealthy opencode session",
           false,
         ),
-      (message, source) =>
-        infoCards
-          .send(
-            message.channel as SendableChannels,
-            source === "shutdown" ? "🛑 Run interrupted" : "‼️ Run interrupted",
-            source === "shutdown"
-              ? "OpenCode stopped the active run in this channel because the bot is shutting down."
-              : "OpenCode stopped the active run in this channel.",
-          )
-          .pipe(
-            Effect.catch((error) =>
-              logger.warn("failed to post interrupt info card", {
-                channelId: message.channelId,
-                error: formatError(error),
-              }),
-            ),
-            Effect.ignore,
-          ),
-      (message, text) => Effect.promise(() => sendFinalResponse({ message, text })),
-      sendRunFailure,
-      sendQuestionUiFailure,
-      logger,
-    );
+    }).pipe(Effect.provide(runtimeServiceLayer));
 
     const worker = (session: ChannelSession): Effect.Effect<never, never, FsEnv> =>
       Effect.forever(
@@ -914,7 +870,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
           Effect.flatMap((requests) =>
             Ref.get(shutdownStartedRef).pipe(
               Effect.flatMap((shutdownStarted) =>
-                shutdownStarted ? Effect.void : runExecutor(session, requests),
+                shutdownStarted ? Effect.void : runBatch(session, requests),
               ),
             ),
           ),
@@ -1048,7 +1004,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
           } satisfies QueuedMessageRunRequest;
         }),
       routeQuestionInteraction: (interaction) =>
-        routeQuestionSignals(questions.routeInteraction(interaction)).pipe(Effect.asVoid),
+        routeSignals(questions.routeInteraction(interaction)).pipe(Effect.asVoid),
       invalidate: invalidateSession,
       updateLoadedChannelSettings: (channelId, settings) =>
         getSession(channelId).pipe(
