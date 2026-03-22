@@ -96,12 +96,7 @@ const toProgressEvent = (event: Event): RunProgressEvent | null => {
   return null;
 };
 
-export const routeRunEvent = (
-  event: Event,
-  sessionId: string,
-  session: ChannelSession,
-  activeRun: ActiveRun,
-) =>
+export const routeRunEvent = (event: Event, session: ChannelSession, activeRun: ActiveRun) =>
   Effect.gen(function* () {
     const opencode = yield* OpencodeService;
     const logger = yield* Logger;
@@ -176,7 +171,7 @@ export const routeRunEvent = (
           logger
             .warn("failed to resolve prompt result from event stream", {
               channelId: session.channelId,
-              sessionId,
+              sessionId: session.opencode.sessionId,
               messageId: completePrompt.messageId,
               error: formatError(error),
             })

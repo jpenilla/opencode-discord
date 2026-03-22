@@ -20,7 +20,11 @@ import {
 } from "../support/opencode-events.ts";
 import { getRef, makeSessionHandle, makeSilentLogger } from "../support/fixtures.ts";
 import { failTest } from "../support/errors.ts";
-import { QuestionRuntime, QuestionSessionLookup } from "@/sessions/question/question-runtime.ts";
+import {
+  QuestionRuntime,
+  QuestionSessionLookup,
+  type QuestionRuntimeShape,
+} from "@/sessions/question/question-runtime.ts";
 import { appendRef, clearQueue, makeRef, takeAll } from "../support/runtime.ts";
 import { makeTestSessionState } from "../support/session.ts";
 import { unsafeStub } from "../support/stub.ts";
@@ -132,7 +136,7 @@ const makeRuntime = (input: {
   session?: ChannelSession | null;
   activeRun?: ActiveRun | null;
   getSessionContext?: (sessionId: string) => Effect.Effect<SessionContext | null, unknown>;
-  handleQuestionEvent?: (event: unknown) => Effect.Effect<void, unknown>;
+  handleQuestionEvent?: QuestionRuntimeShape["handleEvent"];
   idleCompactionWorkflow?: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">;
   readPromptResult?: SessionReadPromptResult;
 }) =>

@@ -1,5 +1,5 @@
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
-import { Data, Effect, Option, Ref, Result, ServiceMap } from "effect";
+import { Effect, Option, Ref, Result, ServiceMap } from "effect";
 import { type Interaction, type Message } from "discord.js";
 
 import {
@@ -112,14 +112,8 @@ type RemoteQuestionAction = {
 };
 
 const SHUTDOWN_QUESTION_RPC_TIMEOUT = "1 second";
-
-class QuestionRuntimeError extends Data.TaggedError("QuestionRuntimeError")<{
-  readonly message: string;
-  readonly cause?: unknown;
-}> {}
-
 const questionRuntimeError = (message: string, cause?: unknown) =>
-  new QuestionRuntimeError({ message, cause });
+  Object.assign(new Error(message), cause === undefined ? {} : { cause });
 
 const noSignals: QuestionSignals = [];
 const signal = <A extends QuestionWorkflowSignal>(value: A): ReadonlyArray<A> => [value];

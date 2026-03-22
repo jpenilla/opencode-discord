@@ -98,7 +98,7 @@ export const makeSessionEventHandler: Effect.Effect<
           return;
         }
 
-        yield* routeRunEvent(event, sessionId, context.session, context.activeRun).pipe(
+        yield* routeRunEvent(event, context.session, context.activeRun).pipe(
           Effect.provideService(OpencodeService, opencode),
           Effect.provideService(Logger, logger),
         );

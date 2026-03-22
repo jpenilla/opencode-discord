@@ -826,17 +826,14 @@ export const SessionRuntimeLayer = Layer.unwrap(
         Effect.flatMap((context) => applyQuestionSignals(context?.activeRun ?? null, signals)),
         Effect.andThen(syncTyping(sessionId)),
       );
-    const questionSignalRouter = { apply: applySessionSignals };
+    const questionLookupLayer = Layer.succeed(QuestionSessionLookup, {
+      getSessionContext,
+    });
+    const questionSignalRouterLayer = Layer.succeed(QuestionSignalRouter, {
+      apply: applySessionSignals,
+    });
     questions = yield* makeQuestionRuntime(sendQuestionUiFailure).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          serviceLayer,
-          Layer.succeed(QuestionSessionLookup, {
-            getSessionContext,
-          }),
-          Layer.succeed(QuestionSignalRouter, questionSignalRouter),
-        ),
-      ),
+      Effect.provide(Layer.mergeAll(serviceLayer, questionLookupLayer, questionSignalRouterLayer)),
     );
     questionRuntime = questions;
 
@@ -849,14 +846,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
     );
 
     const eventHandler = yield* makeSessionEventHandler.pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          runtimeServiceLayer,
-          Layer.succeed(QuestionSessionLookup, {
-            getSessionContext,
-          }),
-        ),
-      ),
+      Effect.provide(Layer.mergeAll(runtimeServiceLayer, questionLookupLayer)),
     );
 
     yield* Queue.take(eventQueue).pipe(
