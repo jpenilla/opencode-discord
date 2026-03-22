@@ -18,38 +18,28 @@ import { routeRunEvent } from "@/sessions/run/run-event-router.ts";
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
-export type EventHandler = {
-  handleEvent: (event: Event) => Effect.Effect<void, unknown>;
-};
-
-type EventHandlerDeps = {
+export const createEventHandler = (
   getSessionContext: (
     sessionId: string,
-  ) => Effect.Effect<{ session: ChannelSession; activeRun: ActiveRun | null } | null, unknown>;
-  handleQuestionEvent: (event: QuestionWorkflowEvent) => Effect.Effect<void, unknown>;
-  idleCompactionWorkflow: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">;
-  readPromptResult: OpencodeServiceShape["readPromptResult"];
-  logger: LoggerShape;
-  formatError: (error: unknown) => string;
-};
-
-export const createEventHandler = (deps: EventHandlerDeps): EventHandler => ({
-  handleEvent: (event) =>
+  ) => Effect.Effect<{ session: ChannelSession; activeRun: ActiveRun | null } | null, unknown>,
+  handleQuestionEvent: (event: QuestionWorkflowEvent) => Effect.Effect<void, unknown>,
+  idleCompactionWorkflow: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">,
+  readPromptResult: OpencodeServiceShape["readPromptResult"],
+  logger: LoggerShape,
+) => ({
+  handleEvent: (event: Event) =>
     Effect.gen(function* () {
       const sessionId = getEventSessionId(event);
       if (!sessionId) {
         return;
       }
 
-      const context = yield* deps.getSessionContext(sessionId);
+      const context = yield* getSessionContext(sessionId);
       if (!context) {
         return;
       }
 
-      yield* routeQuestionEvent(event, {
-        sessionId,
-        handleQuestionEvent: deps.handleQuestionEvent,
-      });
+      yield* routeQuestionEvent(event, sessionId, handleQuestionEvent);
 
       const assistantMessage = getMessageUpdatedByRole(event, "assistant");
       if (
@@ -57,27 +47,27 @@ export const createEventHandler = (deps: EventHandlerDeps): EventHandler => ({
         isCompactionSummaryAssistant(assistantMessage) &&
         isObservedAssistantMessage(assistantMessage)
       ) {
-        yield* deps.idleCompactionWorkflow.emitSummary({
+        yield* idleCompactionWorkflow.emitSummary({
           session: context.session,
           messageId: assistantMessage.id,
         });
       }
 
       if (!context.activeRun && getEventByType(event, "session.compacted")?.properties) {
-        yield* deps.idleCompactionWorkflow.handleCompacted(sessionId);
+        yield* idleCompactionWorkflow.handleCompacted(sessionId);
       }
 
       if (!context.activeRun) {
         return;
       }
 
-      yield* routeRunEvent(event, {
+      yield* routeRunEvent(
+        event,
         sessionId,
-        session: context.session,
-        activeRun: context.activeRun,
-        readPromptResult: deps.readPromptResult,
-        logger: deps.logger,
-        formatError: deps.formatError,
-      });
+        context.session,
+        context.activeRun,
+        readPromptResult,
+        logger,
+      );
     }),
 });

@@ -1,5 +1,5 @@
 import type { Event, QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
-import { Data, Effect, Option, Ref, Result } from "effect";
+import { Data, Effect, Option, Ref, Result, ServiceMap } from "effect";
 import { type Interaction, type Message } from "discord.js";
 
 import {
@@ -18,7 +18,7 @@ import {
   setQuestionOptionSelection,
 } from "@/discord/question-card.ts";
 import { getEventByType } from "@/opencode/events.ts";
-import type { OpencodeServiceShape } from "@/opencode/service.ts";
+import { OpencodeService } from "@/opencode/service.ts";
 import {
   activateQuestionBatch,
   attachQuestionMessage,
@@ -33,7 +33,6 @@ import {
   type QuestionWorkflowBatch,
 } from "@/sessions/question/question-workflow-state.ts";
 import type { QuestionWorkflowSignal } from "@/sessions/question/question-run-state.ts";
-import type { SessionContext } from "@/sessions/session-runtime.ts";
 import {
   currentPromptReplyTargetMessage,
   questionUiFailureOutcome,
@@ -42,7 +41,7 @@ import {
   type ChannelSession,
 } from "@/sessions/session.ts";
 import { formatError } from "@/util/errors.ts";
-import type { LoggerShape } from "@/util/logging.ts";
+import { Logger } from "@/util/logging.ts";
 
 export type QuestionWorkflowEvent =
   | { type: "asked"; sessionId: string; request: QuestionRequest }
@@ -54,40 +53,38 @@ export type QuestionWorkflowEvent =
     }
   | { type: "rejected"; sessionId: string; requestId: string };
 
-export type RoutedQuestionSignals = {
-  sessionId: string;
-  signals: ReadonlyArray<QuestionWorkflowSignal>;
-};
+export type RoutedQuestionSignals = { sessionId: string; signals: QuestionSignals };
 
-export type QuestionRuntime = {
+type QuestionSignals = ReadonlyArray<QuestionWorkflowSignal>;
+type Batch = QuestionWorkflowBatch;
+type SessionContext = { session: ChannelSession; activeRun: ActiveRun | null };
+
+export class QuestionSessionLookup extends ServiceMap.Service<
+  QuestionSessionLookup,
+  {
+    getSessionContext: (sessionId: string) => Effect.Effect<SessionContext | null, unknown>;
+  }
+>()("QuestionSessionLookup") {}
+
+export type QuestionRuntimeShape = {
   handleEvent: (
     event: QuestionWorkflowEvent,
   ) => Effect.Effect<RoutedQuestionSignals | null, unknown>;
   routeInteraction: (
     interaction: Interaction,
   ) => Effect.Effect<RoutedQuestionSignals | null, unknown>;
-  hasPendingQuestions: (sessionId: string) => Effect.Effect<boolean>;
-  hasPendingQuestionsAnywhere: () => Effect.Effect<boolean>;
-  terminateSession: (
-    sessionId: string,
-  ) => Effect.Effect<ReadonlyArray<QuestionWorkflowSignal>, unknown>;
+  hasPendingQuestions: (sessionId: string) => Effect.Effect<boolean, unknown>;
+  hasPendingQuestionsAnywhere: () => Effect.Effect<boolean, unknown>;
+  terminateSession: (sessionId: string) => Effect.Effect<QuestionSignals, unknown>;
   shutdownSession: (sessionId: string) => Effect.Effect<void, unknown>;
   cleanupShutdownQuestions: () => Effect.Effect<void, unknown>;
 };
 
-type QuestionRuntimeDeps = {
-  getSessionContext: (sessionId: string) => Effect.Effect<SessionContext | null>;
-  replyToQuestion: OpencodeServiceShape["replyToQuestion"];
-  rejectQuestion: OpencodeServiceShape["rejectQuestion"];
-  sendQuestionUiFailure: (message: Message, error: unknown) => Effect.Effect<void, unknown>;
-  logger: LoggerShape;
-  formatError: (error: unknown) => string;
-};
+export class QuestionRuntime extends ServiceMap.Service<QuestionRuntime, QuestionRuntimeShape>()(
+  "QuestionRuntime",
+) {}
 
-type QuestionSessionState = {
-  stopped: boolean;
-  batches: Map<string, QuestionWorkflowBatch>;
-};
+type QuestionSessionState = { stopped: boolean; batches: Map<string, Batch> };
 
 type QuestionRuntimeState = {
   sessions: Map<string, QuestionSessionState>;
@@ -95,11 +92,11 @@ type QuestionRuntimeState = {
 };
 
 type PersistQuestionBatchResult =
-  | { type: "updated"; batch: QuestionWorkflowBatch }
+  | { type: "updated"; batch: Batch }
   | { type: "missing" }
-  | { type: "conflict"; batch: QuestionWorkflowBatch };
+  | { type: "conflict"; batch: Batch };
 
-type RoutedQuestionBatch = { sessionId: string; batch: QuestionWorkflowBatch | null } | null;
+type RoutedQuestionBatch = { sessionId: string; batch: Batch | null } | null;
 
 type RemoteQuestionAction = {
   sessionId: string;
@@ -108,7 +105,7 @@ type RemoteQuestionAction = {
   expectedVersion: number;
   invoke: (session: ChannelSession["opencode"], requestId: string) => Effect.Effect<void, unknown>;
   followUpFailure: (error: unknown) => string;
-  onSuccess: (batch: QuestionWorkflowBatch) => Effect.Effect<ReadonlyArray<QuestionWorkflowSignal>>;
+  onSuccess: (batch: Batch) => Effect.Effect<QuestionSignals, unknown>;
 };
 
 const SHUTDOWN_QUESTION_RPC_TIMEOUT = "1 second";
@@ -121,12 +118,10 @@ class QuestionRuntimeError extends Data.TaggedError("QuestionRuntimeError")<{
 const questionRuntimeError = (message: string, cause?: unknown) =>
   new QuestionRuntimeError({ message, cause });
 
-const noSignals: ReadonlyArray<QuestionWorkflowSignal> = [];
+const noSignals: QuestionSignals = [];
 const signal = <A extends QuestionWorkflowSignal>(value: A): ReadonlyArray<A> => [value];
-const appendSignals = (
-  left: ReadonlyArray<QuestionWorkflowSignal>,
-  right: ReadonlyArray<QuestionWorkflowSignal>,
-): ReadonlyArray<QuestionWorkflowSignal> => (left.length === 0 ? right : [...left, ...right]);
+const appendSignals = (left: QuestionSignals, right: QuestionSignals): QuestionSignals =>
+  left.length === 0 ? right : [...left, ...right];
 const routedNoSignals = (sessionId: string): RoutedQuestionSignals => ({
   sessionId,
   signals: noSignals,
@@ -176,42 +171,45 @@ const dropRequestRoute = (state: QuestionRuntimeState, requestId: string): Quest
 
 export const routeQuestionEvent = (
   event: Event,
-  deps: {
-    sessionId: string;
-    handleQuestionEvent: (event: QuestionWorkflowEvent) => Effect.Effect<void, unknown>;
-  },
-): Effect.Effect<void, unknown> =>
+  sessionId: string,
+  handleQuestionEvent: (event: QuestionWorkflowEvent) => Effect.Effect<void, unknown>,
+) =>
   Effect.gen(function* () {
     const questionAsked = getEventByType(event, "question.asked")?.properties ?? null;
     const questionReplied = getEventByType(event, "question.replied")?.properties ?? null;
     const questionRejected = getEventByType(event, "question.rejected")?.properties ?? null;
 
     if (questionAsked) {
-      yield* deps.handleQuestionEvent({
+      yield* handleQuestionEvent({
         type: "asked",
-        sessionId: deps.sessionId,
+        sessionId,
         request: questionAsked,
       });
     }
     if (questionReplied) {
-      yield* deps.handleQuestionEvent({
+      yield* handleQuestionEvent({
         type: "replied",
-        sessionId: deps.sessionId,
+        sessionId,
         requestId: questionReplied.requestID,
         answers: questionReplied.answers,
       });
     }
     if (questionRejected) {
-      yield* deps.handleQuestionEvent({
+      yield* handleQuestionEvent({
         type: "rejected",
-        sessionId: deps.sessionId,
+        sessionId,
         requestId: questionRejected.requestID,
       });
     }
   });
 
-export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<QuestionRuntime> =>
+export const makeQuestionRuntime = (
+  sendQuestionUiFailure: (message: Message, error: unknown) => Effect.Effect<void, unknown>,
+): Effect.Effect<QuestionRuntimeShape, unknown, QuestionSessionLookup | OpencodeService | Logger> =>
   Effect.gen(function* () {
+    const { getSessionContext } = yield* QuestionSessionLookup;
+    const opencode = yield* OpencodeService;
+    const logger = yield* Logger;
     const stateRef = yield* Ref.make<QuestionRuntimeState>({
       sessions: new Map(),
       requestRoutes: new Map(),
@@ -235,63 +233,57 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
       );
 
     const deleteQuestionBatch = (sessionId: string, requestId: string) =>
-      Ref.modify(
-        stateRef,
-        (current): readonly [QuestionWorkflowBatch | null, QuestionRuntimeState] => {
-          const session = current.sessions.get(sessionId);
-          const batch = session?.batches.get(requestId) ?? null;
-          if (!batch || !session) {
-            return [null, current];
-          }
+      Ref.modify(stateRef, (current): readonly [Batch | null, QuestionRuntimeState] => {
+        const session = current.sessions.get(sessionId);
+        const batch = session?.batches.get(requestId) ?? null;
+        if (!batch || !session) {
+          return [null, current];
+        }
 
-          const batches = new Map(session.batches);
-          batches.delete(requestId);
-          return [
-            batch,
-            writeSessionBatchesState(
-              dropRequestRoute(current, requestId),
-              sessionId,
-              session,
-              batches,
-            ),
-          ];
-        },
-      );
+        const batches = new Map(session.batches);
+        batches.delete(requestId);
+        return [
+          batch,
+          writeSessionBatchesState(
+            dropRequestRoute(current, requestId),
+            sessionId,
+            session,
+            batches,
+          ),
+        ];
+      });
 
     const updateQuestionBatch = (
       sessionId: string,
       requestId: string,
-      update: (batch: QuestionWorkflowBatch) => QuestionWorkflowBatch | null,
+      update: (batch: Batch) => Batch | null,
     ) =>
-      Ref.modify(
-        stateRef,
-        (current): readonly [QuestionWorkflowBatch | null, QuestionRuntimeState] => {
-          const session = current.sessions.get(sessionId);
-          const existing = session?.batches.get(requestId);
-          if (!existing || !session) {
-            return [null, current];
-          }
+      Ref.modify(stateRef, (current): readonly [Batch | null, QuestionRuntimeState] => {
+        const session = current.sessions.get(sessionId);
+        const existing = session?.batches.get(requestId);
+        if (!existing || !session) {
+          return [null, current];
+        }
 
-          const nextBatch = update(existing);
-          const batches = new Map(session.batches);
-          let nextState = current;
-          if (nextBatch) {
-            batches.set(requestId, nextBatch);
-          } else {
-            batches.delete(requestId);
-            nextState = dropRequestRoute(nextState, requestId);
-          }
+        const nextBatch = update(existing);
+        const batches = new Map(session.batches);
+        let nextState = current;
+        if (nextBatch) {
+          batches.set(requestId, nextBatch);
+        } else {
+          batches.delete(requestId);
+          nextState = dropRequestRoute(nextState, requestId);
+        }
 
-          return [nextBatch, writeSessionBatchesState(nextState, sessionId, session, batches)];
-        },
-      );
+        return [nextBatch, writeSessionBatchesState(nextState, sessionId, session, batches)];
+      });
 
     const tryPersistQuestionBatch = (
       sessionId: string,
       requestId: string,
       expectedVersion: number,
       actorId: string,
-      update: (batch: QuestionWorkflowBatch) => QuestionWorkflowBatch,
+      update: (batch: Batch) => Batch,
     ) =>
       Ref.modify(
         stateRef,
@@ -320,10 +312,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         stateRef,
         (
           current,
-        ): readonly [
-          { terminated: QuestionWorkflowBatch[]; requestIds: string[] },
-          QuestionRuntimeState,
-        ] => {
+        ): readonly [{ terminated: Batch[]; requestIds: string[] }, QuestionRuntimeState] => {
           const session = current.sessions.get(sessionId);
           if (!session) {
             return [{ terminated: [], requestIds: [] }, current];
@@ -331,7 +320,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
 
           const batches = new Map(session.batches);
           const requestRoutes = new Map(current.requestRoutes);
-          const terminated: QuestionWorkflowBatch[] = [];
+          const terminated: Batch[] = [];
           const requestIds: string[] = [];
 
           for (const [requestId, batch] of session.batches) {
@@ -387,7 +376,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         ),
       );
 
-    const editQuestionMessage = (batch: QuestionWorkflowBatch) => {
+    const editQuestionMessage = (batch: Batch) => {
       const attachment = batch.runtime.attachment;
       return !isAttachedQuestionBatchAttachment(attachment)
         ? Effect.void
@@ -406,7 +395,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
               Effect.ignore,
             );
 
-    const replyToQuestionConflict = (interaction: Interaction, batch: QuestionWorkflowBatch) =>
+    const replyToQuestionConflict = (interaction: Interaction, batch: Batch) =>
       replyToQuestionInteraction(
         interaction,
         batch.runtime.lastModifiedBy && batch.runtime.lastModifiedBy !== interaction.user.id
@@ -414,18 +403,18 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
           : "This question prompt changed before your action was applied. Review the latest card and try again.",
       );
 
-    const editQuestionMessageLogged = (batch: QuestionWorkflowBatch, failureMessage: string) =>
+    const editQuestionMessageLogged = (batch: Batch, failureMessage: string) =>
       editQuestionMessage(batch).pipe(
         Effect.catch((error) =>
-          deps.logger.warn(failureMessage, {
+          logger.warn(failureMessage, {
             channelId: batch.runtime.channelId,
             requestId: batch.domain.request.id,
-            error: deps.formatError(error),
+            error: formatError(error),
           }),
         ),
       );
 
-    const finalizeBatchIfAttached = (batch: QuestionWorkflowBatch) =>
+    const finalizeBatchIfAttached = (batch: Batch) =>
       !isTerminalQuestionBatch(batch) ||
       !isAttachedQuestionBatchAttachment(batch.runtime.attachment)
         ? Effect.void
@@ -458,7 +447,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         return noSignals;
       });
 
-    const updateInteraction = (interaction: Interaction, batch: QuestionWorkflowBatch) =>
+    const updateInteraction = (interaction: Interaction, batch: Batch) =>
       !interaction.isButton() && !interaction.isStringSelectMenu()
         ? Effect.void
         : Effect.promise(() =>
@@ -469,17 +458,17 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
       sessionId: string,
       interaction: Interaction,
       action: A,
-      update: (batch: QuestionWorkflowBatch) => QuestionWorkflowBatch,
+      update: (batch: Batch) => Batch,
     ) =>
       applyQuestionUpdate(sessionId, interaction, action.requestID, action.version, update).pipe(
         Effect.as(routedNoSignals(sessionId)),
       );
 
     const setQuestionDraft = (
-      batch: QuestionWorkflowBatch,
+      batch: Batch,
       questionIndex: number,
-      draft: QuestionWorkflowBatch["domain"]["drafts"][number],
-    ): QuestionWorkflowBatch => {
+      draft: Batch["domain"]["drafts"][number],
+    ): Batch => {
       const drafts = [...batch.domain.drafts];
       drafts[questionIndex] = draft;
       return {
@@ -494,9 +483,9 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
 
     const requireCustomQuestion = (
       interaction: Interaction,
-      batch: QuestionWorkflowBatch,
+      batch: Batch,
       questionIndex: number,
-    ): Effect.Effect<QuestionRequest["questions"][number] | null> => {
+    ) => {
       const question = batch.domain.request.questions[questionIndex];
       return !question || question.custom === false
         ? replyToQuestionInteraction(
@@ -511,7 +500,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
       interaction: Interaction;
       requestId: string;
       expectedVersion: number;
-      update: (batch: QuestionWorkflowBatch) => QuestionWorkflowBatch;
+      update: (batch: Batch) => Batch;
       missingMessage: string;
     }) =>
       tryPersistQuestionBatch(
@@ -548,9 +537,9 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
           return noSignals;
         }
 
-        const session = yield* deps
-          .getSessionContext(input.sessionId)
-          .pipe(Effect.map((context) => context?.session ?? null));
+        const session = yield* getSessionContext(input.sessionId).pipe(
+          Effect.map((context) => context?.session ?? null),
+        );
         if (!session) {
           const expired = yield* updateQuestionBatch(input.sessionId, input.requestId, (current) =>
             terminateQuestionBatch(current),
@@ -594,7 +583,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         );
       });
 
-    const currentQuestionDraft = (batch: QuestionWorkflowBatch, questionIndex: number) =>
+    const currentQuestionDraft = (batch: Batch, questionIndex: number) =>
       batch.domain.drafts[questionIndex] ?? clearQuestionDraft();
 
     const applyQuestionUpdate = (
@@ -602,7 +591,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
       interaction: Interaction,
       requestId: string,
       expectedVersion: number,
-      update: (batch: QuestionWorkflowBatch) => QuestionWorkflowBatch,
+      update: (batch: Batch) => Batch,
     ) =>
       Effect.gen(function* () {
         if (!interaction.isButton() && !interaction.isStringSelectMenu()) {
@@ -633,7 +622,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
       Effect.gen(function* () {
         const batch = yield* Ref.modify(
           stateRef,
-          (current): readonly [QuestionWorkflowBatch | null, QuestionRuntimeState] => {
+          (current): readonly [Batch | null, QuestionRuntimeState] => {
             const sessionState = current.sessions.get(sessionId) ?? emptyQuestionSessionState();
             if (sessionState.stopped || sessionState.batches.has(request.id)) {
               return [null, current];
@@ -671,7 +660,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
 
         let signals = noSignals;
         if (activeRun.interruptRequested) {
-          yield* deps.logger.info("question prompt superseded interrupt request", {
+          yield* logger.info("question prompt superseded interrupt request", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
             requestId: request.id,
@@ -701,35 +690,36 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         }
 
         yield* deleteQuestionBatch(sessionId, request.id);
-        const questionUiFailure = deps.formatError(questionMessage.failure);
+        const questionUiFailure = formatError(questionMessage.failure);
 
-        yield* deps.logger.error("failed to post question batch", {
+        yield* logger.error("failed to post question batch", {
           channelId: session.channelId,
           sessionId: session.opencode.sessionId,
           requestId: request.id,
           error: questionUiFailure,
         });
 
-        const rejectResult = yield* deps
+        const rejectResult = yield* opencode
           .rejectQuestion(session.opencode, request.id)
           .pipe(Effect.result);
         if (Result.isFailure(rejectResult)) {
-          yield* deps.logger.error("failed to reject question batch after UI failure", {
+          yield* logger.error("failed to reject question batch after UI failure", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
             requestId: request.id,
-            error: deps.formatError(rejectResult.failure),
+            error: formatError(rejectResult.failure),
           });
 
-          const failureReply = yield* deps
-            .sendQuestionUiFailure(batch.runtime.replyTargetMessage, questionUiFailure)
-            .pipe(Effect.result);
+          const failureReply = yield* sendQuestionUiFailure(
+            batch.runtime.replyTargetMessage,
+            questionUiFailure,
+          ).pipe(Effect.result);
           if (Result.isFailure(failureReply)) {
-            yield* deps.logger.error("failed to send question UI failure message", {
+            yield* logger.error("failed to send question UI failure message", {
               channelId: session.channelId,
               sessionId: session.opencode.sessionId,
               requestId: request.id,
-              error: deps.formatError(failureReply.failure),
+              error: formatError(failureReply.failure),
             });
           }
 
@@ -776,6 +766,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         }
 
         const { batch, sessionId } = routed;
+        const noSignalsForSession = routedNoSignals(sessionId);
         if (
           (interaction.isButton() || interaction.isStringSelectMenu()) &&
           isAttachedQuestionBatchAttachment(batch.runtime.attachment) &&
@@ -845,7 +836,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
             );
           case "select":
             if (!interaction.isStringSelectMenu()) {
-              return routedNoSignals(sessionId);
+              return noSignalsForSession;
             }
             return yield* routeQuestionUpdate(sessionId, interaction, action, (current) => {
               const question = current.domain.request.questions[action.questionIndex];
@@ -873,12 +864,12 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
             });
           case "custom": {
             if (!interaction.isButton()) {
-              return routedNoSignals(sessionId);
+              return noSignalsForSession;
             }
 
             const question = yield* requireCustomQuestion(interaction, batch, action.questionIndex);
             if (!question) {
-              return routedNoSignals(sessionId);
+              return noSignalsForSession;
             }
 
             yield* Effect.promise(() =>
@@ -892,16 +883,16 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                 }),
               ),
             );
-            return routedNoSignals(sessionId);
+            return noSignalsForSession;
           }
           case "modal": {
             if (!interaction.isModalSubmit()) {
-              return routedNoSignals(sessionId);
+              return noSignalsForSession;
             }
 
             const question = yield* requireCustomQuestion(interaction, batch, action.questionIndex);
             if (!question) {
-              return routedNoSignals(sessionId);
+              return noSignalsForSession;
             }
 
             const customAnswer = readQuestionModalValue(interaction);
@@ -909,7 +900,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
               yield* Effect.promise(() =>
                 interaction.reply(questionInteractionReply("Custom answer cannot be empty.")),
               ).pipe(Effect.ignore);
-              return routedNoSignals(sessionId);
+              return noSignalsForSession;
             }
 
             const updated = yield* persistQuestionBatchOrReply({
@@ -930,7 +921,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
               missingMessage: "This question prompt has expired.",
             });
             if (!updated) {
-              return routedNoSignals(sessionId);
+              return noSignalsForSession;
             }
 
             yield* editQuestionMessageLogged(
@@ -938,12 +929,12 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
               "failed to edit question batch after modal submit",
             );
             yield* Effect.promise(() => interaction.deferUpdate()).pipe(Effect.ignore);
-            return routedNoSignals(sessionId);
+            return noSignalsForSession;
           }
           case "submit":
           case "reject":
             if (!interaction.isButton()) {
-              return routedNoSignals(sessionId);
+              return noSignalsForSession;
             }
             return {
               sessionId,
@@ -955,13 +946,12 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                       requestId: action.requestID,
                       expectedVersion: action.version,
                       invoke: (session, requestId) =>
-                        deps.replyToQuestion(
+                        opencode.replyToQuestion(
                           session,
                           requestId,
                           buildQuestionAnswers(batch.domain.request, batch.domain.drafts),
                         ),
-                      followUpFailure: (error) =>
-                        `Failed to submit answers: ${deps.formatError(error)}`,
+                      followUpFailure: (error) => `Failed to submit answers: ${formatError(error)}`,
                       onSuccess: () =>
                         finalizeQuestionBatch(
                           sessionId,
@@ -975,9 +965,9 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                       interaction,
                       requestId: action.requestID,
                       expectedVersion: action.version,
-                      invoke: deps.rejectQuestion,
+                      invoke: opencode.rejectQuestion,
                       followUpFailure: (error) =>
-                        `Failed to reject questions: ${deps.formatError(error)}`,
+                        `Failed to reject questions: ${formatError(error)}`,
                       onSuccess: () =>
                         finalizeQuestionBatch(sessionId, action.requestID, "rejected").pipe(
                           Effect.map((signals) =>
@@ -997,14 +987,14 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
       });
 
     const rejectQuestionIdsForShutdown = (sessionId: string, requestIds: ReadonlyArray<string>) =>
-      deps.getSessionContext(sessionId).pipe(
+      getSessionContext(sessionId).pipe(
         Effect.flatMap((context) =>
           !context || requestIds.length === 0
             ? Effect.void
             : Effect.forEach(
                 requestIds,
                 (requestId) =>
-                  deps.rejectQuestion(context.session.opencode, requestId).pipe(
+                  opencode.rejectQuestion(context.session.opencode, requestId).pipe(
                     Effect.timeoutOption(SHUTDOWN_QUESTION_RPC_TIMEOUT),
                     Effect.flatMap((result) =>
                       Option.isSome(result)
@@ -1023,10 +1013,10 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
                     return Effect.void;
                   }
 
-                  return deps.logger
+                  return logger
                     .warn("question rejection was unresponsive during shutdown", {
                       sessionId,
-                      error: deps.formatError(failure.failure),
+                      error: formatError(failure.failure),
                     })
                     .pipe(Effect.andThen(context.session.opencode.close()));
                 }),
@@ -1034,7 +1024,7 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         ),
       );
 
-    const editAttachedQuestionBatches = (batches: ReadonlyArray<QuestionWorkflowBatch>) =>
+    const editAttachedQuestionBatches = (batches: ReadonlyArray<Batch>) =>
       Effect.forEach(
         batches,
         (batch) =>
@@ -1044,10 +1034,8 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
         { concurrency: "unbounded", discard: true },
       );
 
-    const routeSignals = (
-      sessionId: string,
-      effect: Effect.Effect<ReadonlyArray<QuestionWorkflowSignal>, unknown>,
-    ) => effect.pipe(Effect.map((signals) => ({ sessionId, signals })));
+    const routeSignals = (sessionId: string, effect: Effect.Effect<QuestionSignals, unknown>) =>
+      effect.pipe(Effect.map((signals) => ({ sessionId, signals })));
 
     const terminateSession = (sessionId: string) =>
       expirePendingBatches(sessionId).pipe(
@@ -1082,23 +1070,21 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
 
             switch (event.type) {
               case "asked":
-                return deps
-                  .getSessionContext(event.sessionId)
-                  .pipe(
-                    Effect.flatMap((context) =>
-                      !context?.activeRun
-                        ? Effect.succeed(null)
-                        : routeSignals(
+                return getSessionContext(event.sessionId).pipe(
+                  Effect.flatMap((context) =>
+                    !context?.activeRun
+                      ? Effect.succeed(null)
+                      : routeSignals(
+                          event.sessionId,
+                          handleQuestionAsked(
                             event.sessionId,
-                            handleQuestionAsked(
-                              event.sessionId,
-                              context.session,
-                              context.activeRun,
-                              event.request,
-                            ),
+                            context.session,
+                            context.activeRun,
+                            event.request,
                           ),
-                    ),
-                  );
+                        ),
+                  ),
+                );
               case "replied":
                 return routeSignals(
                   event.sessionId,
@@ -1123,5 +1109,5 @@ export const makeQuestionRuntime = (deps: QuestionRuntimeDeps): Effect.Effect<Qu
       terminateSession,
       shutdownSession,
       cleanupShutdownQuestions,
-    } satisfies QuestionRuntime;
+    } satisfies QuestionRuntimeShape;
   });

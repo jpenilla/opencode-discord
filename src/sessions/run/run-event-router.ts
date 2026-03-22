@@ -16,6 +16,7 @@ import {
   resolvePromptTrackingActions,
 } from "@/sessions/run/prompt-state.ts";
 import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
+import { formatError } from "@/util/errors.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
 const isPreviousPromptMessage = (activeRun: ActiveRun, messageId: string) =>
@@ -95,19 +96,14 @@ const toProgressEvent = (event: Event): RunProgressEvent | null => {
   return null;
 };
 
-type RunEventRouterDeps = {
-  sessionId: string;
-  session: ChannelSession;
-  activeRun: ActiveRun;
-  readPromptResult: OpencodeServiceShape["readPromptResult"];
-  logger: LoggerShape;
-  formatError: (error: unknown) => string;
-};
-
 export const routeRunEvent = (
   event: Event,
-  deps: RunEventRouterDeps,
-): Effect.Effect<void, unknown> =>
+  sessionId: string,
+  session: ChannelSession,
+  activeRun: ActiveRun,
+  readPromptResult: OpencodeServiceShape["readPromptResult"],
+  logger: LoggerShape,
+) =>
   Effect.gen(function* () {
     const progressEvent = toProgressEvent(event);
     const userMessage = getMessageUpdatedByRole(event, "user");
@@ -115,40 +111,37 @@ export const routeRunEvent = (
     const sessionError = getEventByType(event, "session.error")?.properties ?? null;
     const sessionStatus = getEventByType(event, "session.status")?.properties ?? null;
     const toolPart = getUpdatedPartByType(event, "tool");
-    const isNewUserMessage =
-      userMessage && !isPreviousPromptMessage(deps.activeRun, userMessage.id);
+    const isNewUserMessage = userMessage && !isPreviousPromptMessage(activeRun, userMessage.id);
     const isNewAssistantMessage =
-      assistantMessage && !isPreviousPromptMessage(deps.activeRun, assistantMessage.id);
+      assistantMessage && !isPreviousPromptMessage(activeRun, assistantMessage.id);
 
     if (isNewUserMessage) {
-      deps.activeRun.currentPromptMessageIds.add(userMessage.id);
-      deps.activeRun.currentPromptUserMessageId = userMessage.id;
+      activeRun.currentPromptMessageIds.add(userMessage.id);
+      activeRun.currentPromptUserMessageId = userMessage.id;
     }
 
     if (isNewAssistantMessage) {
-      deps.activeRun.currentPromptMessageIds.add(assistantMessage.id);
-      recordPromptAssistantMessage(deps.activeRun, assistantMessage);
+      activeRun.currentPromptMessageIds.add(assistantMessage.id);
+      recordPromptAssistantMessage(activeRun, assistantMessage);
     }
 
-    const relevantToolPart = toolPart ? selectToolPartForActiveRun(deps.activeRun, toolPart) : null;
+    const relevantToolPart = toolPart ? selectToolPartForActiveRun(activeRun, toolPart) : null;
     const promptActions = [];
 
     if (isNewUserMessage) {
-      promptActions.push(
-        ...(yield* handleUserMessageUpdated(deps.activeRun.promptState, userMessage)),
-      );
+      promptActions.push(...(yield* handleUserMessageUpdated(activeRun.promptState, userMessage)));
     }
 
     if (isNewAssistantMessage) {
       promptActions.push(
-        ...(yield* handleAssistantMessageUpdated(deps.activeRun.promptState, assistantMessage)),
+        ...(yield* handleAssistantMessageUpdated(activeRun.promptState, assistantMessage)),
       );
     }
 
     if (sessionError) {
       promptActions.push(
         ...(yield* failPendingPromptFromSessionError(
-          deps.activeRun.promptState,
+          activeRun.promptState,
           sessionError.error ?? new Error("OpenCode session failed"),
         )),
       );
@@ -156,7 +149,7 @@ export const routeRunEvent = (
 
     if (sessionStatus) {
       promptActions.push(
-        ...(yield* handleSessionStatusUpdated(deps.activeRun.promptState, sessionStatus.status)),
+        ...(yield* handleSessionStatusUpdated(activeRun.promptState, sessionStatus.status)),
       );
     }
 
@@ -169,23 +162,23 @@ export const routeRunEvent = (
     const runProgressEvent =
       progressEvent?.type === "tool-updated" && !relevantToolPart ? null : progressEvent;
     if (runProgressEvent) {
-      yield* Queue.offer(deps.activeRun.progressQueue, runProgressEvent).pipe(Effect.asVoid);
+      yield* Queue.offer(activeRun.progressQueue, runProgressEvent).pipe(Effect.asVoid);
     }
 
     const { completePrompt, failPrompt } = resolvePromptTrackingActions(promptActions);
 
     if (completePrompt) {
-      yield* deps.readPromptResult(deps.session.opencode, completePrompt.messageId).pipe(
+      yield* readPromptResult(session.opencode, completePrompt.messageId).pipe(
         Effect.flatMap((result) =>
           Deferred.succeed(completePrompt.deferred, result).pipe(Effect.ignore),
         ),
         Effect.catch((error) =>
-          deps.logger
+          logger
             .warn("failed to resolve prompt result from event stream", {
-              channelId: deps.session.channelId,
-              sessionId: deps.sessionId,
+              channelId: session.channelId,
+              sessionId,
               messageId: completePrompt.messageId,
-              error: deps.formatError(error),
+              error: formatError(error),
             })
             .pipe(
               Effect.andThen(Deferred.fail(completePrompt.deferred, error).pipe(Effect.ignore)),

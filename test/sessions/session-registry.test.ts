@@ -1,13 +1,24 @@
 import { describe, expect, test } from "bun:test";
 import { ChannelType } from "discord.js";
-import { Data, Deferred, Effect, Ref } from "effect";
+import { Data, Deferred, Effect, Layer, Ref } from "effect";
 
-import type { SessionHandle } from "@/opencode/service.ts";
-import { createSessionRegistry, type SessionRegistryState } from "@/sessions/session-runtime.ts";
+import {
+  OpencodeService,
+  type OpencodeServiceShape,
+  type SessionHandle,
+} from "@/opencode/service.ts";
+import {
+  createSessionIndex,
+  createSessionRegistry,
+  SessionStore,
+  type SessionStoreShape,
+  type SessionRegistryState,
+} from "@/sessions/session-runtime.ts";
 import type { ActiveRun } from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import type { PersistedChannelSession } from "@/state/persistence.ts";
 import { sessionPathsFromRoot } from "@/state/paths.ts";
+import { Logger } from "@/util/logging.ts";
 import { makeMessage, makeSilentLogger } from "../support/fixtures.ts";
 import { failTest } from "../support/errors.ts";
 import {
@@ -56,34 +67,31 @@ const makeState = (): SessionRegistryState => ({
   activeRunsBySessionId: new Map(),
 });
 
-const logger = makeSilentLogger();
-
 const runEffect = runTestEffect;
 
 class SettingsUnavailable extends Data.TaggedError("SettingsUnavailable")<{
   readonly message: string;
 }> {}
 
-const appendClosed = (closed: Ref.Ref<string[]>, sessionId: string) => {
-  Effect.runSync(appendRef(closed, sessionId));
-};
-
-const makeHarness = async (options?: {
-  createOpencodeSession?: (input: {
-    workdir: string;
-    title: string;
-    systemPromptAppend?: string;
-  }) => Effect.Effect<SessionHandle, unknown>;
-  isSessionHealthy?: (session: SessionHandle) => Effect.Effect<boolean>;
-  isSessionBusy?: (sessionId: string) => Effect.Effect<boolean>;
+type CreateSessionInput = { workdir: string; title: string; systemPromptAppend?: string };
+type HarnessOptions = {
+  createOpencodeSession?: (input: CreateSessionInput) => Effect.Effect<SessionHandle, unknown>;
+  isSessionHealthy?: (session: SessionHandle) => Effect.Effect<boolean, unknown>;
+  isSessionBusy?: (sessionId: string) => Effect.Effect<boolean, unknown>;
   getPersistedChannelSettings?: (
     channelId: string,
   ) => Effect.Effect<PersistedChannelSettings | null, unknown>;
-}) => {
+};
+const succeed = <A>(deferred: Deferred.Deferred<A, never>, value: A) =>
+  Deferred.succeed(deferred, value).pipe(Effect.ignore);
+const makeGate = async () => ({ started: await makeDeferred(), release: await makeDeferred() });
+
+const appendClosed = (closed: Ref.Ref<string[]>, sessionId: string) =>
+  Effect.runSync(appendRef(closed, sessionId));
+
+const makeHarness = async (options?: HarnessOptions) => {
   const stateRef = await makeRef(makeState());
-  const created = await makeRef<
-    Array<{ workdir: string; title: string; systemPromptAppend?: string }>
-  >([]);
+  const created = await makeRef<CreateSessionInput[]>([]);
   const started = await makeRef<string[]>([]);
   const removedRoots = await makeRef<string[]>([]);
   const closed = await makeRef<string[]>([]);
@@ -103,11 +111,7 @@ const makeHarness = async (options?: {
     workdir,
     title,
     systemPromptAppend,
-  }: {
-    workdir: string;
-    title: string;
-    systemPromptAppend?: string;
-  }) =>
+  }: CreateSessionInput) =>
     Effect.gen(function* () {
       yield* appendRef(created, { workdir, title, systemPromptAppend });
       const index = yield* Ref.modify(nextSession, (current): readonly [number, number] => {
@@ -118,53 +122,70 @@ const makeHarness = async (options?: {
         appendClosed(closed, sessionId),
       );
     });
-
-  const lifecycle = createSessionRegistry({
-    stateRef,
-    createOpencodeSession: (workdir, title, systemPromptAppend) =>
-      (options?.createOpencodeSession ?? defaultCreateOpencodeSession)({
-        workdir,
-        title,
-        systemPromptAppend,
-      }),
-    attachOpencodeSession: (workdir, sessionId) =>
-      Effect.succeed(
-        makeHandle(sessionId, workdir, (closedSessionId) => appendClosed(closed, closedSessionId)),
-      ),
-    getPersistedSession: (channelId) =>
+  const sessionStore = unsafeStub<SessionStoreShape>({
+    getPersistedSession: (channelId: string) =>
       Ref.get(persisted).pipe(Effect.map((current) => current.get(channelId) ?? null)),
-    upsertPersistedSession: (session) =>
+    savePersistedSession: (session: PersistedChannelSession) =>
       updateMapRef(persisted, (current) => current.set(session.channelId, session)),
-    getPersistedChannelSettings:
-      options?.getPersistedChannelSettings ??
-      ((channelId) =>
-        Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(channelId) ?? null))),
-    touchPersistedSession: (channelId, lastActivityAt) =>
+    loadChannelSettings: (channelId: string) =>
+      (
+        options?.getPersistedChannelSettings ??
+        ((id: string) =>
+          Ref.get(persistedSettings).pipe(Effect.map((current) => current.get(id) ?? null)))
+      )(channelId).pipe(
+        Effect.map((settings) => ({
+          showThinking: settings?.showThinking ?? true,
+          showCompactionSummaries: settings?.showCompactionSummaries ?? true,
+        })),
+      ),
+    touchPersistedSession: (channelId: string, lastActivityAt: number) =>
       updateMapRef(persisted, (current) => {
         const session = current.get(channelId);
         if (session) {
           current.set(channelId, { ...session, lastActivityAt });
         }
       }),
-    deletePersistedSession: (channelId) =>
+    deletePersistedSession: (channelId: string) =>
       updateMapRef(persisted, (current) => current.delete(channelId)),
-    isSessionHealthy: options?.isSessionHealthy ?? (() => Effect.succeed(true)),
-    startWorker: (session) => appendRef(started, session.opencode.sessionId),
-    logger,
-    sessionInstructions: "",
-    triggerPhrase: "hey opencode",
-    channelSettingsDefaults: {
-      showThinking: true,
-      showCompactionSummaries: true,
-    },
-    isSessionBusy: (session) =>
-      options?.isSessionBusy
-        ? options.isSessionBusy(session.opencode.sessionId)
-        : Effect.succeed(false),
-    idleTimeoutMs: 30 * 60 * 1_000,
     createSessionPaths,
-    deleteSessionRoot: (rootDir) => appendRef(removedRoots, rootDir),
+    deleteSessionRoot: (rootDir: string) => appendRef(removedRoots, rootDir),
   });
+
+  const opencodeService = unsafeStub<OpencodeServiceShape>({
+    createSession: (workdir: string, title: string, systemPromptAppend?: string) =>
+      (options?.createOpencodeSession ?? defaultCreateOpencodeSession)({
+        workdir,
+        title,
+        systemPromptAppend,
+      }),
+    attachSession: (workdir: string, sessionId: string) =>
+      Effect.succeed(
+        makeHandle(sessionId, workdir, (closedSessionId) => appendClosed(closed, closedSessionId)),
+      ),
+    isHealthy: options?.isSessionHealthy ?? (() => Effect.succeed(true)),
+  });
+
+  const lifecycle = await runTestEffect(
+    createSessionRegistry(
+      createSessionIndex(stateRef),
+      (session) => appendRef(started, session.opencode.sessionId),
+      "",
+      "hey opencode",
+      30 * 60 * 1_000,
+      (session) =>
+        options?.isSessionBusy
+          ? options.isSessionBusy(session.opencode.sessionId)
+          : Effect.succeed(false),
+    ).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.succeed(SessionStore, sessionStore),
+          Layer.succeed(OpencodeService, opencodeService),
+          Layer.succeed(Logger, makeSilentLogger()),
+        ),
+      ),
+    ),
+  );
 
   return {
     lifecycle,
@@ -179,8 +200,7 @@ const makeHarness = async (options?: {
 
 describe("createSessionRegistry", () => {
   test("single-flights concurrent cold starts for the same channel", async () => {
-    const createStarted = await makeDeferred();
-    const releaseCreate = await makeDeferred();
+    const { started: createStarted, release: releaseCreate } = await makeGate();
     const created = await makeRef(0);
     const closed = await makeRef<string[]>([]);
 
@@ -191,7 +211,7 @@ describe("createSessionRegistry", () => {
             const next = current + 1;
             return [next, next];
           });
-          yield* Deferred.succeed(createStarted, undefined).pipe(Effect.ignore);
+          yield* succeed(createStarted, undefined);
           yield* Deferred.await(releaseCreate);
           return makeHandle(`session-${count}`, workdir, (sessionId) => {
             Effect.runSync(appendRef(closed, sessionId));
@@ -203,7 +223,7 @@ describe("createSessionRegistry", () => {
     const [first, second] = await runConcurrent(
       lifecycle.createOrGetSession(message),
       Deferred.await(createStarted).pipe(
-        Effect.andThen(Deferred.succeed(releaseCreate, undefined).pipe(Effect.ignore)),
+        Effect.andThen(succeed(releaseCreate, undefined)),
         Effect.andThen(lifecycle.createOrGetSession(message)),
       ),
     );
@@ -214,8 +234,7 @@ describe("createSessionRegistry", () => {
   });
 
   test("clears the gate after a failed cold start so a waiting retry can succeed", async () => {
-    const createStarted = await makeDeferred();
-    const releaseCreate = await makeDeferred();
+    const { started: createStarted, release: releaseCreate } = await makeGate();
     const createCount = await makeRef(0);
     const { lifecycle, started, removedRoots } = await makeHarness({
       createOpencodeSession: ({ workdir }) =>
@@ -224,7 +243,7 @@ describe("createSessionRegistry", () => {
             const next = current + 1;
             return [next, next];
           });
-          yield* Deferred.succeed(createStarted, undefined).pipe(Effect.ignore);
+          yield* succeed(createStarted, undefined);
           yield* Deferred.await(releaseCreate);
           if (count === 1) {
             return yield* failTest("create failed");
@@ -237,7 +256,7 @@ describe("createSessionRegistry", () => {
     const exits = await runConcurrent(
       Effect.exit(lifecycle.createOrGetSession(message)),
       Deferred.await(createStarted).pipe(
-        Effect.andThen(Deferred.succeed(releaseCreate, undefined).pipe(Effect.ignore)),
+        Effect.andThen(succeed(releaseCreate, undefined)),
         Effect.andThen(Effect.exit(lifecycle.createOrGetSession(message))),
       ),
     );
@@ -283,8 +302,7 @@ describe("createSessionRegistry", () => {
   });
 
   test("single-flights recovery and rekeys session indexes", async () => {
-    const recreateStarted = await makeDeferred();
-    const releaseRecreate = await makeDeferred();
+    const { started: recreateStarted, release: releaseRecreate } = await makeGate();
     const createCount = await makeRef(0);
     const closed = await makeRef<string[]>([]);
 
@@ -296,7 +314,7 @@ describe("createSessionRegistry", () => {
             return [next, next];
           });
           if (count === 2) {
-            yield* Deferred.succeed(recreateStarted, undefined).pipe(Effect.ignore);
+            yield* succeed(recreateStarted, undefined);
             yield* Deferred.await(releaseRecreate);
           }
           return makeHandle(`session-${count}`, workdir, (sessionId) => {
@@ -314,7 +332,7 @@ describe("createSessionRegistry", () => {
     const [first, second] = await runConcurrent(
       lifecycle.ensureSessionHealth(session, message, "recover", false),
       Deferred.await(recreateStarted).pipe(
-        Effect.andThen(Deferred.succeed(releaseRecreate, undefined).pipe(Effect.ignore)),
+        Effect.andThen(succeed(releaseRecreate, undefined)),
         Effect.andThen(lifecycle.ensureSessionHealth(session, message, "recover", false)),
       ),
     );
@@ -360,12 +378,11 @@ describe("createSessionRegistry", () => {
   });
 
   test("invalidates a session that was still being created", async () => {
-    const createStarted = await makeDeferred();
-    const releaseCreate = await makeDeferred();
+    const { started: createStarted, release: releaseCreate } = await makeGate();
     const { lifecycle, closed, persisted } = await makeHarness({
       createOpencodeSession: ({ workdir }) =>
         Effect.gen(function* () {
-          yield* Deferred.succeed(createStarted, undefined).pipe(Effect.ignore);
+          yield* succeed(createStarted, undefined);
           yield* Deferred.await(releaseCreate);
           return makeHandle("session-race", workdir, (sessionId) => {
             Effect.runSync(appendRef(closed, sessionId));
@@ -377,7 +394,7 @@ describe("createSessionRegistry", () => {
     const [created, invalidated] = await runConcurrent(
       lifecycle.createOrGetSession(message),
       Deferred.await(createStarted).pipe(
-        Effect.andThen(Deferred.succeed(releaseCreate, undefined).pipe(Effect.ignore)),
+        Effect.andThen(succeed(releaseCreate, undefined)),
         Effect.andThen(lifecycle.invalidateSession("channel-race", "user requested /new-session")),
       ),
     );

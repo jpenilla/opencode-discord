@@ -41,7 +41,7 @@ export const ChannelRuntimeLayer = Layer.effect(
       Layer.succeed(SessionRuntime, sessionRuntime),
       Layer.succeed(Logger, logger),
     );
-    const commandHandler = createCommandHandler({ commandLayer });
+    const commandHandler = createCommandHandler(commandLayer);
     const unlessShutdown = (
       effect: Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path>,
     ) =>

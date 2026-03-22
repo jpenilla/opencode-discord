@@ -1,17 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
 import type { Interaction, Message, MessageCreateOptions, MessageEditOptions } from "discord.js";
-import { Deferred, Effect, Ref } from "effect";
+import { Deferred, Effect, Layer, Ref } from "effect";
 
+import { OpencodeService, type OpencodeServiceShape } from "@/opencode/service.ts";
 import {
   applyQuestionSignals,
   questionTypingAction,
   runQuestionTypingAction,
   type QuestionWorkflowSignal,
 } from "@/sessions/question/question-run-state.ts";
-import { makeQuestionRuntime } from "@/sessions/question/question-runtime.ts";
+import {
+  makeQuestionRuntime,
+  QuestionSessionLookup,
+} from "@/sessions/question/question-runtime.ts";
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
-import { formatError } from "@/util/errors.ts";
+import { Logger } from "@/util/logging.ts";
 import { makePostedMessage, makeRecordedComponentInteraction } from "../../support/discord.ts";
 import { makeMessage, makeSilentLogger } from "../../support/fixtures.ts";
 import { failTest } from "../../support/errors.ts";
@@ -34,21 +38,22 @@ const makeRequest = (id = "req-1") =>
 const staleStateMessage =
   "Another user updated this question prompt before your action was applied. Review the latest card and try again.";
 
-const push = <A>(values: A[], value: A) => {
-  values.push(value);
-  return value;
-};
-
-const makeHarness = async (options?: {
+const push = <A>(values: A[], value: A) => (values.push(value), value);
+type HarnessOptions = {
   postQuestionResult?: "success" | "failure";
   rejectResult?: "success" | "failure";
   blockQuestionPost?: boolean;
   replyTargetId?: string;
-}) => {
+};
+type Harness = Awaited<ReturnType<typeof makeHarness>>;
+type SessionContext = { session: ChannelSession; activeRun: ActiveRun };
+type InteractionReply = { content?: string | null };
+
+const makeHarness = async (options?: HarnessOptions) => {
   const postedPayloads: MessageCreateOptions[] = [];
   const editedPayloads: MessageEditOptions[] = [];
   const interactionUpdates: unknown[] = [];
-  const interactionReplies: Array<{ content?: string | null }> = [];
+  const interactionReplies: InteractionReply[] = [];
   const sentQuestionUiFailures: string[] = [];
   const questionReplyTargetIds: string[] = [];
   const questionUiFailureTargetIds: string[] = [];
@@ -100,15 +105,9 @@ const makeHarness = async (options?: {
       requestMessages: [replyTargetMessage],
     },
     typing: {
-      pause: async () => {
-        typingPauseCount += 1;
-      },
-      resume: () => {
-        typingResumeCount += 1;
-      },
-      stop: async () => {
-        typingStopCount += 1;
-      },
+      pause: async () => void (typingPauseCount += 1),
+      resume: () => void (typingResumeCount += 1),
+      stop: async () => void (typingStopCount += 1),
     },
   });
 
@@ -117,38 +116,46 @@ const makeHarness = async (options?: {
     activeRun,
   });
   const sessionContextRef = await runTestEffect(
-    Ref.make<{ session: ChannelSession; activeRun: ActiveRun } | null>({ session, activeRun }),
+    Ref.make<SessionContext | null>({ session, activeRun }),
   );
 
   const rawRuntime = await runTestEffect(
-    makeQuestionRuntime({
-      getSessionContext: () => Ref.get(sessionContextRef),
-      replyToQuestion: (_opencode, requestId) =>
-        Effect.sync(() => {
-          replyCalls.push(requestId);
-        }),
-      rejectQuestion: (_opencode, requestId) =>
-        Effect.sync(() => {
-          rejectCalls.push(requestId);
-        }).pipe(
-          Effect.flatMap(() =>
-            options?.rejectResult === "failure" ? failTest("reject failed") : Effect.void,
+    makeQuestionRuntime((message, error) =>
+      Effect.sync(() => {
+        questionUiFailureTargetIds.push(message.id);
+        sentQuestionUiFailures.push(String(error));
+      }),
+    ).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.succeed(QuestionSessionLookup, {
+            getSessionContext: () => Ref.get(sessionContextRef),
+          }),
+          Layer.succeed(
+            OpencodeService,
+            unsafeStub<OpencodeServiceShape>({
+              replyToQuestion: (_opencode: unknown, requestId: string) =>
+                Effect.sync(() => {
+                  replyCalls.push(requestId);
+                }),
+              rejectQuestion: (_opencode: unknown, requestId: string) =>
+                Effect.sync(() => {
+                  rejectCalls.push(requestId);
+                }).pipe(
+                  Effect.flatMap(() =>
+                    options?.rejectResult === "failure" ? failTest("reject failed") : Effect.void,
+                  ),
+                ),
+            }),
           ),
+          Layer.succeed(Logger, makeSilentLogger()),
         ),
-      sendQuestionUiFailure: (message, error) =>
-        Effect.sync(() => {
-          questionUiFailureTargetIds.push(message.id);
-          sentQuestionUiFailures.push(String(error));
-        }),
-      logger: makeSilentLogger(),
-      formatError,
-    }),
+      ),
+    ),
   );
 
   const recordInteractionReply = (payload: unknown) =>
-    Promise.resolve(push(interactionReplies, payload as { content?: string | null })).then(
-      () => undefined,
-    );
+    Promise.resolve(push(interactionReplies, payload as InteractionReply)).then(() => undefined);
   const recordInteractionUpdate = (payload: unknown) =>
     Promise.resolve(push(interactionUpdates, payload)).then(() => undefined);
 
@@ -189,6 +196,7 @@ const makeHarness = async (options?: {
       rawRuntime.terminateSession(sessionId).pipe(Effect.tap(applySignalsAndTyping)),
     shutdown: () => rawRuntime.shutdownSession(session.opencode.sessionId),
   };
+  const interactionBase = { onReply: recordInteractionReply, onUpdate: recordInteractionUpdate };
 
   return {
     runtime,
@@ -211,8 +219,7 @@ const makeHarness = async (options?: {
     makeButtonInteraction: (input: { customId: string; userId?: string; messageId?: string }) =>
       makeRecordedComponentInteraction("button", {
         ...input,
-        onReply: recordInteractionReply,
-        onUpdate: recordInteractionUpdate,
+        ...interactionBase,
         update: () => Promise.resolve(questionMessage),
         followUp: () => Promise.resolve(questionMessage),
       }) as Interaction,
@@ -224,8 +231,7 @@ const makeHarness = async (options?: {
     }) =>
       makeRecordedComponentInteraction("select", {
         ...input,
-        onReply: recordInteractionReply,
-        onUpdate: recordInteractionUpdate,
+        ...interactionBase,
         update: () => Promise.resolve(questionMessage),
       }) as Interaction,
     makeModalInteraction: (input: { customId: string; value: string; userId?: string }) =>
@@ -239,8 +245,6 @@ const makeHarness = async (options?: {
 };
 
 describe("makeQuestionRuntime", () => {
-  type Harness = Awaited<ReturnType<typeof makeHarness>>;
-
   const ask = (harness: Harness, request = harness.request) =>
     Effect.runPromise(
       harness.runtime.routeEvent({
@@ -250,11 +254,8 @@ describe("makeQuestionRuntime", () => {
       }),
     );
 
-  const askHarness = async (options?: Parameters<typeof makeHarness>[0]) => {
-    const harness = await makeHarness(options);
-    await ask(harness);
-    return harness;
-  };
+  const askHarness = async (options?: Parameters<typeof makeHarness>[0]) =>
+    makeHarness(options).then(async (harness) => (await ask(harness), harness));
   const interact = (harness: Harness, interaction: Interaction) =>
     Effect.runPromise(harness.runtime.handleInteraction(interaction));
   const press = (harness: Harness, suffix: string, userId?: string) =>

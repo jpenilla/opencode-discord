@@ -1,41 +1,28 @@
 import { type ChatInputCommandInteraction } from "discord.js";
-import { Effect, FileSystem, Layer, Path } from "effect";
+import { Effect, Layer } from "effect";
 
 import { getGuildCommand, type GuildCommandDependencies } from "@/channels/commands.ts";
 import { CommandContext, makeCommandContextLayer } from "@/discord/command-context.ts";
-export type CommandHandler = {
-  handleInteraction: (
-    interaction: ChatInputCommandInteraction,
-  ) => Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path>;
-};
 
-type CommandHandlerDeps = {
-  commandLayer: Layer.Layer<GuildCommandDependencies>;
-};
-
-const UNHANDLED_COMMAND_ERROR_MESSAGE =
-  "An unexpected error occurred while processing this command.";
-
-export const createCommandHandler = (deps: CommandHandlerDeps): CommandHandler => ({
-  handleInteraction: (interaction) =>
+export const createCommandHandler = (commandLayer: Layer.Layer<GuildCommandDependencies>) => ({
+  handleInteraction: (interaction: ChatInputCommandInteraction) =>
     Effect.gen(function* () {
       const command = getGuildCommand(interaction.commandName);
       if (!command) {
         return;
       }
 
-      const commandContextLayer = makeCommandContextLayer(interaction);
-      const commandEffect: Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path> =
-        command.execute.pipe(
-          Effect.catchCause((cause) =>
-            Effect.gen(function* () {
-              const commandContext = yield* CommandContext;
-              yield* commandContext.completeIfAcked(UNHANDLED_COMMAND_ERROR_MESSAGE);
-              return yield* Effect.failCause(cause);
-            }),
-          ),
-          Effect.provide(Layer.merge(commandContextLayer, deps.commandLayer)),
-        );
-      yield* commandEffect;
+      yield* command.execute.pipe(
+        Effect.catchCause((cause) =>
+          Effect.gen(function* () {
+            const commandContext = yield* CommandContext;
+            yield* commandContext.completeIfAcked(
+              "An unexpected error occurred while processing this command.",
+            );
+            return yield* Effect.failCause(cause);
+          }),
+        ),
+        Effect.provide(Layer.merge(makeCommandContextLayer(interaction), commandLayer)),
+      );
     }).pipe(Effect.asVoid),
 });

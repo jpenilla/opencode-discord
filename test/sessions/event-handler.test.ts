@@ -21,19 +21,17 @@ import { getRef, makeSessionHandle, makeSilentLogger } from "../support/fixtures
 import { failTest } from "../support/errors.ts";
 import { appendRef, clearQueue, makeRef, takeAll } from "../support/runtime.ts";
 import { makeTestSessionState } from "../support/session.ts";
+import { unsafeStub } from "../support/stub.ts";
 
-const beginPendingRun = async () => {
-  const state = await makeSession(true);
-  return {
+type SessionContext = { session: ChannelSession; activeRun: ActiveRun | null };
+
+const beginPendingRun = async () =>
+  makeSession(true).then(async (state) => ({
     ...state,
     completion: await Effect.runPromise(beginPendingPrompt(state.promptState)),
-  };
-};
+  }));
 
-const finalReply = (messageId: string): PromptResult => ({
-  messageId,
-  transcript: "final reply",
-});
+const finalReply = (messageId: string): PromptResult => ({ messageId, transcript: "final reply" });
 
 const readFinalReply = (_session: SessionHandle, messageId: string) =>
   Effect.succeed(finalReply(messageId));
@@ -63,28 +61,19 @@ const awaitCompletion = <A, E>(completion: Deferred.Deferred<A, E>) =>
 const expectFinalReply = async (
   completion: Deferred.Deferred<PromptResult, unknown>,
   messageId = "assistant-1",
-) => {
-  expect(await awaitCompletion(completion)).toEqual(finalReply(messageId));
-};
+) => expect(await awaitCompletion(completion)).toEqual(finalReply(messageId));
 const expectNoProgress = async (
   progressQueue: { takeAll?: never } & Parameters<typeof clearQueue>[0],
-) => {
-  expect(await clearQueue(progressQueue)).toEqual([]);
-};
-const expectRunningToolProgress = async (progressQueue: Parameters<typeof takeAll>[0]) => {
+) => expect(await clearQueue(progressQueue)).toEqual([]);
+const expectRunningToolProgress = async (progressQueue: Parameters<typeof takeAll>[0]) =>
   expect(await takeAll(progressQueue)).toEqual([
-    {
-      type: "tool-updated",
-      part: makeToolPart("running"),
-    },
+    { type: "tool-updated", part: makeToolPart("running") },
   ]);
-};
-const expectPending = async <A, E>(completion: Deferred.Deferred<A, E>) => {
+const expectPending = async <A, E>(completion: Deferred.Deferred<A, E>) =>
   expect(Option.isNone(await Effect.runPromise(Deferred.poll(completion)))).toBe(true);
-};
 
-const makeSession = async (withActiveRun: boolean, showCompactionSummaries = true) => {
-  return makeTestSessionState({
+const makeSession = async (withActiveRun: boolean, showCompactionSummaries = true) =>
+  makeTestSessionState({
     withActiveRun,
     session: {
       opencode: makeSessionHandle(),
@@ -94,43 +83,33 @@ const makeSession = async (withActiveRun: boolean, showCompactionSummaries = tru
       },
     },
   });
-};
 
-const noopIdleCompactionWorkflow = {
-  emitSummary: () => Effect.void,
+const noopIdleCompactionWorkflow = unsafeStub<IdleCompactionWorkflowShape>({
   handleCompacted: () => Effect.void,
-};
+  emitSummary: () => Effect.void,
+});
 
 const unexpectedPromptResultLoad = () => failTest("unexpected prompt result load");
 const makeSummaryHarness = async (
   transcriptFor: (messageId: string) => string = () => "summary text",
-) => {
-  const readPromptCalls = await makeRef<string[]>([]);
-  const sentSummaries = await makeRef<string[]>([]);
-
-  return {
-    readPromptCalls,
-    sentSummaries,
-    readPromptResult: (_session: SessionHandle, messageId: string) =>
-      appendRef(readPromptCalls, messageId).pipe(
-        Effect.as({
-          messageId,
-          transcript: transcriptFor(messageId),
-        }),
-      ),
-    sendCompactionSummary: (_session: ChannelSession, text: string) =>
-      appendRef(sentSummaries, text).pipe(Effect.asVoid),
-  };
-};
+) =>
+  Promise.all([makeRef<string[]>([]), makeRef<string[]>([])]).then(
+    ([readPromptCalls, sentSummaries]) => ({
+      readPromptCalls,
+      sentSummaries,
+      readPromptResult: (_session: SessionHandle, messageId: string) =>
+        appendRef(readPromptCalls, messageId).pipe(
+          Effect.as({ messageId, transcript: transcriptFor(messageId) }),
+        ),
+      sendCompactionSummary: (_session: ChannelSession, text: string) =>
+        appendRef(sentSummaries, text).pipe(Effect.asVoid),
+    }),
+  );
 const beginPendingRuntime = async (input?: {
   idleCompactionWorkflow?: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">;
-  readPromptResult?: (
-    session: SessionHandle,
-    messageId: string,
-  ) => Effect.Effect<PromptResult, unknown>;
-}) => {
-  const pending = await beginPendingRun();
-  return {
+  readPromptResult?: Parameters<typeof createEventHandler>[3];
+}) =>
+  beginPendingRun().then((pending) => ({
     ...pending,
     runtime: makeRuntime({
       session: pending.session,
@@ -138,44 +117,36 @@ const beginPendingRuntime = async (input?: {
       idleCompactionWorkflow: input?.idleCompactionWorkflow,
       readPromptResult: input?.readPromptResult,
     }),
-  };
-};
+  }));
 const beginDefaultPendingRuntime = () => beginPendingRuntime({ readPromptResult: readFinalReply });
 
 const makeRuntime = (input: {
   session?: ChannelSession | null;
   activeRun?: ActiveRun | null;
-  getSessionContext?: (
-    sessionId: string,
-  ) => Effect.Effect<{ session: ChannelSession; activeRun: ActiveRun | null } | null>;
-  handleQuestionEvent?: (event: unknown) => Effect.Effect<void>;
+  getSessionContext?: Parameters<typeof createEventHandler>[0];
+  handleQuestionEvent?: Parameters<typeof createEventHandler>[1];
   idleCompactionWorkflow?: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">;
-  readPromptResult?: (
-    session: SessionHandle,
-    messageId: string,
-  ) => Effect.Effect<PromptResult, unknown>;
+  readPromptResult?: Parameters<typeof createEventHandler>[3];
 }) =>
-  createEventHandler({
-    getSessionContext:
-      input.getSessionContext ??
+  createEventHandler(
+    input.getSessionContext ??
       ((sessionId) =>
         Effect.succeed(
           input.session && sessionId === input.session.opencode.sessionId
             ? { session: input.session, activeRun: input.activeRun ?? null }
             : null,
         )),
-    handleQuestionEvent: input.handleQuestionEvent ?? (() => Effect.void),
-    idleCompactionWorkflow: input.idleCompactionWorkflow ?? noopIdleCompactionWorkflow,
-    readPromptResult: input.readPromptResult ?? unexpectedPromptResultLoad,
-    logger: makeSilentLogger(),
-    formatError: (error) => String(error),
-  });
+    input.handleQuestionEvent ?? (() => Effect.void),
+    {
+      ...noopIdleCompactionWorkflow,
+      ...input.idleCompactionWorkflow,
+    },
+    input.readPromptResult ?? unexpectedPromptResultLoad,
+    makeSilentLogger(),
+  );
 
 const makeSummaryWorkflow = (deps: {
-  readPromptResult: (
-    _session: SessionHandle,
-    messageId: string,
-  ) => Effect.Effect<PromptResult, unknown>;
+  readPromptResult: Parameters<typeof createEventHandler>[3];
   sendCompactionSummary: (_session: ChannelSession, text: string) => Effect.Effect<void, unknown>;
 }): Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted"> => ({
   ...noopIdleCompactionWorkflow,
@@ -212,11 +183,7 @@ describe("createEventHandler", () => {
     await Effect.runPromise(runtime.handleEvent(makeQuestionAskedEvent()));
 
     expect(await getRef(questionEvents)).toEqual([
-      {
-        type: "asked",
-        sessionId: "session-1",
-        request: makeQuestionAskedEvent().properties,
-      },
+      { type: "asked", sessionId: "session-1", request: makeQuestionAskedEvent().properties },
     ]);
   });
 
@@ -233,17 +200,8 @@ describe("createEventHandler", () => {
     await Effect.runPromise(runtime.handleEvent(makeQuestionRejectedEvent()));
 
     expect(await getRef(questionEvents)).toEqual([
-      {
-        type: "replied",
-        sessionId: "session-1",
-        requestId: "req-1",
-        answers: [["Yes"]],
-      },
-      {
-        type: "rejected",
-        sessionId: "session-1",
-        requestId: "req-1",
-      },
+      { type: "replied", sessionId: "session-1", requestId: "req-1", answers: [["Yes"]] },
+      { type: "rejected", sessionId: "session-1", requestId: "req-1" },
     ]);
   });
 
@@ -255,10 +213,7 @@ describe("createEventHandler", () => {
     await Effect.runPromise(runtime.handleEvent(makeSessionStatusEvent()));
 
     expect(await takeAll(progressQueue)).toEqual([
-      {
-        type: "session-status",
-        status: { type: "busy" },
-      },
+      { type: "session-status", status: { type: "busy" } },
     ]);
   });
 
