@@ -1,5 +1,16 @@
 import type { Message, SendableChannels } from "discord.js";
-import { Deferred, Effect, Fiber, FileSystem, Option, Path, Queue, Ref, Result } from "effect";
+import {
+  Deferred,
+  Effect,
+  Fiber,
+  FileSystem,
+  Option,
+  Path,
+  Queue,
+  Ref,
+  Result,
+  ServiceMap,
+} from "effect";
 
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { InfoCards } from "@/discord/info-card.ts";
@@ -28,6 +39,22 @@ import { formatError } from "@/util/errors.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
 
 type FsEnv = FileSystem.FileSystem | Path.Path;
+type SetActiveRun = (
+  session: ChannelSession,
+  activeRun: ActiveRun | null,
+) => Effect.Effect<void, unknown>;
+type RecoverSession = (
+  session: ChannelSession,
+  responseMessage: Message,
+) => Effect.Effect<void, unknown, FsEnv>;
+
+export class RunSessionLifecycle extends ServiceMap.Service<
+  RunSessionLifecycle,
+  {
+    setActiveRun: SetActiveRun;
+    recoverSession: RecoverSession;
+  }
+>()("RunSessionLifecycle") {}
 
 const finishProgressWorker = (
   session: ChannelSession,
@@ -83,15 +110,9 @@ export const executeRunBatch =
       queue: Queue.Queue<RunProgressEvent>,
     ) => Effect.Effect<unknown, unknown>,
     startTyping: (message: Message) => TypingLoop,
-    setActiveRun: (
-      session: ChannelSession,
-      activeRun: ActiveRun | null,
-    ) => Effect.Effect<void, unknown>,
+    setActiveRun: SetActiveRun,
     terminateQuestions: (sessionId: string) => Effect.Effect<void, unknown>,
-    recoverSession: (
-      session: ChannelSession,
-      responseMessage: Message,
-    ) => Effect.Effect<void, unknown, FsEnv>,
+    recoverSession: RecoverSession,
     sendInterrupted: (message: Message, source: RunInterruptSource) => Effect.Effect<void, unknown>,
     sendFinal: (message: Message, text: string) => Effect.Effect<void, unknown>,
     sendRunFailure: (message: Message, error: unknown) => Effect.Effect<void, unknown>,
@@ -229,22 +250,14 @@ export const executeRunBatch =
       }
     });
 
-export const makeRunOrchestrator = (input: {
-  setActiveRun: (
-    session: ChannelSession,
-    activeRun: ActiveRun | null,
-  ) => Effect.Effect<void, unknown>;
-  recoverSession: (
-    session: ChannelSession,
-    responseMessage: Message,
-  ) => Effect.Effect<void, unknown, FsEnv>;
-}) =>
+export const makeRunOrchestrator = () =>
   Effect.gen(function* () {
     const idleCompaction = yield* IdleCompactionWorkflow;
     const infoCards = yield* InfoCards;
     const logger = yield* Logger;
     const opencode = yield* OpencodeService;
     const questionRuntime = yield* QuestionRuntime;
+    const runSessionLifecycle = yield* RunSessionLifecycle;
 
     const replyWithError = (title: string) => (message: Message, error: unknown) =>
       Effect.promise(() =>
@@ -268,9 +281,9 @@ export const makeRunOrchestrator = (input: {
         }),
       runProgressWorker,
       (message) => startTypingLoop(message.channel),
-      input.setActiveRun,
+      runSessionLifecycle.setActiveRun,
       questionRuntime.terminateSession,
-      input.recoverSession,
+      runSessionLifecycle.recoverSession,
       (message, source) =>
         infoCards
           .send(

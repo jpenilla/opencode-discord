@@ -81,20 +81,6 @@ const makePromptCompletion = (
   promptContext: makePromptContext(kind, replyTargetMessage),
   result: { messageId, transcript } satisfies PromptResult,
 });
-const makeResponseRecordingRuntime = async (
-  promptCompletions: PromptCompletion[],
-  record: (message: Message, text: string) => string,
-) => {
-  const finalResponseMessageIds = await makeRef<string[]>([]);
-  return {
-    finalResponseMessageIds,
-    runtime: {
-      ...(await makeRuntime({ promptCompletions })).runtime,
-      sendFinalResponse: (message: Message, text: string) =>
-        appendRef(finalResponseMessageIds, record(message, text)),
-    } as const,
-  };
-};
 
 const makeRuntime = async (options?: RuntimeOptions) => {
   const calls = await makeRef<string[]>([]);
@@ -325,14 +311,20 @@ describe("executeRunBatch", () => {
     const followUpMessageOne = makeRunMessage("follow-up-message-1");
     const followUpMessageTwo = makeRunMessage("follow-up-message-2");
     const { session, initialRequests } = makeRunBatchInput(originMessage);
-    const { finalResponseMessageIds, runtime } = await makeResponseRecordingRuntime(
-      [
-        makePromptCompletion("initial", originMessage, "first reply", "msg-1"),
-        makePromptCompletion("follow-up", followUpMessageOne, "second reply", "msg-2"),
-        makePromptCompletion("follow-up", followUpMessageTwo, "third reply", "msg-3"),
-      ],
-      (message, text) => `${message.id}:${text}`,
-    );
+    const finalResponseMessageIds = await makeRef<string[]>([]);
+    const runtime = {
+      ...(
+        await makeRuntime({
+          promptCompletions: [
+            makePromptCompletion("initial", originMessage, "first reply", "msg-1"),
+            makePromptCompletion("follow-up", followUpMessageOne, "second reply", "msg-2"),
+            makePromptCompletion("follow-up", followUpMessageTwo, "third reply", "msg-3"),
+          ],
+        })
+      ).runtime,
+      sendFinalResponse: (message: Message, text: string) =>
+        appendRef(finalResponseMessageIds, `${message.id}:${text}`),
+    } as const;
 
     await runBatch(runtime, session, initialRequests);
 

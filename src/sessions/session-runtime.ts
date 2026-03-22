@@ -41,7 +41,7 @@ import {
   type QuestionRuntimeShape,
 } from "@/sessions/question/question-runtime.ts";
 import { enqueueRunRequest, type RunRequestDestination } from "@/sessions/request-routing.ts";
-import { makeRunOrchestrator } from "@/sessions/run/run-executor.ts";
+import { makeRunOrchestrator, RunSessionLifecycle } from "@/sessions/run/run-executor.ts";
 import { takeQueuedRunBatch } from "@/sessions/run/run-batch.ts";
 import {
   buildSessionCreateSpec,
@@ -843,6 +843,16 @@ export const SessionRuntimeLayer = Layer.unwrap(
       serviceLayer,
       Layer.succeed(QuestionRuntime, questions),
       Layer.succeed(IdleCompactionWorkflow, idleCompaction),
+      Layer.succeed(RunSessionLifecycle, {
+        setActiveRun,
+        recoverSession: (session: ChannelSession, responseMessage: Message) =>
+          ensureSessionHealth(
+            session,
+            responseMessage,
+            "run failed with unhealthy opencode session",
+            false,
+          ),
+      }),
     );
 
     const eventHandler = yield* makeSessionEventHandler.pipe(
@@ -871,16 +881,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
       Effect.forkScoped,
     );
 
-    const runBatch = yield* makeRunOrchestrator({
-      setActiveRun,
-      recoverSession: (session, responseMessage) =>
-        ensureSessionHealth(
-          session,
-          responseMessage,
-          "run failed with unhealthy opencode session",
-          false,
-        ),
-    }).pipe(Effect.provide(runtimeServiceLayer));
+    const runBatch = yield* makeRunOrchestrator().pipe(Effect.provide(runtimeServiceLayer));
 
     const worker = (session: ChannelSession): Effect.Effect<never, never, FsEnv> =>
       Effect.forever(
