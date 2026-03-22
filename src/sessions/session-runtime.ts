@@ -15,7 +15,7 @@ import {
   type IdleCompactionWorkflowStartResult,
   makeIdleCompactionWorkflow,
 } from "@/sessions/compaction/idle-compaction-workflow.ts";
-import { createEventHandler } from "@/sessions/event-handler.ts";
+import { makeSessionEventHandler } from "@/sessions/event-handler.ts";
 import {
   applyQuestionSignals,
   questionTypingAction,
@@ -25,9 +25,9 @@ import {
 import {
   makeQuestionRuntime,
   QuestionRuntime,
+  QuestionSignalRouter,
   QuestionSessionLookup,
   type QuestionRuntimeShape,
-  type RoutedQuestionSignals,
 } from "@/sessions/question/question-runtime.ts";
 import { enqueueRunRequest, type RunRequestDestination } from "@/sessions/request-routing.ts";
 import { makeRunOrchestrator } from "@/sessions/run/run-executor.ts";
@@ -742,17 +742,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
       Layer.succeed(InfoCards, infoCards),
       Layer.succeed(OpencodeService, opencode),
     );
-    const questions = yield* makeQuestionRuntime(sendQuestionUiFailure).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          serviceLayer,
-          Layer.succeed(QuestionSessionLookup, {
-            getSessionContext,
-          }),
-        ),
-      ),
-    );
-    questionRuntime = questions;
+    let questions!: QuestionRuntimeShape;
 
     const syncTyping = (sessionId: string) =>
       getSessionContext(sessionId).pipe(
@@ -803,13 +793,19 @@ export const SessionRuntimeLayer = Layer.unwrap(
         Effect.flatMap((context) => applyQuestionSignals(context?.activeRun ?? null, signals)),
         Effect.andThen(syncTyping(sessionId)),
       );
-
-    const routeSignals = (effect: Effect.Effect<RoutedQuestionSignals | null, unknown>) =>
-      effect.pipe(
-        Effect.flatMap((routed) =>
-          !routed ? Effect.void : applySessionSignals(routed.sessionId, routed.signals),
+    const questionSignalRouter = { apply: applySessionSignals };
+    questions = yield* makeQuestionRuntime(sendQuestionUiFailure).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          serviceLayer,
+          Layer.succeed(QuestionSessionLookup, {
+            getSessionContext,
+          }),
+          Layer.succeed(QuestionSignalRouter, questionSignalRouter),
         ),
-      );
+      ),
+    );
+    questionRuntime = questions;
 
     const idleCompaction = yield* makeIdleCompactionWorkflow().pipe(Effect.provide(serviceLayer));
     idleCompactionWorkflow = idleCompaction;
@@ -819,12 +815,15 @@ export const SessionRuntimeLayer = Layer.unwrap(
       Layer.succeed(IdleCompactionWorkflow, idleCompaction),
     );
 
-    const eventHandler = createEventHandler(
-      getSessionContext,
-      (event) => routeSignals(questions.handleEvent(event)),
-      idleCompaction,
-      opencode.readPromptResult,
-      logger,
+    const eventHandler = yield* makeSessionEventHandler.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          runtimeServiceLayer,
+          Layer.succeed(QuestionSessionLookup, {
+            getSessionContext,
+          }),
+        ),
+      ),
     );
 
     yield* Queue.take(eventQueue).pipe(
@@ -851,10 +850,6 @@ export const SessionRuntimeLayer = Layer.unwrap(
 
     const runBatch = yield* makeRunOrchestrator({
       setActiveRun,
-      terminateQuestions: (sessionId) =>
-        questions
-          .terminateSession(sessionId)
-          .pipe(Effect.flatMap((signals) => applySessionSignals(sessionId, signals))),
       recoverSession: (session, responseMessage) =>
         ensureSessionHealth(
           session,
@@ -1003,8 +998,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
             destination,
           } satisfies QueuedMessageRunRequest;
         }),
-      routeQuestionInteraction: (interaction) =>
-        routeSignals(questions.routeInteraction(interaction)).pipe(Effect.asVoid),
+      routeQuestionInteraction: (interaction) => questions.routeInteraction(interaction),
       invalidate: invalidateSession,
       updateLoadedChannelSettings: (channelId, settings) =>
         getSession(channelId).pipe(

@@ -12,7 +12,9 @@ import {
 } from "@/sessions/question/question-run-state.ts";
 import {
   makeQuestionRuntime,
+  QuestionSignalRouter,
   QuestionSessionLookup,
+  type QuestionRuntimeShape,
 } from "@/sessions/question/question-runtime.ts";
 import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
 import { Logger } from "@/util/logging.ts";
@@ -118,8 +120,30 @@ const makeHarness = async (options?: HarnessOptions) => {
   const sessionContextRef = await runTestEffect(
     Ref.make<SessionContext | null>({ session, activeRun }),
   );
+  let rawRuntime!: QuestionRuntimeShape;
 
-  const rawRuntime = await runTestEffect(
+  const reconcileTyping = () =>
+    rawRuntime.hasPendingQuestions(session.opencode.sessionId).pipe(
+      Effect.flatMap((pending) =>
+        Ref.modify(typingPausedRef, (paused) => [{ paused, pending } as const, pending]).pipe(
+          Effect.flatMap(({ paused }) =>
+            runQuestionTypingAction({
+              sessionId: session.opencode.sessionId,
+              activeRun,
+              action: questionTypingAction(activeRun, pending, paused),
+              logger: { warn: () => Effect.void },
+            }),
+          ),
+        ),
+      ),
+    );
+
+  const applySignalsAndTyping = (
+    _sessionId: string,
+    signals: ReadonlyArray<QuestionWorkflowSignal>,
+  ) => applyQuestionSignals(activeRun, signals).pipe(Effect.andThen(reconcileTyping()));
+
+  rawRuntime = await runTestEffect(
     makeQuestionRuntime((message, error) =>
       Effect.sync(() => {
         questionUiFailureTargetIds.push(message.id);
@@ -130,6 +154,9 @@ const makeHarness = async (options?: HarnessOptions) => {
         Layer.mergeAll(
           Layer.succeed(QuestionSessionLookup, {
             getSessionContext: () => Ref.get(sessionContextRef),
+          }),
+          Layer.succeed(QuestionSignalRouter, {
+            apply: applySignalsAndTyping,
           }),
           Layer.succeed(
             OpencodeService,
@@ -159,41 +186,12 @@ const makeHarness = async (options?: HarnessOptions) => {
   const recordInteractionUpdate = (payload: unknown) =>
     Promise.resolve(push(interactionUpdates, payload)).then(() => undefined);
 
-  const reconcileTyping = () =>
-    rawRuntime.hasPendingQuestions(session.opencode.sessionId).pipe(
-      Effect.flatMap((pending) =>
-        Ref.modify(typingPausedRef, (paused) => [{ paused, pending } as const, pending]).pipe(
-          Effect.flatMap(({ paused }) =>
-            runQuestionTypingAction({
-              sessionId: session.opencode.sessionId,
-              activeRun,
-              action: questionTypingAction(activeRun, pending, paused),
-              logger: { warn: () => Effect.void },
-            }),
-          ),
-        ),
-      ),
-    );
-
-  const applySignalsAndTyping = (signals: ReadonlyArray<QuestionWorkflowSignal>) =>
-    applyQuestionSignals(activeRun, signals).pipe(Effect.andThen(reconcileTyping()));
-
-  const handleRouted = <A extends { signals: ReadonlyArray<QuestionWorkflowSignal> } | null>(
-    effect: Effect.Effect<A, unknown>,
-  ) =>
-    effect.pipe(
-      Effect.tap((result) => (result ? applySignalsAndTyping(result.signals) : Effect.void)),
-    );
-
   const runtime = {
     rawRuntime,
     handleEvent: rawRuntime.handleEvent,
-    routeEvent: (event: Parameters<typeof rawRuntime.handleEvent>[0]) =>
-      handleRouted(rawRuntime.handleEvent(event)),
-    handleInteraction: (interaction: Interaction) =>
-      handleRouted(rawRuntime.routeInteraction(interaction)),
-    terminateForSession: (sessionId: string) =>
-      rawRuntime.terminateSession(sessionId).pipe(Effect.tap(applySignalsAndTyping)),
+    routeEvent: rawRuntime.handleEvent,
+    handleInteraction: (interaction: Interaction) => rawRuntime.routeInteraction(interaction),
+    terminateForSession: rawRuntime.terminateSession,
     shutdown: () => rawRuntime.shutdownSession(session.opencode.sessionId),
   };
   const interactionBase = { onReply: recordInteractionReply, onUpdate: recordInteractionUpdate };
@@ -419,7 +417,7 @@ describe("makeQuestionRuntime", () => {
 
     const lateResult = await ask(harness, makeRequest("req-2"));
 
-    expect(lateResult).toBeNull();
+    expect(lateResult).toBeUndefined();
     expect(harness.rejectCalls).toEqual([harness.request.id]);
   });
 });

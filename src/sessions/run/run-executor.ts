@@ -13,6 +13,7 @@ import { runProgressWorker } from "@/sessions/run/progress.ts";
 import type { PendingPrompt } from "@/sessions/run/prompt-state.ts";
 import type { NonEmptyRunRequestBatch } from "@/sessions/run/run-batch.ts";
 import { decideRunCompletion } from "@/sessions/run/run-completion.ts";
+import { QuestionRuntime } from "@/sessions/question/question-runtime.ts";
 import {
   currentPromptReplyTargetMessage,
   noQuestionOutcome,
@@ -233,7 +234,6 @@ export const makeRunOrchestrator = (input: {
     session: ChannelSession,
     activeRun: ActiveRun | null,
   ) => Effect.Effect<void, unknown>;
-  terminateQuestions: (sessionId: string) => Effect.Effect<void, unknown>;
   recoverSession: (
     session: ChannelSession,
     responseMessage: Message,
@@ -244,6 +244,7 @@ export const makeRunOrchestrator = (input: {
     const infoCards = yield* InfoCards;
     const logger = yield* Logger;
     const opencode = yield* OpencodeService;
+    const questionRuntime = yield* QuestionRuntime;
 
     const replyWithError = (title: string) => (message: Message, error: unknown) =>
       Effect.promise(() =>
@@ -268,7 +269,7 @@ export const makeRunOrchestrator = (input: {
       runProgressWorker,
       (message) => startTypingLoop(message.channel),
       input.setActiveRun,
-      input.terminateQuestions,
+      questionRuntime.terminateSession,
       input.recoverSession,
       (message, source) =>
         infoCards

@@ -1,4 +1,4 @@
-import type { Event, QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
+import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
 import { Data, Effect, Option, Ref, Result, ServiceMap } from "effect";
 import { type Interaction, type Message } from "discord.js";
 
@@ -17,7 +17,6 @@ import {
   setQuestionCustomAnswer,
   setQuestionOptionSelection,
 } from "@/discord/question-card.ts";
-import { getEventByType } from "@/opencode/events.ts";
 import { OpencodeService } from "@/opencode/service.ts";
 import {
   activateQuestionBatch,
@@ -53,8 +52,6 @@ export type QuestionWorkflowEvent =
     }
   | { type: "rejected"; sessionId: string; requestId: string };
 
-export type RoutedQuestionSignals = { sessionId: string; signals: QuestionSignals };
-
 type QuestionSignals = ReadonlyArray<QuestionWorkflowSignal>;
 type Batch = QuestionWorkflowBatch;
 type SessionContext = { session: ChannelSession; activeRun: ActiveRun | null };
@@ -66,16 +63,22 @@ export class QuestionSessionLookup extends ServiceMap.Service<
   }
 >()("QuestionSessionLookup") {}
 
+export class QuestionSignalRouter extends ServiceMap.Service<
+  QuestionSignalRouter,
+  {
+    apply: (
+      sessionId: string,
+      signals: ReadonlyArray<QuestionWorkflowSignal>,
+    ) => Effect.Effect<void, unknown>;
+  }
+>()("QuestionSignalRouter") {}
+
 export type QuestionRuntimeShape = {
-  handleEvent: (
-    event: QuestionWorkflowEvent,
-  ) => Effect.Effect<RoutedQuestionSignals | null, unknown>;
-  routeInteraction: (
-    interaction: Interaction,
-  ) => Effect.Effect<RoutedQuestionSignals | null, unknown>;
+  handleEvent: (event: QuestionWorkflowEvent) => Effect.Effect<void, unknown>;
+  routeInteraction: (interaction: Interaction) => Effect.Effect<void, unknown>;
   hasPendingQuestions: (sessionId: string) => Effect.Effect<boolean, unknown>;
   hasPendingQuestionsAnywhere: () => Effect.Effect<boolean, unknown>;
-  terminateSession: (sessionId: string) => Effect.Effect<QuestionSignals, unknown>;
+  terminateSession: (sessionId: string) => Effect.Effect<void, unknown>;
   shutdownSession: (sessionId: string) => Effect.Effect<void, unknown>;
   cleanupShutdownQuestions: () => Effect.Effect<void, unknown>;
 };
@@ -122,11 +125,6 @@ const noSignals: QuestionSignals = [];
 const signal = <A extends QuestionWorkflowSignal>(value: A): ReadonlyArray<A> => [value];
 const appendSignals = (left: QuestionSignals, right: QuestionSignals): QuestionSignals =>
   left.length === 0 ? right : [...left, ...right];
-const routedNoSignals = (sessionId: string): RoutedQuestionSignals => ({
-  sessionId,
-  signals: noSignals,
-});
-
 const emptyQuestionSessionState = (): QuestionSessionState => ({
   stopped: false,
   batches: new Map(),
@@ -169,45 +167,16 @@ const dropRequestRoute = (state: QuestionRuntimeState, requestId: string): Quest
   };
 };
 
-export const routeQuestionEvent = (
-  event: Event,
-  sessionId: string,
-  handleQuestionEvent: (event: QuestionWorkflowEvent) => Effect.Effect<void, unknown>,
-) =>
-  Effect.gen(function* () {
-    const questionAsked = getEventByType(event, "question.asked")?.properties ?? null;
-    const questionReplied = getEventByType(event, "question.replied")?.properties ?? null;
-    const questionRejected = getEventByType(event, "question.rejected")?.properties ?? null;
-
-    if (questionAsked) {
-      yield* handleQuestionEvent({
-        type: "asked",
-        sessionId,
-        request: questionAsked,
-      });
-    }
-    if (questionReplied) {
-      yield* handleQuestionEvent({
-        type: "replied",
-        sessionId,
-        requestId: questionReplied.requestID,
-        answers: questionReplied.answers,
-      });
-    }
-    if (questionRejected) {
-      yield* handleQuestionEvent({
-        type: "rejected",
-        sessionId,
-        requestId: questionRejected.requestID,
-      });
-    }
-  });
-
 export const makeQuestionRuntime = (
   sendQuestionUiFailure: (message: Message, error: unknown) => Effect.Effect<void, unknown>,
-): Effect.Effect<QuestionRuntimeShape, unknown, QuestionSessionLookup | OpencodeService | Logger> =>
+): Effect.Effect<
+  QuestionRuntimeShape,
+  unknown,
+  QuestionSessionLookup | QuestionSignalRouter | OpencodeService | Logger
+> =>
   Effect.gen(function* () {
     const { getSessionContext } = yield* QuestionSessionLookup;
+    const questionSignals = yield* QuestionSignalRouter;
     const opencode = yield* OpencodeService;
     const logger = yield* Logger;
     const stateRef = yield* Ref.make<QuestionRuntimeState>({
@@ -461,7 +430,7 @@ export const makeQuestionRuntime = (
       update: (batch: Batch) => Batch,
     ) =>
       applyQuestionUpdate(sessionId, interaction, action.requestID, action.version, update).pipe(
-        Effect.as(routedNoSignals(sessionId)),
+        Effect.asVoid,
       );
 
     const setQuestionDraft = (
@@ -748,12 +717,12 @@ export const makeQuestionRuntime = (
           !interaction.isStringSelectMenu() &&
           !interaction.isModalSubmit()
         ) {
-          return null;
+          return;
         }
 
         const action = parseQuestionActionId(interaction.customId);
         if (!action) {
-          return null;
+          return;
         }
 
         const routed = yield* getQuestionBatch(action.requestID);
@@ -762,18 +731,17 @@ export const makeQuestionRuntime = (
             yield* Ref.update(stateRef, (state) => dropRequestRoute(state, action.requestID));
           }
           yield* replyToQuestionInteraction(interaction, "This question prompt has expired.");
-          return null;
+          return;
         }
 
         const { batch, sessionId } = routed;
-        const noSignalsForSession = routedNoSignals(sessionId);
         if (
           (interaction.isButton() || interaction.isStringSelectMenu()) &&
           isAttachedQuestionBatchAttachment(batch.runtime.attachment) &&
           interaction.message.id !== batch.runtime.attachment.message.id
         ) {
           yield* replyToQuestionInteraction(interaction, "This question prompt has been replaced.");
-          return null;
+          return;
         }
 
         if (batch.domain.lifecycle !== "active") {
@@ -781,12 +749,12 @@ export const makeQuestionRuntime = (
             interaction,
             "This question prompt is already being finalized.",
           );
-          return null;
+          return;
         }
 
         if (batch.domain.version !== action.version) {
           yield* replyToQuestionConflict(interaction, batch);
-          return null;
+          return;
         }
 
         switch (action.kind) {
@@ -836,7 +804,7 @@ export const makeQuestionRuntime = (
             );
           case "select":
             if (!interaction.isStringSelectMenu()) {
-              return noSignalsForSession;
+              return;
             }
             return yield* routeQuestionUpdate(sessionId, interaction, action, (current) => {
               const question = current.domain.request.questions[action.questionIndex];
@@ -864,12 +832,12 @@ export const makeQuestionRuntime = (
             });
           case "custom": {
             if (!interaction.isButton()) {
-              return noSignalsForSession;
+              return;
             }
 
             const question = yield* requireCustomQuestion(interaction, batch, action.questionIndex);
             if (!question) {
-              return noSignalsForSession;
+              return;
             }
 
             yield* Effect.promise(() =>
@@ -883,16 +851,16 @@ export const makeQuestionRuntime = (
                 }),
               ),
             );
-            return noSignalsForSession;
+            return;
           }
           case "modal": {
             if (!interaction.isModalSubmit()) {
-              return noSignalsForSession;
+              return;
             }
 
             const question = yield* requireCustomQuestion(interaction, batch, action.questionIndex);
             if (!question) {
-              return noSignalsForSession;
+              return;
             }
 
             const customAnswer = readQuestionModalValue(interaction);
@@ -900,7 +868,7 @@ export const makeQuestionRuntime = (
               yield* Effect.promise(() =>
                 interaction.reply(questionInteractionReply("Custom answer cannot be empty.")),
               ).pipe(Effect.ignore);
-              return noSignalsForSession;
+              return;
             }
 
             const updated = yield* persistQuestionBatchOrReply({
@@ -921,7 +889,7 @@ export const makeQuestionRuntime = (
               missingMessage: "This question prompt has expired.",
             });
             if (!updated) {
-              return noSignalsForSession;
+              return;
             }
 
             yield* editQuestionMessageLogged(
@@ -929,60 +897,56 @@ export const makeQuestionRuntime = (
               "failed to edit question batch after modal submit",
             );
             yield* Effect.promise(() => interaction.deferUpdate()).pipe(Effect.ignore);
-            return noSignalsForSession;
+            return;
           }
           case "submit":
           case "reject":
             if (!interaction.isButton()) {
-              return noSignalsForSession;
+              return;
             }
-            return {
-              sessionId,
-              signals: yield* finalizeRemoteQuestionBatch(
-                action.kind === "submit"
-                  ? {
-                      sessionId,
-                      interaction,
-                      requestId: action.requestID,
-                      expectedVersion: action.version,
-                      invoke: (session, requestId) =>
-                        opencode.replyToQuestion(
-                          session,
-                          requestId,
-                          buildQuestionAnswers(batch.domain.request, batch.domain.drafts),
-                        ),
-                      followUpFailure: (error) => `Failed to submit answers: ${formatError(error)}`,
-                      onSuccess: () =>
-                        finalizeQuestionBatch(
-                          sessionId,
-                          action.requestID,
-                          "answered",
-                          buildQuestionAnswers(batch.domain.request, batch.domain.drafts),
-                        ),
-                    }
-                  : {
-                      sessionId,
-                      interaction,
-                      requestId: action.requestID,
-                      expectedVersion: action.version,
-                      invoke: opencode.rejectQuestion,
-                      followUpFailure: (error) =>
-                        `Failed to reject questions: ${formatError(error)}`,
-                      onSuccess: () =>
-                        finalizeQuestionBatch(sessionId, action.requestID, "rejected").pipe(
-                          Effect.map((signals) =>
-                            appendSignals(
-                              signals,
-                              signal({
-                                type: "set-run-question-outcome",
-                                outcome: userRejectedQuestionOutcome(),
-                              }),
-                            ),
+            return yield* finalizeRemoteQuestionBatch(
+              action.kind === "submit"
+                ? {
+                    sessionId,
+                    interaction,
+                    requestId: action.requestID,
+                    expectedVersion: action.version,
+                    invoke: (session, requestId) =>
+                      opencode.replyToQuestion(
+                        session,
+                        requestId,
+                        buildQuestionAnswers(batch.domain.request, batch.domain.drafts),
+                      ),
+                    followUpFailure: (error) => `Failed to submit answers: ${formatError(error)}`,
+                    onSuccess: () =>
+                      finalizeQuestionBatch(
+                        sessionId,
+                        action.requestID,
+                        "answered",
+                        buildQuestionAnswers(batch.domain.request, batch.domain.drafts),
+                      ),
+                  }
+                : {
+                    sessionId,
+                    interaction,
+                    requestId: action.requestID,
+                    expectedVersion: action.version,
+                    invoke: opencode.rejectQuestion,
+                    followUpFailure: (error) => `Failed to reject questions: ${formatError(error)}`,
+                    onSuccess: () =>
+                      finalizeQuestionBatch(sessionId, action.requestID, "rejected").pipe(
+                        Effect.map((signals) =>
+                          appendSignals(
+                            signals,
+                            signal({
+                              type: "set-run-question-outcome",
+                              outcome: userRejectedQuestionOutcome(),
+                            }),
                           ),
                         ),
-                    },
-              ),
-            } satisfies RoutedQuestionSignals;
+                      ),
+                  },
+            ).pipe(Effect.flatMap((signals) => questionSignals.apply(sessionId, signals)));
         }
       });
 
@@ -1035,12 +999,12 @@ export const makeQuestionRuntime = (
       );
 
     const routeSignals = (sessionId: string, effect: Effect.Effect<QuestionSignals, unknown>) =>
-      effect.pipe(Effect.map((signals) => ({ sessionId, signals })));
+      effect.pipe(Effect.flatMap((signals) => questionSignals.apply(sessionId, signals)));
 
     const terminateSession = (sessionId: string) =>
       expirePendingBatches(sessionId).pipe(
         Effect.flatMap(({ terminated }) => editAttachedQuestionBatches(terminated)),
-        Effect.as(noSignals),
+        Effect.asVoid,
       );
 
     const shutdownSession = (sessionId: string) =>
@@ -1060,49 +1024,46 @@ export const makeQuestionRuntime = (
         ),
       );
 
-    return {
-      handleEvent: (event) =>
-        getSessionState(event.sessionId).pipe(
-          Effect.flatMap((sessionState) => {
-            if (sessionState?.stopped) {
-              return Effect.succeed(null);
-            }
+    const handleWorkflowEvent = (event: QuestionWorkflowEvent) =>
+      getSessionState(event.sessionId).pipe(
+        Effect.flatMap((sessionState) => {
+          if (sessionState?.stopped) {
+            return Effect.void;
+          }
 
-            switch (event.type) {
-              case "asked":
-                return getSessionContext(event.sessionId).pipe(
-                  Effect.flatMap((context) =>
-                    !context?.activeRun
-                      ? Effect.succeed(null)
-                      : routeSignals(
+          switch (event.type) {
+            case "asked":
+              return getSessionContext(event.sessionId).pipe(
+                Effect.flatMap((context) =>
+                  !context?.activeRun
+                    ? Effect.void
+                    : routeSignals(
+                        event.sessionId,
+                        handleQuestionAsked(
                           event.sessionId,
-                          handleQuestionAsked(
-                            event.sessionId,
-                            context.session,
-                            context.activeRun,
-                            event.request,
-                          ),
+                          context.session,
+                          context.activeRun,
+                          event.request,
                         ),
-                  ),
-                );
-              case "replied":
-                return routeSignals(
-                  event.sessionId,
-                  finalizeQuestionBatch(
-                    event.sessionId,
-                    event.requestId,
-                    "answered",
-                    event.answers,
-                  ),
-                );
-              case "rejected":
-                return routeSignals(
-                  event.sessionId,
-                  finalizeQuestionBatch(event.sessionId, event.requestId, "rejected"),
-                );
-            }
-          }),
-        ),
+                      ),
+                ),
+              );
+            case "replied":
+              return routeSignals(
+                event.sessionId,
+                finalizeQuestionBatch(event.sessionId, event.requestId, "answered", event.answers),
+              );
+            case "rejected":
+              return routeSignals(
+                event.sessionId,
+                finalizeQuestionBatch(event.sessionId, event.requestId, "rejected"),
+              );
+          }
+        }),
+      );
+
+    return {
+      handleEvent: handleWorkflowEvent,
       routeInteraction: handleInteraction,
       hasPendingQuestions,
       hasPendingQuestionsAnywhere,

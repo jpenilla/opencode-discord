@@ -8,66 +8,100 @@ import {
   isCompactionSummaryAssistant,
   isObservedAssistantMessage,
 } from "@/opencode/events.ts";
-import type { OpencodeServiceShape } from "@/opencode/service.ts";
-import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
+import { OpencodeService } from "@/opencode/service.ts";
+import { IdleCompactionWorkflow } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import {
-  routeQuestionEvent,
-  type QuestionWorkflowEvent,
+  QuestionRuntime,
+  QuestionSessionLookup,
+  type QuestionRuntimeShape,
 } from "@/sessions/question/question-runtime.ts";
 import { routeRunEvent } from "@/sessions/run/run-event-router.ts";
-import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
-import type { LoggerShape } from "@/util/logging.ts";
+import { Logger } from "@/util/logging.ts";
 
-export const createEventHandler = (
-  getSessionContext: (
-    sessionId: string,
-  ) => Effect.Effect<{ session: ChannelSession; activeRun: ActiveRun | null } | null, unknown>,
-  handleQuestionEvent: (event: QuestionWorkflowEvent) => Effect.Effect<void, unknown>,
-  idleCompactionWorkflow: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">,
-  readPromptResult: OpencodeServiceShape["readPromptResult"],
-  logger: LoggerShape,
-) => ({
-  handleEvent: (event: Event) =>
-    Effect.gen(function* () {
-      const sessionId = getEventSessionId(event);
-      if (!sessionId) {
-        return;
-      }
+const routeQuestionEvent = (
+  event: Event,
+  sessionId: string,
+  handleQuestionEvent: QuestionRuntimeShape["handleEvent"],
+) =>
+  Effect.gen(function* () {
+    const questionAsked = getEventByType(event, "question.asked")?.properties ?? null;
+    const questionReplied = getEventByType(event, "question.replied")?.properties ?? null;
+    const questionRejected = getEventByType(event, "question.rejected")?.properties ?? null;
 
-      const context = yield* getSessionContext(sessionId);
-      if (!context) {
-        return;
-      }
-
-      yield* routeQuestionEvent(event, sessionId, handleQuestionEvent);
-
-      const assistantMessage = getMessageUpdatedByRole(event, "assistant");
-      if (
-        assistantMessage &&
-        isCompactionSummaryAssistant(assistantMessage) &&
-        isObservedAssistantMessage(assistantMessage)
-      ) {
-        yield* idleCompactionWorkflow.emitSummary({
-          session: context.session,
-          messageId: assistantMessage.id,
-        });
-      }
-
-      if (!context.activeRun && getEventByType(event, "session.compacted")?.properties) {
-        yield* idleCompactionWorkflow.handleCompacted(sessionId);
-      }
-
-      if (!context.activeRun) {
-        return;
-      }
-
-      yield* routeRunEvent(
-        event,
+    if (questionAsked) {
+      yield* handleQuestionEvent({
+        type: "asked",
         sessionId,
-        context.session,
-        context.activeRun,
-        readPromptResult,
-        logger,
-      );
-    }),
+        request: questionAsked,
+      });
+    }
+    if (questionReplied) {
+      yield* handleQuestionEvent({
+        type: "replied",
+        sessionId,
+        requestId: questionReplied.requestID,
+        answers: questionReplied.answers,
+      });
+    }
+    if (questionRejected) {
+      yield* handleQuestionEvent({
+        type: "rejected",
+        sessionId,
+        requestId: questionRejected.requestID,
+      });
+    }
+  });
+
+export const makeSessionEventHandler: Effect.Effect<
+  { handleEvent: (event: Event) => Effect.Effect<void, unknown> },
+  unknown,
+  IdleCompactionWorkflow | Logger | OpencodeService | QuestionRuntime | QuestionSessionLookup
+> = Effect.gen(function* () {
+  const idleCompactionWorkflow = yield* IdleCompactionWorkflow;
+  const logger = yield* Logger;
+  const opencode = yield* OpencodeService;
+  const questions = yield* QuestionRuntime;
+  const { getSessionContext } = yield* QuestionSessionLookup;
+
+  return {
+    handleEvent: (event) =>
+      Effect.gen(function* () {
+        const sessionId = getEventSessionId(event);
+        if (!sessionId) {
+          return;
+        }
+
+        const context = yield* getSessionContext(sessionId);
+        if (!context) {
+          return;
+        }
+
+        yield* routeQuestionEvent(event, sessionId, questions.handleEvent);
+
+        const assistantMessage = getMessageUpdatedByRole(event, "assistant");
+        if (
+          assistantMessage &&
+          isCompactionSummaryAssistant(assistantMessage) &&
+          isObservedAssistantMessage(assistantMessage)
+        ) {
+          yield* idleCompactionWorkflow.emitSummary({
+            session: context.session,
+            messageId: assistantMessage.id,
+          });
+        }
+
+        if (!context.activeRun && getEventByType(event, "session.compacted")?.properties) {
+          yield* idleCompactionWorkflow.handleCompacted(sessionId);
+        }
+
+        if (!context.activeRun) {
+          return;
+        }
+
+        yield* routeRunEvent(event, sessionId, context.session, context.activeRun).pipe(
+          Effect.provideService(OpencodeService, opencode),
+          Effect.provideService(Logger, logger),
+        );
+      }),
+  };
 });

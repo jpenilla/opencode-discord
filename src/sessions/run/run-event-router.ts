@@ -7,7 +7,7 @@ import {
   getUpdatedPartByType,
   isCompactionSummaryAssistant,
 } from "@/opencode/events.ts";
-import type { OpencodeServiceShape } from "@/opencode/service.ts";
+import { OpencodeService } from "@/opencode/service.ts";
 import {
   handleAssistantMessageUpdated,
   handleSessionError as failPendingPromptFromSessionError,
@@ -17,7 +17,7 @@ import {
 } from "@/sessions/run/prompt-state.ts";
 import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
 import { formatError } from "@/util/errors.ts";
-import type { LoggerShape } from "@/util/logging.ts";
+import { Logger } from "@/util/logging.ts";
 
 const isPreviousPromptMessage = (activeRun: ActiveRun, messageId: string) =>
   activeRun.previousPromptMessageIds.has(messageId);
@@ -101,10 +101,10 @@ export const routeRunEvent = (
   sessionId: string,
   session: ChannelSession,
   activeRun: ActiveRun,
-  readPromptResult: OpencodeServiceShape["readPromptResult"],
-  logger: LoggerShape,
 ) =>
   Effect.gen(function* () {
+    const opencode = yield* OpencodeService;
+    const logger = yield* Logger;
     const progressEvent = toProgressEvent(event);
     const userMessage = getMessageUpdatedByRole(event, "user");
     const assistantMessage = getMessageUpdatedByRole(event, "assistant");
@@ -168,7 +168,7 @@ export const routeRunEvent = (
     const { completePrompt, failPrompt } = resolvePromptTrackingActions(promptActions);
 
     if (completePrompt) {
-      yield* readPromptResult(session.opencode, completePrompt.messageId).pipe(
+      yield* opencode.readPromptResult(session.opencode, completePrompt.messageId).pipe(
         Effect.flatMap((result) =>
           Deferred.succeed(completePrompt.deferred, result).pipe(Effect.ignore),
         ),

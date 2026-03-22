@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { Deferred, Effect, Exit, Option, Ref } from "effect";
+import { Deferred, Effect, Exit, Layer, Option, Ref } from "effect";
 
-import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
+import { OpencodeService, type PromptResult, type SessionHandle } from "@/opencode/service.ts";
 import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
-import { createEventHandler } from "@/sessions/event-handler.ts";
+import { IdleCompactionWorkflow } from "@/sessions/compaction/idle-compaction-workflow.ts";
+import { makeSessionEventHandler } from "@/sessions/event-handler.ts";
 import { beginPendingPrompt } from "@/sessions/run/prompt-state.ts";
 import { type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
 import {
@@ -19,9 +20,11 @@ import {
 } from "../support/opencode-events.ts";
 import { getRef, makeSessionHandle, makeSilentLogger } from "../support/fixtures.ts";
 import { failTest } from "../support/errors.ts";
+import { QuestionRuntime, QuestionSessionLookup } from "@/sessions/question/question-runtime.ts";
 import { appendRef, clearQueue, makeRef, takeAll } from "../support/runtime.ts";
 import { makeTestSessionState } from "../support/session.ts";
 import { unsafeStub } from "../support/stub.ts";
+import { Logger } from "@/util/logging.ts";
 
 type SessionContext = { session: ChannelSession; activeRun: ActiveRun | null };
 
@@ -107,7 +110,7 @@ const makeSummaryHarness = async (
   );
 const beginPendingRuntime = async (input?: {
   idleCompactionWorkflow?: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">;
-  readPromptResult?: Parameters<typeof createEventHandler>[3];
+  readPromptResult?: SessionReadPromptResult;
 }) =>
   beginPendingRun().then((pending) => ({
     ...pending,
@@ -120,33 +123,63 @@ const beginPendingRuntime = async (input?: {
   }));
 const beginDefaultPendingRuntime = () => beginPendingRuntime({ readPromptResult: readFinalReply });
 
+type SessionReadPromptResult = (
+  session: SessionHandle,
+  messageId: string,
+) => Effect.Effect<PromptResult, unknown>;
+
 const makeRuntime = (input: {
   session?: ChannelSession | null;
   activeRun?: ActiveRun | null;
-  getSessionContext?: Parameters<typeof createEventHandler>[0];
-  handleQuestionEvent?: Parameters<typeof createEventHandler>[1];
+  getSessionContext?: (sessionId: string) => Effect.Effect<SessionContext | null, unknown>;
+  handleQuestionEvent?: (event: unknown) => Effect.Effect<void, unknown>;
   idleCompactionWorkflow?: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">;
-  readPromptResult?: Parameters<typeof createEventHandler>[3];
+  readPromptResult?: SessionReadPromptResult;
 }) =>
-  createEventHandler(
-    input.getSessionContext ??
-      ((sessionId) =>
-        Effect.succeed(
-          input.session && sessionId === input.session.opencode.sessionId
-            ? { session: input.session, activeRun: input.activeRun ?? null }
-            : null,
-        )),
-    input.handleQuestionEvent ?? (() => Effect.void),
-    {
-      ...noopIdleCompactionWorkflow,
-      ...input.idleCompactionWorkflow,
-    },
-    input.readPromptResult ?? unexpectedPromptResultLoad,
-    makeSilentLogger(),
+  Effect.runSync(
+    makeSessionEventHandler.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.succeed(QuestionSessionLookup, {
+            getSessionContext:
+              input.getSessionContext ??
+              ((sessionId) =>
+                Effect.succeed(
+                  input.session && sessionId === input.session.opencode.sessionId
+                    ? { session: input.session, activeRun: input.activeRun ?? null }
+                    : null,
+                )),
+          }),
+          Layer.succeed(
+            QuestionRuntime,
+            unsafeStub({
+              handleEvent: input.handleQuestionEvent ?? (() => Effect.void),
+              routeInteraction: () => Effect.void,
+              hasPendingQuestions: () => Effect.succeed(false),
+              hasPendingQuestionsAnywhere: () => Effect.succeed(false),
+              terminateSession: () => Effect.void,
+              shutdownSession: () => Effect.void,
+              cleanupShutdownQuestions: () => Effect.void,
+            }),
+          ),
+          Layer.succeed(IdleCompactionWorkflow, {
+            ...noopIdleCompactionWorkflow,
+            ...input.idleCompactionWorkflow,
+          }),
+          Layer.succeed(
+            OpencodeService,
+            unsafeStub({
+              readPromptResult: input.readPromptResult ?? unexpectedPromptResultLoad,
+            }),
+          ),
+          Layer.succeed(Logger, makeSilentLogger()),
+        ),
+      ),
+    ),
   );
 
 const makeSummaryWorkflow = (deps: {
-  readPromptResult: Parameters<typeof createEventHandler>[3];
+  readPromptResult: SessionReadPromptResult;
   sendCompactionSummary: (_session: ChannelSession, text: string) => Effect.Effect<void, unknown>;
 }): Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted"> => ({
   ...noopIdleCompactionWorkflow,
@@ -170,8 +203,8 @@ const makeSummaryWorkflow = (deps: {
     ),
 });
 
-describe("createEventHandler", () => {
-  test("routes question asked events to the question coordinator", async () => {
+describe("makeSessionEventHandler", () => {
+  test("routes question workflow events to the question runtime", async () => {
     const { session } = await makeSession(false);
     const questionEvents = await makeRef<unknown[]>([]);
 
@@ -181,25 +214,11 @@ describe("createEventHandler", () => {
     });
 
     await Effect.runPromise(runtime.handleEvent(makeQuestionAskedEvent()));
-
-    expect(await getRef(questionEvents)).toEqual([
-      { type: "asked", sessionId: "session-1", request: makeQuestionAskedEvent().properties },
-    ]);
-  });
-
-  test("routes question reply and rejection events to the question coordinator", async () => {
-    const { session } = await makeSession(false);
-    const questionEvents = await makeRef<unknown[]>([]);
-
-    const runtime = makeRuntime({
-      session,
-      handleQuestionEvent: (event) => appendRef(questionEvents, event),
-    });
-
     await Effect.runPromise(runtime.handleEvent(makeQuestionRepliedEvent()));
     await Effect.runPromise(runtime.handleEvent(makeQuestionRejectedEvent()));
 
     expect(await getRef(questionEvents)).toEqual([
+      { type: "asked", sessionId: "session-1", request: makeQuestionAskedEvent().properties },
       { type: "replied", sessionId: "session-1", requestId: "req-1", answers: [["Yes"]] },
       { type: "rejected", sessionId: "session-1", requestId: "req-1" },
     ]);
