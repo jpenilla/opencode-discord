@@ -721,24 +721,12 @@ export const SessionRuntimeLayer = Layer.unwrap(
     const shutdownStartedRef = yield* Ref.make(false);
     const typingPausedRef = yield* Ref.make(new Set<string>());
     const fiberSet = yield* FiberSet.make();
-    let idleCompactionWorkflow: IdleCompactionWorkflowShape | null = null;
-    let questionRuntime: QuestionRuntimeShape | null = null;
     const sessionIndex = createSessionIndex(stateRef);
+    let readSessionBusy: (session: ChannelSession) => Effect.Effect<boolean, unknown> = () =>
+      Effect.succeed(false);
 
     const isSessionBusy = (session: ChannelSession) =>
-      session.activeRun
-        ? Effect.succeed(true)
-        : Effect.gen(function* () {
-            const hasPendingQuestions = questionRuntime
-              ? yield* questionRuntime.hasPendingQuestions(session.opencode.sessionId)
-              : false;
-            if (hasPendingQuestions) {
-              return true;
-            }
-            return idleCompactionWorkflow
-              ? yield* idleCompactionWorkflow.hasActive(session.opencode.sessionId)
-              : false;
-          });
+      session.activeRun ? Effect.succeed(true) : readSessionBusy(session);
 
     const sendQuestionUiFailure = (message: Message, error: unknown) =>
       Effect.promise(() =>
@@ -826,21 +814,32 @@ export const SessionRuntimeLayer = Layer.unwrap(
         Effect.flatMap((context) => applyQuestionSignals(context?.activeRun ?? null, signals)),
         Effect.andThen(syncTyping(sessionId)),
       );
-    const questionLookupLayer = Layer.succeed(QuestionSessionLookup, {
-      getSessionContext,
-    });
-    const questionSignalRouterLayer = Layer.succeed(QuestionSignalRouter, {
-      apply: applySessionSignals,
-    });
-    questions = yield* makeQuestionRuntime(sendQuestionUiFailure).pipe(
-      Effect.provide(Layer.mergeAll(serviceLayer, questionLookupLayer, questionSignalRouterLayer)),
+    const runtimeSupportLayer = Layer.mergeAll(
+      serviceLayer,
+      Layer.succeed(QuestionSessionLookup, {
+        getSessionContext,
+      }),
+      Layer.succeed(QuestionSignalRouter, {
+        apply: applySessionSignals,
+      }),
     );
-    questionRuntime = questions;
+    questions = yield* makeQuestionRuntime(sendQuestionUiFailure).pipe(
+      Effect.provide(runtimeSupportLayer),
+    );
 
     const idleCompaction = yield* makeIdleCompactionWorkflow().pipe(Effect.provide(serviceLayer));
-    idleCompactionWorkflow = idleCompaction;
+    readSessionBusy = (session) =>
+      questions
+        .hasPendingQuestions(session.opencode.sessionId)
+        .pipe(
+          Effect.flatMap((hasPendingQuestions) =>
+            hasPendingQuestions
+              ? Effect.succeed(true)
+              : idleCompaction.hasActive(session.opencode.sessionId),
+          ),
+        );
     const runtimeServiceLayer = Layer.mergeAll(
-      serviceLayer,
+      runtimeSupportLayer,
       Layer.succeed(QuestionRuntime, questions),
       Layer.succeed(IdleCompactionWorkflow, idleCompaction),
       Layer.succeed(RunSessionLifecycle, {
@@ -855,9 +854,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
       }),
     );
 
-    const eventHandler = yield* makeSessionEventHandler.pipe(
-      Effect.provide(Layer.mergeAll(runtimeServiceLayer, questionLookupLayer)),
-    );
+    const eventHandler = yield* makeSessionEventHandler.pipe(Effect.provide(runtimeServiceLayer));
 
     yield* Queue.take(eventQueue).pipe(
       Effect.flatMap((event) => eventHandler.handleEvent(event.payload)),
