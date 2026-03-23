@@ -3,6 +3,7 @@ import type { Message, SendableChannels } from "discord.js";
 import { Deferred, Effect, Queue, Ref } from "effect";
 
 import type { PromptResult } from "@/opencode/service.ts";
+import type { QuestionRunWorkflow } from "@/sessions/question/question-workflow-types.ts";
 import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
 import { executeRunBatch } from "@/sessions/run/run-executor.ts";
 import type { NonEmptyRunRequestBatch } from "@/sessions/run/run-batch.ts";
@@ -35,7 +36,7 @@ const runBatch = (
       runtime.runProgressWorker,
       runtime.startTyping,
       runtime.setActiveRun,
-      runtime.terminateQuestions,
+      runtime.createQuestionWorkflow,
       runtime.recoverSession,
       runtime.sendInterrupted,
       runtime.sendFinalResponse,
@@ -158,8 +159,14 @@ const makeRuntime = async (options?: RuntimeOptions) => {
         Effect.sync(() => {
           session.activeRun = activeRun;
         }).pipe(Effect.andThen(record(`setActiveRun:${activeRun ? "active" : "null"}`))),
-      terminateQuestions: (sessionId: string) =>
-        record(`terminateQuestionBatches:${sessionId}:expired`),
+      createQuestionWorkflow: (session: ChannelSession) =>
+        Effect.succeed<QuestionRunWorkflow>({
+          handleEvent: () => Effect.void,
+          routeInteraction: () => Effect.void,
+          hasPendingQuestions: () => Effect.succeed(false),
+          terminate: () => record(`terminateQuestionBatches:${session.opencode.sessionId}:expired`),
+          shutdown: () => Effect.void,
+        }),
       recoverSession: (_session: ChannelSession, _responseMessage: Message) =>
         record("ensureSessionHealthAfterFailure"),
       sendInterrupted: (_message: Message, source: "user" | "shutdown") =>

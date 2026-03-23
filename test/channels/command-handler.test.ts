@@ -11,15 +11,12 @@ import { AppConfig, type AppConfigShape } from "@/config.ts";
 import { InfoCards, type InfoCardsShape } from "@/discord/info-card.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import {
-  type IdleCompactionWorkflowShape,
-  type IdleCompactionWorkflowInterruptResult,
-  type IdleCompactionWorkflowStartResult,
-} from "@/sessions/compaction/idle-compaction-workflow.ts";
-import {
-  type ChannelActivity,
-  SessionRuntime,
-  type SessionRuntimeShape,
-} from "@/sessions/session-runtime.ts";
+  type SessionCompactionInterruptResult,
+  type SessionCompactionStartResult,
+  type SessionCompactionWorkflow,
+} from "@/sessions/compaction/session-compaction-workflow.ts";
+import { SessionRuntime, type SessionRuntimeShape } from "@/sessions/session-runtime.ts";
+import type { ChannelActivity } from "@/sessions/session-activity.ts";
 import { type ActiveRun, type ChannelSession, type RunRequest } from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import { StatePersistence, type StatePersistenceShape } from "@/state/persistence.ts";
@@ -184,17 +181,17 @@ const makeHarness = async (options?: HarnessOptions) => {
       Effect.sync(() => void persistedSettings.set(settings.channelId, settings)),
   };
 
-  const idleCompactionWorkflow: IdleCompactionWorkflowShape = {
+  const sessionCompactionWorkflow: SessionCompactionWorkflow = {
     hasActive: () => Effect.succeed(idleCompactionActive),
     awaitCompletion: () => Effect.void,
-    start: ({ channel }: { session: ChannelSession; channel: SendableChannels }) =>
+    start: (channel) =>
       Effect.gen(function* () {
         if (options?.sessionHealthy === false) {
           return {
             type: "rejected",
             message:
               "This channel session is unavailable right now. Send a normal message to recreate it.",
-          } satisfies IdleCompactionWorkflowStartResult;
+          } satisfies SessionCompactionStartResult;
         }
 
         yield* infoCards
@@ -223,7 +220,7 @@ const makeHarness = async (options?: HarnessOptions) => {
           );
         });
 
-        return { type: "started" } satisfies IdleCompactionWorkflowStartResult;
+        return { type: "started" } satisfies SessionCompactionStartResult;
       }),
     requestInterrupt: () =>
       Effect.sync(() => {
@@ -239,16 +236,18 @@ const makeHarness = async (options?: HarnessOptions) => {
               "## ❌ Failed to interrupt compaction",
               "interrupt failed",
             ),
-          } satisfies IdleCompactionWorkflowInterruptResult;
+          } satisfies SessionCompactionInterruptResult;
         }
 
-        return { type: "interrupted" } satisfies IdleCompactionWorkflowInterruptResult;
+        return { type: "interrupted" } satisfies SessionCompactionInterruptResult;
       }),
     handleCompacted: () => Effect.void,
     handleInterrupted: () => Effect.void,
     emitSummary: () => Effect.void,
     shutdown: () => Effect.void,
   };
+
+  session.compactionWorkflow = sessionCompactionWorkflow;
 
   const readSession = (channelId: string) =>
     Effect.succeed(
@@ -310,92 +309,101 @@ const makeHarness = async (options?: HarnessOptions) => {
     readSession(channelId).pipe(Effect.flatMap(readChannelActivity));
 
   const sessionRuntime: SessionRuntimeShape = {
-    readLoadedChannelActivity: readTrackedChannelActivity,
-    readRestoredChannelActivity: readTrackedChannelActivity,
-    getActiveRunBySessionId: () => Effect.succeed(null),
-    queueMessageRunRequest: () => failTest("unused in command tests"),
-    routeQuestionInteraction: () => Effect.void,
-    invalidate: (channelId: string, reason: string) =>
-      Effect.gen(function* () {
-        if (options?.invalidateResult === "failure") {
-          return yield* failTest("invalidate failed");
-        }
-        if (options?.invalidateResult === "busy") {
-          return false;
-        }
-        invalidatedSessions.push({ channelId: session.channelId, reason });
-        if (currentSession?.channelId === channelId) {
-          currentSession = null;
-        }
-        return true;
-      }),
-    updateLoadedChannelSettings: (channelId: string, settings) =>
-      Effect.sync(() => {
-        if (currentSession && currentSession.channelId === channelId) {
-          currentSession.channelSettings = settings;
-        }
-      }),
-    requestRunInterrupt: (channelId: string) =>
-      readSession(channelId).pipe(
-        Effect.flatMap((currentSession) => {
-          if (!currentSession || !currentSession.activeRun) {
-            return Effect.succeed({
-              type: "failed",
-              error: new Error("no active run for session"),
-            } as const);
-          }
-
-          return Effect.sync(() => {
-            const activeRun: ActiveRun = currentSession.activeRun!;
-            activeRun.interruptRequested = true;
-            activeRun.interruptSource = "user";
-
-            if (options?.interruptResult === "failure") {
-              clearInterrupt(activeRun);
-              return {
+    activity: {
+      readChannel: (channelId) => readTrackedChannelActivity(channelId),
+    },
+    runs: {
+      getActiveBySessionId: () => Effect.succeed(null),
+      queueMessage: () => failTest("unused in command tests"),
+      requestInterrupt: (channelId: string) =>
+        readSession(channelId).pipe(
+          Effect.flatMap((currentSession) => {
+            if (!currentSession || !currentSession.activeRun) {
+              return Effect.succeed({
                 type: "failed",
-                error: new Error("interrupt failed"),
-              } as const;
+                error: new Error("no active run for session"),
+              } as const);
             }
 
-            const hasPendingQuestions =
-              options?.hasPendingQuestionsSequence?.[1] ??
-              options?.hasPendingQuestionsSequence?.[0] ??
-              options?.hasPendingQuestions ??
-              false;
-            if (hasPendingQuestions) {
-              clearInterrupt(activeRun);
+            return Effect.sync(() => {
+              const activeRun: ActiveRun = currentSession.activeRun!;
+              activeRun.interruptRequested = true;
+              activeRun.interruptSource = "user";
+
+              if (options?.interruptResult === "failure") {
+                clearInterrupt(activeRun);
+                return {
+                  type: "failed",
+                  error: new Error("interrupt failed"),
+                } as const;
+              }
+
+              const hasPendingQuestions =
+                options?.hasPendingQuestionsSequence?.[1] ??
+                options?.hasPendingQuestionsSequence?.[0] ??
+                options?.hasPendingQuestions ??
+                false;
+              if (hasPendingQuestions) {
+                clearInterrupt(activeRun);
+                return {
+                  type: "question-pending",
+                } as const;
+              }
+
               return {
-                type: "question-pending",
+                type: "requested",
               } as const;
-            }
-
-            return {
-              type: "requested",
-            } as const;
-          });
+            });
+          }),
+        ),
+    },
+    questions: {
+      routeInteraction: () => Effect.void,
+    },
+    channels: {
+      invalidate: (channelId: string, reason: string) =>
+        Effect.gen(function* () {
+          if (options?.invalidateResult === "failure") {
+            return yield* failTest("invalidate failed");
+          }
+          if (options?.invalidateResult === "busy") {
+            return false;
+          }
+          invalidatedSessions.push({ channelId: session.channelId, reason });
+          if (currentSession?.channelId === channelId) {
+            currentSession = null;
+          }
+          return true;
         }),
-      ),
-    startCompaction: (channelId: string, channel) =>
-      withSession(
-        channelId,
-        (session) => idleCompactionWorkflow.start({ session, channel }),
-        () =>
-          Effect.succeed({
-            type: "rejected",
-            message: "No OpenCode session exists in this channel yet.",
-          } satisfies IdleCompactionWorkflowStartResult),
-      ),
-    requestCompactionInterrupt: (channelId: string) =>
-      withSession(
-        channelId,
-        (session) => idleCompactionWorkflow.requestInterrupt({ session }),
-        () =>
-          Effect.succeed({
-            type: "failed",
-            message: "No active OpenCode run or compaction is running in this channel.",
-          } satisfies IdleCompactionWorkflowInterruptResult),
-      ),
+      updateLoadedSettings: (channelId: string, settings) =>
+        Effect.sync(() => {
+          if (currentSession && currentSession.channelId === channelId) {
+            currentSession.channelSettings = settings;
+          }
+        }),
+    },
+    compaction: {
+      start: (channelId: string, channel) =>
+        withSession(
+          channelId,
+          (session) => session.compactionWorkflow.start(channel),
+          () =>
+            Effect.succeed({
+              type: "rejected",
+              message: "No OpenCode session exists in this channel yet.",
+            } satisfies SessionCompactionStartResult),
+        ),
+      requestInterrupt: (channelId: string) =>
+        withSession(
+          channelId,
+          (session) => session.compactionWorkflow.requestInterrupt(),
+          () =>
+            Effect.succeed({
+              type: "failed",
+              message: "No active OpenCode run or compaction is running in this channel.",
+            } satisfies SessionCompactionInterruptResult),
+        ),
+    },
     shutdown: () => Effect.void,
   };
 

@@ -148,8 +148,8 @@ const makeDefaultUploadRequest = (
 
 const makeSessions = (
   activeRun: ActiveRun | null,
-): Pick<SessionRuntimeShape, "getActiveRunBySessionId"> => ({
-  getActiveRunBySessionId: (sessionId: string) =>
+): Pick<SessionRuntimeShape["runs"], "getActiveBySessionId"> => ({
+  getActiveBySessionId: (sessionId: string) =>
     Effect.succeed(sessionId === "session-1" ? activeRun : null),
 });
 

@@ -26,7 +26,7 @@ export const newSessionCommand = {
       return;
     }
 
-    const channelActivity = yield* sessionRuntime.readLoadedChannelActivity(context.channelId);
+    const channelActivity = yield* sessionRuntime.activity.readChannel(context.channelId, "loaded");
     const entry = decideNewSessionEntry({
       channelActivity,
     });
@@ -36,13 +36,14 @@ export const newSessionCommand = {
     }
 
     yield* context.ack();
-    const invalidated = yield* sessionRuntime.invalidate(
+    const invalidated = yield* sessionRuntime.channels.invalidate(
       context.channelId,
       "requested a fresh session via /new-session",
     );
     if (!invalidated) {
-      const refreshedChannelActivity = yield* sessionRuntime.readLoadedChannelActivity(
+      const refreshedChannelActivity = yield* sessionRuntime.activity.readChannel(
         context.channelId,
+        "loaded",
       );
       const refreshedEntry = decideNewSessionEntry({
         channelActivity: refreshedChannelActivity,
