@@ -246,26 +246,29 @@ export const SessionRuntimeLayer = Layer.unwrap(
       );
     const interruptIdleCompactionForShutdown = (session: ChannelSession) =>
       session.compactionWorkflow.requestInterrupt().pipe(
-        withShutdownRpcTimeout("Timed out interrupting idle compaction during shutdown"),
+        withShutdownRpcTimeout("Timed out interrupting session compaction during shutdown"),
         Effect.flatMap((result) =>
           result.type === "failed" ? Effect.fail(result.message) : Effect.void,
         ),
         Effect.catch((error) =>
           logger
-            .warn("idle compaction interrupt was unresponsive during shutdown", {
+            .warn("session compaction interrupt was unresponsive during shutdown", {
               ...sessionFields(session),
               error: formatError(error),
             })
             .pipe(
               Effect.andThen(
-                forceCloseSessionHandle(session, "idle compaction interrupt timed out or failed"),
+                forceCloseSessionHandle(
+                  session,
+                  "session compaction interrupt timed out or failed",
+                ),
               ),
               Effect.andThen(
                 session.compactionWorkflow
                   .handleInterrupted()
                   .pipe(
                     catchShutdownWarn(
-                      "failed to finalize idle compaction after forced shutdown",
+                      "failed to finalize session compaction after forced shutdown",
                       () => sessionFields(session),
                     ),
                   ),

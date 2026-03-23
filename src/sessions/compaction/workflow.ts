@@ -114,7 +114,7 @@ const createSessionCompactionWorkflow = (deps: {
 
           return deps.infoCards.edit(state.card, title, body).pipe(
             Effect.catch((error) =>
-              deps.logger.warn("failed to finalize idle compaction card", {
+              deps.logger.warn("failed to finalize session compaction card", {
                 error: formatError(error),
               }),
             ),
@@ -142,9 +142,12 @@ const createSessionCompactionWorkflow = (deps: {
                             ? Effect.void
                             : deps.infoCards.edit(card, pending.title, pending.body).pipe(
                                 Effect.catch((error) =>
-                                  deps.logger.warn("failed to finalize late idle compaction card", {
-                                    error: formatError(error),
-                                  }),
+                                  deps.logger.warn(
+                                    "failed to finalize late session compaction card",
+                                    {
+                                      error: formatError(error),
+                                    },
+                                  ),
                                 ),
                                 Effect.ensuring(
                                   Ref.set(lateFinalizerRef, null).pipe(Effect.ignore),
@@ -164,7 +167,7 @@ const createSessionCompactionWorkflow = (deps: {
             ? Effect.void
             : deps.infoCards.edit(state.card, title, body).pipe(
                 Effect.catch((error) =>
-                  deps.logger.warn("failed to update idle compaction card", {
+                  deps.logger.warn("failed to update session compaction card", {
                     error: formatError(error),
                   }),
                 ),
@@ -233,7 +236,7 @@ const createSessionCompactionWorkflow = (deps: {
               Effect.tap((card) => attachCard(card)),
               Effect.catch((error) =>
                 deps.logger
-                  .warn("failed to post idle compaction card", {
+                  .warn("failed to post session compaction card", {
                     channelId: session.channelId,
                     sessionId: session.opencode.sessionId,
                     error: formatError(error),
