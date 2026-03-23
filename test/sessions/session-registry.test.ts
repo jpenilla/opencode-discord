@@ -8,11 +8,10 @@ import {
   type SessionHandle,
 } from "@/opencode/service.ts";
 import {
-  createSessionIndex,
-  createSessionRegistry,
+  buildSessionIndex,
+  createSessionLifecycle,
   SessionStore,
   type SessionStoreShape,
-  type SessionRegistryState,
 } from "@/sessions/session-runtime.ts";
 import type { ActiveRun } from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
@@ -61,12 +60,6 @@ const makeHandle = (
 
 const makeActiveRun = () => unsafeStub<ActiveRun>({});
 
-const makeState = (): SessionRegistryState => ({
-  sessionsByChannelId: new Map(),
-  sessionsBySessionId: new Map(),
-  activeRunsBySessionId: new Map(),
-});
-
 const runEffect = runTestEffect;
 
 class SettingsUnavailable extends Data.TaggedError("SettingsUnavailable")<{
@@ -90,7 +83,7 @@ const appendClosed = (closed: Ref.Ref<string[]>, sessionId: string) =>
   Effect.runSync(appendRef(closed, sessionId));
 
 const makeHarness = async (options?: HarnessOptions) => {
-  const stateRef = await makeRef(makeState());
+  const sessionIndex = await runTestEffect(buildSessionIndex());
   const created = await makeRef<CreateSessionInput[]>([]);
   const started = await makeRef<string[]>([]);
   const removedRoots = await makeRef<string[]>([]);
@@ -166,8 +159,8 @@ const makeHarness = async (options?: HarnessOptions) => {
   });
 
   const lifecycle = await runTestEffect(
-    createSessionRegistry(
-      createSessionIndex(stateRef),
+    createSessionLifecycle(
+      sessionIndex,
       (session) => appendRef(started, session.opencode.sessionId),
       "",
       "hey opencode",
@@ -189,13 +182,20 @@ const makeHarness = async (options?: HarnessOptions) => {
 
   return {
     lifecycle,
-    stateRef,
     created,
     started,
     removedRoots,
     closed,
     persisted,
   };
+};
+
+type Harness = Awaited<ReturnType<typeof makeHarness>>;
+
+const createLoadedSession = async (lifecycle: Harness["lifecycle"], channelId = "channel-1") => {
+  const message = makeRegistryMessage(channelId);
+  const session = await runEffect(lifecycle.createOrGetSession(message));
+  return { message, session };
 };
 
 describe("createSessionRegistry", () => {
@@ -291,8 +291,7 @@ describe("createSessionRegistry", () => {
       isSessionHealthy: (session) =>
         appendRef(healthChecks, session.sessionId).pipe(Effect.as(true)),
     });
-    const message = makeRegistryMessage("channel-busy");
-    const session = await runEffect(lifecycle.createOrGetSession(message));
+    const { message, session } = await createLoadedSession(lifecycle, "channel-busy");
     session.activeRun = makeActiveRun();
 
     const result = await runEffect(lifecycle.ensureSessionHealth(session, message, "busy"));
@@ -324,8 +323,7 @@ describe("createSessionRegistry", () => {
       isSessionHealthy: (session) => Effect.succeed(session.sessionId !== "session-1"),
     });
 
-    const message = makeRegistryMessage("channel-recover");
-    const session = await runEffect(lifecycle.createOrGetSession(message));
+    const { message, session } = await createLoadedSession(lifecycle, "channel-recover");
     const previousSessionId = session.opencode.sessionId;
     await runEffect(lifecycle.setActiveRun(session, makeActiveRun()));
 
@@ -364,8 +362,7 @@ describe("createSessionRegistry", () => {
 
   test("invalidates the loaded session without deleting the session root", async () => {
     const { lifecycle, closed, removedRoots, persisted } = await makeHarness();
-    const message = makeRegistryMessage("channel-1");
-    const session = await runEffect(lifecycle.createOrGetSession(message));
+    const { session } = await createLoadedSession(lifecycle);
 
     expect(
       await runEffect(lifecycle.invalidateSession("channel-1", "user requested /new-session")),
@@ -407,11 +404,9 @@ describe("createSessionRegistry", () => {
   });
 
   test("does not invalidate a loaded session while it is busy", async () => {
-    const { lifecycle, closed, persisted } = await makeHarness({
-      isSessionBusy: () => Effect.succeed(true),
-    });
-    const message = makeRegistryMessage("channel-1");
-    const session = await runEffect(lifecycle.createOrGetSession(message));
+    const { lifecycle, closed, persisted } = await makeHarness();
+    const { session } = await createLoadedSession(lifecycle);
+    session.activeRun = makeActiveRun();
 
     expect(
       await runEffect(lifecycle.invalidateSession("channel-1", "user requested /new-session")),
@@ -436,12 +431,52 @@ describe("createSessionRegistry", () => {
     );
   });
 
-  test("does not close idle sessions while an external busy callback reports active work", async () => {
+  test("does not invalidate a loaded session while callback-driven work is present", async () => {
+    const { lifecycle, closed, persisted } = await makeHarness({
+      isSessionBusy: () => Effect.succeed(true),
+    });
+    const { session } = await createLoadedSession(lifecycle);
+
+    expect(
+      await runEffect(lifecycle.invalidateSession("channel-1", "user requested /new-session")),
+    ).toBe(false);
+
+    expect(await readRef(closed)).toEqual([]);
+    expect(await runEffect(lifecycle.getSession("channel-1"))).toBe(session);
+    expect(await runEffect(Ref.get(persisted))).toEqual(
+      new Map([
+        [
+          "channel-1",
+          {
+            channelId: "channel-1",
+            opencodeSessionId: session.opencode.sessionId,
+            rootDir: session.rootDir,
+            systemPromptAppend: session.systemPromptAppend,
+            createdAt: session.createdAt,
+            lastActivityAt: session.lastActivityAt,
+          },
+        ],
+      ]),
+    );
+  });
+
+  test("does not close idle sessions while an active run is present", async () => {
+    const { lifecycle, closed } = await makeHarness();
+    const { session } = await createLoadedSession(lifecycle);
+    session.activeRun = makeActiveRun();
+    session.lastActivityAt = 0;
+
+    await runEffect(lifecycle.closeExpiredSessions(30 * 60 * 1_000 + 1));
+
+    expect(await readRef(closed)).toEqual([]);
+    expect(await runEffect(lifecycle.getSession(session.channelId))).toBe(session);
+  });
+
+  test("does not close idle sessions while callback-driven work is present", async () => {
     const { lifecycle, closed } = await makeHarness({
       isSessionBusy: () => Effect.succeed(true),
     });
-
-    const session = await runEffect(lifecycle.createOrGetSession(makeRegistryMessage("channel-1")));
+    const { session } = await createLoadedSession(lifecycle);
     session.lastActivityAt = 0;
 
     await runEffect(lifecycle.closeExpiredSessions(30 * 60 * 1_000 + 1));

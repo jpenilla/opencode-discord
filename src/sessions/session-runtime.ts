@@ -22,7 +22,6 @@ import { OpencodeService } from "@/opencode/service.ts";
 import {
   IdleCompactionWorkflow,
   type IdleCompactionWorkflowInterruptResult,
-  type IdleCompactionWorkflowShape,
   type IdleCompactionWorkflowStartResult,
   makeIdleCompactionWorkflow,
 } from "@/sessions/compaction/idle-compaction-workflow.ts";
@@ -68,7 +67,7 @@ import { Logger } from "@/util/logging.ts";
 type FsEnv = FileSystem.FileSystem | Path.Path;
 type SessionContext = { session: ChannelSession; activeRun: ActiveRun | null };
 
-export type SessionRegistryState = {
+type SessionRegistryState = {
   sessionsByChannelId: Map<string, ChannelSession>;
   sessionsBySessionId: Map<string, ChannelSession>;
   activeRunsBySessionId: Map<string, ActiveRun>;
@@ -84,7 +83,10 @@ export type SessionActivity = {
 
 export type ChannelActivity = { type: "missing" } | { type: "present"; activity: SessionActivity };
 
-export type QueuedMessageRunRequest = { sessionId: string; destination: RunRequestDestination };
+export type QueuedMessageRunRequest = {
+  sessionId: string;
+  destination: RunRequestDestination;
+};
 
 export type RunInterruptRequestResult =
   | { type: "requested" }
@@ -202,63 +204,75 @@ const SessionStoreLayer = Layer.effect(
   }),
 );
 
-export const createSessionIndex = (stateRef: Ref.Ref<SessionRegistryState>) => {
-  const read = <A>(map: (state: SessionRegistryState) => A) =>
-    Ref.get(stateRef).pipe(Effect.map(map));
-  const update = (f: (state: SessionRegistryState) => void) =>
-    Ref.update(stateRef, (current) => {
-      const next = {
-        ...current,
-        sessionsByChannelId: new Map(current.sessionsByChannelId),
-        sessionsBySessionId: new Map(current.sessionsBySessionId),
-        activeRunsBySessionId: new Map(current.activeRunsBySessionId),
-      };
-      f(next);
-      return next;
+export const buildSessionIndex = () =>
+  Effect.gen(function* () {
+    const stateRef = yield* Ref.make<SessionRegistryState>({
+      sessionsByChannelId: new Map(),
+      sessionsBySessionId: new Map(),
+      activeRunsBySessionId: new Map(),
     });
 
-  return {
-    updateSession: (
-      session: ChannelSession,
-      options?: {
-        previousSessionId?: string;
-        activeRun?: ActiveRun | null;
-      },
-    ) =>
-      update((state) => {
-        const previousSessionId = options?.previousSessionId ?? session.opencode.sessionId;
-        const activeRun = options && "activeRun" in options ? options.activeRun : session.activeRun;
-        state.sessionsByChannelId.set(session.channelId, session);
-        state.sessionsBySessionId.delete(previousSessionId);
-        state.sessionsBySessionId.set(session.opencode.sessionId, session);
-        state.activeRunsBySessionId.delete(previousSessionId);
-        if (activeRun) {
-          state.activeRunsBySessionId.set(session.opencode.sessionId, activeRun);
-        }
-      }),
-    deleteSession: (session: ChannelSession) =>
-      update((state) => {
-        state.sessionsByChannelId.delete(session.channelId);
-        state.sessionsBySessionId.delete(session.opencode.sessionId);
-        state.activeRunsBySessionId.delete(session.opencode.sessionId);
-      }),
-    getSession: (channelId: string) => read((state) => state.sessionsByChannelId.get(channelId)),
-    getActiveRunBySessionId: (sessionId: string) =>
-      read((state) => state.activeRunsBySessionId.get(sessionId) ?? null),
-    getSessionContext: (sessionId: string) =>
-      read((state): SessionContext | null => {
-        const session = state.sessionsBySessionId.get(sessionId);
-        return session
-          ? { session, activeRun: state.activeRunsBySessionId.get(sessionId) ?? null }
-          : null;
-      }),
-    snapshotSessions: () => read((state) => [...state.sessionsByChannelId.values()]),
-  } as const;
-};
+    const read = <A>(map: (state: SessionRegistryState) => A) =>
+      Ref.get(stateRef).pipe(Effect.map(map));
+    const update = (f: (state: SessionRegistryState) => void) =>
+      Ref.update(stateRef, (current) => {
+        const next = {
+          ...current,
+          sessionsByChannelId: new Map(current.sessionsByChannelId),
+          sessionsBySessionId: new Map(current.sessionsBySessionId),
+          activeRunsBySessionId: new Map(current.activeRunsBySessionId),
+        };
+        f(next);
+        return next;
+      });
 
-type SessionIndex = ReturnType<typeof createSessionIndex>;
+    return {
+      updateSession: (
+        session: ChannelSession,
+        options?: {
+          previousSessionId?: string;
+          activeRun?: ActiveRun | null;
+        },
+      ) =>
+        update((state) => {
+          const previousSessionId = options?.previousSessionId ?? session.opencode.sessionId;
+          const activeRun =
+            options && "activeRun" in options ? options.activeRun : session.activeRun;
+          state.sessionsByChannelId.set(session.channelId, session);
+          state.sessionsBySessionId.delete(previousSessionId);
+          state.sessionsBySessionId.set(session.opencode.sessionId, session);
+          state.activeRunsBySessionId.delete(previousSessionId);
+          if (activeRun) {
+            state.activeRunsBySessionId.set(session.opencode.sessionId, activeRun);
+          }
+        }),
+      deleteSession: (session: ChannelSession) =>
+        update((state) => {
+          state.sessionsByChannelId.delete(session.channelId);
+          state.sessionsBySessionId.delete(session.opencode.sessionId);
+          state.activeRunsBySessionId.delete(session.opencode.sessionId);
+        }),
+      getSession: (channelId: string) => read((state) => state.sessionsByChannelId.get(channelId)),
+      getActiveRunBySessionId: (sessionId: string) =>
+        read((state) => state.activeRunsBySessionId.get(sessionId) ?? null),
+      getSessionContext: (sessionId: string) =>
+        read((state): SessionContext | null => {
+          const session = state.sessionsBySessionId.get(sessionId);
+          return session
+            ? {
+                session,
+                activeRun: state.activeRunsBySessionId.get(sessionId) ?? null,
+              }
+            : null;
+        }),
+      snapshotSessions: () => read((state) => [...state.sessionsByChannelId.values()]),
+      readState: () => Ref.get(stateRef),
+    } as const;
+  });
 
-const createSessionLifecycle = (
+type SessionIndex = Effect.Success<ReturnType<typeof buildSessionIndex>>;
+
+export const createSessionLifecycle = (
   sessionIndex: SessionIndex,
   startWorker: (session: ChannelSession) => Effect.Effect<void, unknown, FsEnv>,
   sessionInstructions: string,
@@ -682,13 +696,14 @@ const createSessionLifecycle = (
       );
 
     const shutdownSessions = () =>
-      sessionIndex
-        .snapshotSessions()
-        .pipe(
-          Effect.flatMap((sessions) =>
-            Effect.forEach(sessions, unloadSession, { concurrency: "unbounded", discard: true }),
-          ),
-        );
+      sessionIndex.snapshotSessions().pipe(
+        Effect.flatMap((sessions) =>
+          Effect.forEach(sessions, unloadSession, {
+            concurrency: "unbounded",
+            discard: true,
+          }),
+        ),
+      );
 
     return {
       getSession,
@@ -704,8 +719,6 @@ const createSessionLifecycle = (
     } as const;
   });
 
-export const createSessionRegistry = createSessionLifecycle;
-
 export const SessionRuntimeLayer = Layer.unwrap(
   Effect.gen(function* () {
     const logger = yield* Logger;
@@ -713,17 +726,10 @@ export const SessionRuntimeLayer = Layer.unwrap(
     const infoCards = yield* InfoCards;
     const opencode = yield* OpencodeService;
     const eventQueue = yield* OpencodeEventQueue;
-    const stateRef = yield* Ref.make<SessionRegistryState>({
-      sessionsByChannelId: new Map(),
-      sessionsBySessionId: new Map(),
-      activeRunsBySessionId: new Map(),
-    });
     const shutdownStartedRef = yield* Ref.make(false);
     const typingPausedRef = yield* Ref.make(new Set<string>());
     const fiberSet = yield* FiberSet.make();
-    const sessionIndex = createSessionIndex(stateRef);
-    let readSessionBusy: (session: ChannelSession) => Effect.Effect<boolean, unknown> = () =>
-      Effect.succeed(false);
+    const sessionIndex = yield* buildSessionIndex();
 
     const sendQuestionUiFailure = (message: Message, error: unknown) =>
       Effect.promise(() =>
@@ -733,28 +739,6 @@ export const SessionRuntimeLayer = Layer.unwrap(
         }),
       );
 
-    const sessionLifecycle = yield* createSessionLifecycle(
-      sessionIndex,
-      (session) =>
-        FiberSet.run(fiberSet, { startImmediately: true })(worker(session)).pipe(Effect.asVoid),
-      config.sessionInstructions,
-      config.triggerPhrase,
-      config.sessionIdleTimeoutMs,
-      readSessionBusy,
-    ).pipe(Effect.provide(SessionStoreLayer));
-    const {
-      getSession,
-      getActiveRunBySessionId,
-      getSessionContext,
-      setActiveRun,
-      createOrGetSession,
-      getOrRestoreSession,
-      ensureSessionHealth,
-      invalidateSession,
-      closeExpiredSessions,
-      shutdownSessions,
-    } = sessionLifecycle;
-
     const serviceLayer = Layer.mergeAll(
       Layer.succeed(Logger, logger),
       Layer.succeed(InfoCards, infoCards),
@@ -763,7 +747,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
     let questions!: QuestionRuntimeShape;
 
     const syncTyping = (sessionId: string) =>
-      getSessionContext(sessionId).pipe(
+      sessionIndex.getSessionContext(sessionId).pipe(
         Effect.flatMap((context) => {
           const activeRun = context?.activeRun ?? null;
           if (!activeRun) {
@@ -807,14 +791,14 @@ export const SessionRuntimeLayer = Layer.unwrap(
       sessionId: string,
       signals: ReadonlyArray<QuestionWorkflowSignal>,
     ) =>
-      getSessionContext(sessionId).pipe(
+      sessionIndex.getSessionContext(sessionId).pipe(
         Effect.flatMap((context) => applyQuestionSignals(context?.activeRun ?? null, signals)),
         Effect.andThen(syncTyping(sessionId)),
       );
     const runtimeSupportLayer = Layer.mergeAll(
       serviceLayer,
       Layer.succeed(QuestionSessionLookup, {
-        getSessionContext,
+        getSessionContext: sessionIndex.getSessionContext,
       }),
       Layer.succeed(QuestionSignalRouter, {
         apply: applySessionSignals,
@@ -825,57 +809,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
     );
 
     const idleCompaction = yield* makeIdleCompactionWorkflow().pipe(Effect.provide(serviceLayer));
-    readSessionBusy = (session) =>
-      questions
-        .hasPendingQuestions(session.opencode.sessionId)
-        .pipe(
-          Effect.flatMap((hasPendingQuestions) =>
-            hasPendingQuestions
-              ? Effect.succeed(true)
-              : idleCompaction.hasActive(session.opencode.sessionId),
-          ),
-        );
-    const runtimeServiceLayer = Layer.mergeAll(
-      runtimeSupportLayer,
-      Layer.succeed(QuestionRuntime, questions),
-      Layer.succeed(IdleCompactionWorkflow, idleCompaction),
-      Layer.succeed(RunSessionLifecycle, {
-        setActiveRun,
-        recoverSession: (session: ChannelSession, responseMessage: Message) =>
-          ensureSessionHealth(
-            session,
-            responseMessage,
-            "run failed with unhealthy opencode session",
-            false,
-          ).pipe(Effect.asVoid),
-      }),
-    );
-
-    const eventHandler = yield* makeSessionEventHandler.pipe(Effect.provide(runtimeServiceLayer));
-
-    yield* Queue.take(eventQueue).pipe(
-      Effect.flatMap((event) => eventHandler.handleEvent(event.payload)),
-      Effect.forever,
-      Effect.catch((error) =>
-        logger.error("opencode event dispatcher failed", {
-          error: formatError(error),
-        }),
-      ),
-      Effect.forkScoped,
-    );
-
-    yield* Effect.sleep(60_000).pipe(
-      Effect.andThen(closeExpiredSessions()),
-      Effect.forever,
-      Effect.catch((error) =>
-        logger.error("idle session sweeper failed", {
-          error: formatError(error),
-        }),
-      ),
-      Effect.forkScoped,
-    );
-
-    const runBatch = yield* makeRunOrchestrator().pipe(Effect.provide(runtimeServiceLayer));
+    let runBatch!: Effect.Success<ReturnType<typeof makeRunOrchestrator>>;
 
     const worker = (session: ChannelSession): Effect.Effect<never, never, FsEnv> =>
       Effect.forever(
@@ -896,10 +830,9 @@ export const SessionRuntimeLayer = Layer.unwrap(
         ),
       );
 
-    const shutdown = () => {
+    const shutdown: SessionRuntimeShape["shutdown"] = () => {
       const startShutdown = () =>
         Ref.modify(shutdownStartedRef, (started): readonly [boolean, boolean] => [!started, true]);
-      const readState = () => Ref.get(stateRef);
       const sessionFields = (session: ChannelSession) => ({
         channelId: session.channelId,
         sessionId: session.opencode.sessionId,
@@ -947,15 +880,17 @@ export const SessionRuntimeLayer = Layer.unwrap(
       const awaitSessionIdleObservedAfterInterruptLoop = (
         sessionId: string,
       ): Effect.Effect<void, unknown> =>
-        readState().pipe(
-          Effect.flatMap((state) =>
-            state.activeRunsBySessionId.has(sessionId)
-              ? Effect.sleep(SHUTDOWN_DRAIN_POLL_INTERVAL).pipe(
-                  Effect.andThen(awaitSessionIdleObservedAfterInterruptLoop(sessionId)),
-                )
-              : Effect.void,
-          ),
-        );
+        sessionIndex
+          .readState()
+          .pipe(
+            Effect.flatMap((state) =>
+              state.activeRunsBySessionId.has(sessionId)
+                ? Effect.sleep(SHUTDOWN_DRAIN_POLL_INTERVAL).pipe(
+                    Effect.andThen(awaitSessionIdleObservedAfterInterruptLoop(sessionId)),
+                  )
+                : Effect.void,
+            ),
+          );
       const awaitSessionIdleObservedAfterInterrupt = (session: ChannelSession) =>
         warnAfterGraceTimeout(
           awaitSessionIdleObservedAfterInterruptLoop(session.opencode.sessionId),
@@ -1014,7 +949,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
         });
       const readShutdownDrainState = () =>
         Effect.gen(function* () {
-          const state = yield* readState();
+          const state = yield* sessionIndex.readState();
           const sessionIds = [...state.sessionsBySessionId.keys()];
           const hasActiveRuns = state.activeRunsBySessionId.size > 0;
           const hasIdleCompactions =
@@ -1057,7 +992,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
             .cleanupShutdownQuestions()
             .pipe(catchShutdownWarn("failed to finalize pending questions during shutdown"));
 
-          const state = yield* readState();
+          const state = yield* sessionIndex.readState();
           const activeRuns = [...state.activeRunsBySessionId.entries()];
           const idleCompactionSessionIds = (yield* Effect.forEach(
             state.sessionsBySessionId.keys(),
@@ -1118,7 +1053,7 @@ export const SessionRuntimeLayer = Layer.unwrap(
                 yield* idleCompaction
                   .shutdown()
                   .pipe(catchShutdownWarn("failed to begin idle compaction shutdown"));
-                const state = yield* readState();
+                const state = yield* sessionIndex.readState();
                 yield* Effect.forEach(
                   [...state.sessionsBySessionId.values()],
                   requestSessionShutdown,
@@ -1132,7 +1067,9 @@ export const SessionRuntimeLayer = Layer.unwrap(
                 yield* FiberSet.clear(fiberSet).pipe(
                   catchShutdownWarn("failed to interrupt session workers on shutdown"),
                 );
-                yield* shutdownSessions().pipe(catchShutdownWarn("failed to shut down sessions"));
+                yield* sessionLifecycle
+                  .shutdownSessions()
+                  .pipe(catchShutdownWarn("failed to shut down sessions"));
               }),
         ),
         Effect.catch((error) =>
@@ -1160,6 +1097,59 @@ export const SessionRuntimeLayer = Layer.unwrap(
           } satisfies SessionActivity;
         }),
       );
+
+    const sessionLifecycle = yield* createSessionLifecycle(
+      sessionIndex,
+      (session) =>
+        FiberSet.run(fiberSet, { startImmediately: true })(worker(session)).pipe(Effect.asVoid),
+      config.sessionInstructions,
+      config.triggerPhrase,
+      config.sessionIdleTimeoutMs,
+      (session) => readSessionActivity(session).pipe(Effect.map((activity) => activity.isBusy)),
+    ).pipe(Effect.provide(SessionStoreLayer));
+    const runtimeServiceLayer = Layer.mergeAll(
+      runtimeSupportLayer,
+      Layer.succeed(QuestionRuntime, questions),
+      Layer.succeed(IdleCompactionWorkflow, idleCompaction),
+      Layer.succeed(RunSessionLifecycle, {
+        setActiveRun: sessionLifecycle.setActiveRun,
+        recoverSession: (session: ChannelSession, responseMessage: Message) =>
+          sessionLifecycle
+            .ensureSessionHealth(
+              session,
+              responseMessage,
+              "run failed with unhealthy opencode session",
+              false,
+            )
+            .pipe(Effect.asVoid),
+      }),
+    );
+
+    const eventHandler = yield* makeSessionEventHandler.pipe(Effect.provide(runtimeServiceLayer));
+
+    yield* Queue.take(eventQueue).pipe(
+      Effect.flatMap((event) => eventHandler.handleEvent(event.payload)),
+      Effect.forever,
+      Effect.catch((error) =>
+        logger.error("opencode event dispatcher failed", {
+          error: formatError(error),
+        }),
+      ),
+      Effect.forkScoped,
+    );
+
+    yield* Effect.sleep(60_000).pipe(
+      Effect.andThen(sessionLifecycle.closeExpiredSessions()),
+      Effect.forever,
+      Effect.catch((error) =>
+        logger.error("idle session sweeper failed", {
+          error: formatError(error),
+        }),
+      ),
+      Effect.forkScoped,
+    );
+
+    runBatch = yield* makeRunOrchestrator().pipe(Effect.provide(runtimeServiceLayer));
 
     const readChannelActivity = <R>(
       sessionEffect: Effect.Effect<ChannelSession | null | undefined, unknown, R>,
@@ -1210,9 +1200,13 @@ export const SessionRuntimeLayer = Layer.unwrap(
               readSessionActivity(session).pipe(
                 Effect.flatMap((updatedActivity) =>
                   !updatedActivity.hasPendingQuestions
-                    ? Effect.succeed<RunInterruptRequestResult>({ type: "requested" })
+                    ? Effect.succeed<RunInterruptRequestResult>({
+                        type: "requested",
+                      })
                     : setInterruptState(activeRun, false, null).pipe(
-                        Effect.as<RunInterruptRequestResult>({ type: "question-pending" }),
+                        Effect.as<RunInterruptRequestResult>({
+                          type: "question-pending",
+                        }),
                       ),
                 ),
               ),
@@ -1225,20 +1219,25 @@ export const SessionRuntimeLayer = Layer.unwrap(
       onPresent: (session: ChannelSession) => Effect.Effect<A, unknown, FsEnv>,
       onMissing: () => Effect.Effect<A, unknown>,
     ) =>
-      getOrRestoreSession(channelId).pipe(
-        Effect.flatMap((session) => (session ? onPresent(session) : onMissing())),
-      );
+      sessionLifecycle
+        .getOrRestoreSession(channelId)
+        .pipe(Effect.flatMap((session) => (session ? onPresent(session) : onMissing())));
 
     return Layer.succeed(SessionRuntime, {
-      readLoadedChannelActivity: (channelId) => readChannelActivity(getSession(channelId)),
+      readLoadedChannelActivity: (channelId) =>
+        readChannelActivity(sessionLifecycle.getSession(channelId)),
       readRestoredChannelActivity: (channelId) =>
-        readChannelActivity(getOrRestoreSession(channelId)),
-      getActiveRunBySessionId,
+        readChannelActivity(sessionLifecycle.getOrRestoreSession(channelId)),
+      getActiveRunBySessionId: sessionLifecycle.getActiveRunBySessionId,
       queueMessageRunRequest: (message, request, reason) =>
         Effect.gen(function* () {
-          const session = yield* createOrGetSession(message).pipe(
-            Effect.flatMap((session) => ensureSessionHealth(session, message, reason)),
-          );
+          const session = yield* sessionLifecycle
+            .createOrGetSession(message)
+            .pipe(
+              Effect.flatMap((session) =>
+                sessionLifecycle.ensureSessionHealth(session, message, reason),
+              ),
+            );
           session.progressChannel = message.channel.isSendable()
             ? (message.channel as SendableChannels)
             : null;
@@ -1250,9 +1249,9 @@ export const SessionRuntimeLayer = Layer.unwrap(
           } satisfies QueuedMessageRunRequest;
         }),
       routeQuestionInteraction: (interaction) => questions.routeInteraction(interaction),
-      invalidate: invalidateSession,
+      invalidate: sessionLifecycle.invalidateSession,
       updateLoadedChannelSettings: (channelId, settings) =>
-        getSession(channelId).pipe(
+        sessionLifecycle.getSession(channelId).pipe(
           Effect.flatMap((session) =>
             !session
               ? Effect.void
