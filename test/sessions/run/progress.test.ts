@@ -13,7 +13,7 @@ import {
   runProgressWorker,
   takeProgressBatch,
 } from "@/sessions/run/progress.ts";
-import type { ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
+import type { ChannelSession, RunProgressEvent } from "@/sessions/types.ts";
 import { cardText, makePostedMessage, makeSendableChannel } from "../../support/discord.ts";
 import { makeDeferred, runTestEffect } from "../../support/runtime.ts";
 import { unsafeStub } from "../../support/stub.ts";

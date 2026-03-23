@@ -8,7 +8,7 @@ import { InfoCardsLayer } from "@/discord/info-card.ts";
 import { OpencodeEventQueueLayer } from "@/opencode/events.ts";
 import { OpencodeServiceLayer } from "@/opencode/service.ts";
 import { SandboxBackendLayer } from "@/sandbox/backend.ts";
-import { SessionRuntimeLayer } from "@/sessions/session-runtime.ts";
+import { SessionRuntimeLayer } from "@/sessions/runtime.ts";
 import { installShutdownSignalHandlers } from "@/shutdown/signals.ts";
 import { StatePersistenceLayer } from "@/state/persistence.ts";
 import { ToolBridgeLayer } from "@/tools/bridge/server.ts";

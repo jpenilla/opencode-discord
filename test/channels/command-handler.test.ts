@@ -14,10 +14,10 @@ import {
   type SessionCompactionInterruptResult,
   type SessionCompactionStartResult,
   type SessionCompactionWorkflow,
-} from "@/sessions/compaction/session-compaction-workflow.ts";
-import { SessionRuntime, type SessionRuntimeShape } from "@/sessions/session-runtime.ts";
-import type { ChannelActivity } from "@/sessions/session-activity.ts";
-import { type ActiveRun, type ChannelSession, type RunRequest } from "@/sessions/session.ts";
+} from "@/sessions/compaction/workflow.ts";
+import { SessionRuntime, type SessionRuntimeShape } from "@/sessions/runtime.ts";
+import type { ChannelActivity } from "@/sessions/loaded/activity.ts";
+import { type ActiveRun, type ChannelSession, type RunRequest } from "@/sessions/types.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import { StatePersistence, type StatePersistenceShape } from "@/state/persistence.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";

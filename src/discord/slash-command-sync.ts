@@ -1,6 +1,6 @@
 import { SlashCommandBuilder, type Guild } from "discord.js";
 
-import { GUILD_COMMANDS, type GuildCommand } from "@/channels/commands.ts";
+import { GUILD_COMMANDS, type GuildCommand } from "@/channels/commands/registry.ts";
 
 const buildSlashCommandPayload = (command: Pick<GuildCommand, "name" | "description">) =>
   new SlashCommandBuilder().setName(command.name).setDescription(command.description).toJSON();

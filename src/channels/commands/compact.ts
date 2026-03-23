@@ -2,8 +2,8 @@ import { Effect } from "effect";
 
 import { CommandContext } from "@/discord/command-context.ts";
 import { decideCompactEntry, GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/channels/command-policy.ts";
-import type { GuildCommand } from "@/channels/commands.ts";
-import { SessionRuntime } from "@/sessions/session-runtime.ts";
+import type { GuildCommand } from "@/channels/commands/registry.ts";
+import { SessionRuntime } from "@/sessions/runtime.ts";
 
 export const compactCommand = {
   name: "compact",

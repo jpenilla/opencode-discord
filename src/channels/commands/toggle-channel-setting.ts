@@ -1,7 +1,7 @@
 import { Effect } from "effect";
 
 import { GUILD_TEXT_COMMAND_ONLY_MESSAGE } from "@/channels/command-policy.ts";
-import type { GuildCommand } from "@/channels/commands.ts";
+import type { GuildCommand } from "@/channels/commands/registry.ts";
 import { AppConfig } from "@/config.ts";
 import { CommandContext } from "@/discord/command-context.ts";
 import type { ChannelSettings } from "@/state/channel-settings.ts";
@@ -10,7 +10,7 @@ import {
   resolveChannelSettings,
   type PersistedChannelSettings,
 } from "@/state/channel-settings.ts";
-import { SessionRuntime } from "@/sessions/session-runtime.ts";
+import { SessionRuntime } from "@/sessions/runtime.ts";
 import { StatePersistence } from "@/state/persistence.ts";
 
 type ToggleableChannelSetting = keyof Pick<

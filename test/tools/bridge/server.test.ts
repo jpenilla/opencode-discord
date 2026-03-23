@@ -8,8 +8,8 @@ import type { MessageCreateOptions, SendableChannels } from "discord.js";
 import { Deferred, Effect, Fiber, Option, Redacted } from "effect";
 
 import type { AppConfigShape } from "@/config.ts";
-import type { ActiveRun } from "@/sessions/session.ts";
-import type { SessionRuntimeShape } from "@/sessions/session-runtime.ts";
+import type { ActiveRun } from "@/sessions/types.ts";
+import type { SessionRuntimeShape } from "@/sessions/runtime.ts";
 import { uploadMetadataHeader } from "@/tools/bridge/handlers/uploads.ts";
 import { handleToolBridgeRequest, runToolBridgeHttpRequest } from "@/tools/bridge/server.ts";
 import type { LoggerShape } from "@/util/logging.ts";

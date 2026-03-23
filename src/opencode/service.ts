@@ -25,7 +25,7 @@ import {
   resolvePromptModelOverride,
 } from "@/opencode/prompt-model.ts";
 import { requestData, requestOk, requestTrue } from "@/opencode/request.ts";
-import { renderTranscript } from "@/opencode/transcript.ts";
+import { renderTranscript } from "@/opencode/transcript/index.ts";
 import {
   SandboxBackend,
   type SandboxSession,

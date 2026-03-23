@@ -3,11 +3,11 @@ import type { Message, SendableChannels } from "discord.js";
 import { Deferred, Effect, Queue, Ref } from "effect";
 
 import type { PromptResult } from "@/opencode/service.ts";
-import type { QuestionRunWorkflow } from "@/sessions/question/question-workflow-types.ts";
-import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
+import type { QuestionRunWorkflow } from "@/sessions/question/types.ts";
+import type { AdmittedPromptContext } from "@/sessions/run/prompt/context.ts";
 import { executeRunBatch } from "@/sessions/run/run-executor.ts";
-import type { NonEmptyRunRequestBatch } from "@/sessions/run/run-batch.ts";
-import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
+import type { NonEmptyRunRequestBatch } from "@/sessions/run/batch.ts";
+import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/types.ts";
 import { appendRef, makeRef, readRef, runTestEffect } from "../../support/runtime.ts";
 import { makeRunMessage, makeTestSession } from "../../support/session.ts";
 

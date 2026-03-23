@@ -2,7 +2,7 @@ import { DiscordAPIError } from "discord.js";
 import type { MessageCreateOptions, SendableChannels } from "discord.js";
 import { Effect } from "effect";
 
-import type { ActiveRun } from "@/sessions/session.ts";
+import type { ActiveRun } from "@/sessions/types.ts";
 import {
   ToolBridgeDiscordApiError,
   ToolBridgeResponseError,

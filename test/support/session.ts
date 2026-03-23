@@ -5,15 +5,15 @@ import type {
   SessionCompactionInterruptResult,
   SessionCompactionStartResult,
   SessionCompactionWorkflow,
-} from "@/sessions/compaction/session-compaction-workflow.ts";
-import { createPromptState } from "@/sessions/run/prompt-state.ts";
+} from "@/sessions/compaction/workflow.ts";
+import { createPromptState } from "@/sessions/run/prompt/state.ts";
 import {
   noQuestionOutcome,
   type ActiveRun,
   type ChannelSession,
   type RunRequest,
   type RunProgressEvent,
-} from "@/sessions/session.ts";
+} from "@/sessions/types.ts";
 import { makeMessage, makeSessionHandle } from "./fixtures.ts";
 import { unsafeStub } from "./stub.ts";
 

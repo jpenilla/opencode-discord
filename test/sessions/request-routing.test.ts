@@ -3,7 +3,7 @@ import { Effect, Queue, Ref } from "effect";
 import type { Message } from "discord.js";
 
 import { enqueueRunRequest } from "@/sessions/request-routing.ts";
-import type { ActiveRun, RunRequest } from "@/sessions/session.ts";
+import type { ActiveRun, RunRequest } from "@/sessions/types.ts";
 
 const makeRequest = (id: string): RunRequest => ({
   message: { id } as Message,
