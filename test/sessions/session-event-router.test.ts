@@ -2,10 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { Deferred, Effect, Exit, Layer, Option, Ref } from "effect";
 
 import { OpencodeService, type PromptResult, type SessionHandle } from "@/opencode/service.ts";
-import type { IdleCompactionWorkflowShape } from "@/sessions/compaction/idle-compaction-workflow.ts";
-import { IdleCompactionWorkflow } from "@/sessions/compaction/idle-compaction-workflow.ts";
-import { makeSessionEventHandler } from "@/sessions/event-handler.ts";
+import type { SessionCompactionWorkflow } from "@/sessions/compaction/session-compaction-workflow.ts";
 import { beginPendingPrompt } from "@/sessions/run/prompt-state.ts";
+import { routeLoadedSessionEvent } from "@/sessions/session-event-router.ts";
 import { type ActiveRun, type ChannelSession } from "@/sessions/session.ts";
 import {
   makeAssistantMessageUpdatedEvent,
@@ -20,17 +19,14 @@ import {
 } from "../support/opencode-events.ts";
 import { getRef, makeSessionHandle, makeSilentLogger } from "../support/fixtures.ts";
 import { failTest } from "../support/errors.ts";
-import {
-  QuestionRuntime,
-  QuestionSessionLookup,
-  type QuestionRuntimeShape,
-} from "@/sessions/question/question-runtime.ts";
+import type {
+  QuestionRunWorkflow,
+  QuestionWorkflowEvent,
+} from "@/sessions/question/question-workflow-types.ts";
 import { appendRef, clearQueue, makeRef, takeAll } from "../support/runtime.ts";
 import { makeTestSessionState } from "../support/session.ts";
 import { unsafeStub } from "../support/stub.ts";
 import { Logger } from "@/util/logging.ts";
-
-type SessionContext = { session: ChannelSession; activeRun: ActiveRun | null };
 
 const beginPendingRun = async () =>
   makeSession(true).then(async (state) => ({
@@ -91,7 +87,7 @@ const makeSession = async (withActiveRun: boolean, showCompactionSummaries = tru
     },
   });
 
-const noopIdleCompactionWorkflow = unsafeStub<IdleCompactionWorkflowShape>({
+const noopSessionCompactionWorkflow = unsafeStub<SessionCompactionWorkflow>({
   handleCompacted: () => Effect.void,
   emitSummary: () => Effect.void,
 });
@@ -113,7 +109,7 @@ const makeSummaryHarness = async (
     }),
   );
 const beginPendingRuntime = async (input?: {
-  idleCompactionWorkflow?: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">;
+  sessionCompactionWorkflow?: Pick<SessionCompactionWorkflow, "emitSummary" | "handleCompacted">;
   readPromptResult?: SessionReadPromptResult;
 }) =>
   beginPendingRun().then((pending) => ({
@@ -121,7 +117,7 @@ const beginPendingRuntime = async (input?: {
     runtime: makeRuntime({
       session: pending.session,
       activeRun: pending.activeRun,
-      idleCompactionWorkflow: input?.idleCompactionWorkflow,
+      sessionCompactionWorkflow: input?.sessionCompactionWorkflow,
       readPromptResult: input?.readPromptResult,
     }),
   }));
@@ -135,59 +131,58 @@ type SessionReadPromptResult = (
 const makeRuntime = (input: {
   session?: ChannelSession | null;
   activeRun?: ActiveRun | null;
-  getSessionContext?: (sessionId: string) => Effect.Effect<SessionContext | null, unknown>;
-  handleQuestionEvent?: QuestionRuntimeShape["handleEvent"];
-  idleCompactionWorkflow?: Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted">;
+  handleQuestionEvent?: (event: QuestionWorkflowEvent) => Effect.Effect<void, unknown>;
+  sessionCompactionWorkflow?: Pick<SessionCompactionWorkflow, "emitSummary" | "handleCompacted">;
   readPromptResult?: SessionReadPromptResult;
 }) =>
-  Effect.runSync(
-    makeSessionEventHandler.pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          Layer.succeed(QuestionSessionLookup, {
-            getSessionContext:
-              input.getSessionContext ??
-              ((sessionId) =>
-                Effect.succeed(
-                  input.session && sessionId === input.session.opencode.sessionId
-                    ? { session: input.session, activeRun: input.activeRun ?? null }
-                    : null,
-                )),
-          }),
-          Layer.succeed(
-            QuestionRuntime,
-            unsafeStub({
-              handleEvent: input.handleQuestionEvent ?? (() => Effect.void),
-              routeInteraction: () => Effect.void,
-              hasPendingQuestions: () => Effect.succeed(false),
-              hasPendingQuestionsAnywhere: () => Effect.succeed(false),
-              terminateSession: () => Effect.void,
-              shutdownSession: () => Effect.void,
-              cleanupShutdownQuestions: () => Effect.void,
-            }),
-          ),
-          Layer.succeed(IdleCompactionWorkflow, {
-            ...noopIdleCompactionWorkflow,
-            ...input.idleCompactionWorkflow,
-          }),
-          Layer.succeed(
-            OpencodeService,
-            unsafeStub({
-              readPromptResult: input.readPromptResult ?? unexpectedPromptResultLoad,
-            }),
-          ),
-          Layer.succeed(Logger, makeSilentLogger()),
-        ),
-      ),
-    ),
-  );
+  (() => {
+    const session = input.session ?? null;
+    if (session) {
+      session.activeRun = input.activeRun ?? null;
+      session.compactionWorkflow = {
+        ...noopSessionCompactionWorkflow,
+        ...input.sessionCompactionWorkflow,
+      };
+      if (input.activeRun) {
+        input.activeRun.questionWorkflow = unsafeStub<QuestionRunWorkflow>({
+          handleEvent: input.handleQuestionEvent ?? (() => Effect.void),
+          routeInteraction: () => Effect.void,
+          hasPendingQuestions: () => Effect.succeed(false),
+          terminate: () => Effect.void,
+          shutdown: () => Effect.void,
+        });
+      }
+    }
 
-const makeSummaryWorkflow = (deps: {
-  readPromptResult: SessionReadPromptResult;
-  sendCompactionSummary: (_session: ChannelSession, text: string) => Effect.Effect<void, unknown>;
-}): Pick<IdleCompactionWorkflowShape, "emitSummary" | "handleCompacted"> => ({
-  ...noopIdleCompactionWorkflow,
-  emitSummary: ({ session, messageId }) =>
+    const layer = Layer.mergeAll(
+      Layer.succeed(
+        OpencodeService,
+        unsafeStub({
+          readPromptResult: input.readPromptResult ?? unexpectedPromptResultLoad,
+        }),
+      ),
+      Layer.succeed(Logger, makeSilentLogger()),
+    );
+
+    return {
+      handleEvent: (event: Parameters<typeof routeLoadedSessionEvent>[0]) =>
+        !session
+          ? Effect.void
+          : routeLoadedSessionEvent(event, session, input.activeRun ?? null).pipe(
+              Effect.provide(layer),
+            ),
+    };
+  })();
+
+const makeSummaryWorkflow = (
+  session: ChannelSession,
+  deps: {
+    readPromptResult: SessionReadPromptResult;
+    sendCompactionSummary: (_session: ChannelSession, text: string) => Effect.Effect<void, unknown>;
+  },
+): Pick<SessionCompactionWorkflow, "emitSummary" | "handleCompacted"> => ({
+  ...noopSessionCompactionWorkflow,
+  emitSummary: (messageId) =>
     Effect.sync(() => {
       if (session.emittedCompactionSummaryMessageIds.has(messageId)) {
         return false;
@@ -207,13 +202,14 @@ const makeSummaryWorkflow = (deps: {
     ),
 });
 
-describe("makeSessionEventHandler", () => {
+describe("routeLoadedSessionEvent", () => {
   test("routes question workflow events to the question runtime", async () => {
-    const { session } = await makeSession(false);
+    const { session, activeRun } = await makeSession(true);
     const questionEvents = await makeRef<unknown[]>([]);
 
     const runtime = makeRuntime({
       session,
+      activeRun,
       handleQuestionEvent: (event) => appendRef(questionEvents, event),
     });
 
@@ -246,9 +242,9 @@ describe("makeSessionEventHandler", () => {
 
     const runtime = makeRuntime({
       session,
-      idleCompactionWorkflow: {
-        ...noopIdleCompactionWorkflow,
-        handleCompacted: (sessionId) => appendRef(idleUpdates, sessionId),
+      sessionCompactionWorkflow: {
+        ...noopSessionCompactionWorkflow,
+        handleCompacted: () => appendRef(idleUpdates, session.opencode.sessionId),
       },
     });
 
@@ -262,10 +258,10 @@ describe("makeSessionEventHandler", () => {
     const idleUpdates = await makeRef(0);
 
     const runtime = makeRuntime({
-      getSessionContext: () => Effect.succeed(null),
+      session: null,
       handleQuestionEvent: () => Ref.update(questionEvents, (count) => count + 1),
-      idleCompactionWorkflow: {
-        ...noopIdleCompactionWorkflow,
+      sessionCompactionWorkflow: {
+        ...noopSessionCompactionWorkflow,
         handleCompacted: () => Ref.update(idleUpdates, (count) => count + 1),
       },
     });
@@ -283,7 +279,7 @@ describe("makeSessionEventHandler", () => {
 
     const runtime = makeRuntime({
       session,
-      idleCompactionWorkflow: makeSummaryWorkflow(summary),
+      sessionCompactionWorkflow: makeSummaryWorkflow(session, summary),
       readPromptResult: summary.readPromptResult,
     });
 
@@ -305,7 +301,7 @@ describe("makeSessionEventHandler", () => {
 
     const runtime = makeRuntime({
       session,
-      idleCompactionWorkflow: makeSummaryWorkflow(summary),
+      sessionCompactionWorkflow: makeSummaryWorkflow(session, summary),
       readPromptResult: summary.readPromptResult,
     });
 
@@ -327,11 +323,14 @@ describe("makeSessionEventHandler", () => {
     const summary = await makeSummaryHarness((messageId) =>
       messageId === "summary-1" ? "summary text" : "final reply",
     );
-
-    const { progressQueue, completion, runtime } = await beginPendingRuntime({
-      idleCompactionWorkflow: makeSummaryWorkflow(summary),
+    const pending = await beginPendingRun();
+    const runtime = makeRuntime({
+      session: pending.session,
+      activeRun: pending.activeRun,
+      sessionCompactionWorkflow: makeSummaryWorkflow(pending.session, summary),
       readPromptResult: summary.readPromptResult,
     });
+    const { progressQueue, completion } = pending;
 
     await handleEvents(
       runtime,

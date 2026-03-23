@@ -13,7 +13,7 @@ import {
   createQuestionWorkflowBatch,
   setQuestionBatchStatus,
   terminateQuestionBatch,
-} from "@/sessions/question/question-workflow-state.ts";
+} from "@/sessions/question/question-batch-state.ts";
 
 const request: QuestionRequest = {
   id: "req-1",
@@ -47,6 +47,7 @@ const request: QuestionRequest = {
 const makeBatch = () =>
   activateQuestionBatch(
     createQuestionWorkflowBatch({
+      sessionId: "ses-1",
       request,
       channelId: "channel-1",
       replyTargetMessage: { id: "reply-target" } as never,

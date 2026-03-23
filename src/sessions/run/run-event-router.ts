@@ -1,4 +1,4 @@
-import type { AssistantMessage, Event, ToolPart } from "@opencode-ai/sdk/v2";
+import type { Event } from "@opencode-ai/sdk/v2";
 import { Deferred, Effect, Queue } from "effect";
 
 import {
@@ -9,6 +9,12 @@ import {
 } from "@/opencode/events.ts";
 import { OpencodeService } from "@/opencode/service.ts";
 import {
+  isPreviousPromptMessage,
+  recordPromptAssistantMessage,
+  recordPromptUserMessage,
+  selectToolPartForActiveRun,
+} from "@/sessions/run/active-run-state.ts";
+import {
   handleAssistantMessageUpdated,
   handleSessionError as failPendingPromptFromSessionError,
   handleSessionStatusUpdated,
@@ -18,38 +24,6 @@ import {
 import type { ActiveRun, ChannelSession, RunProgressEvent } from "@/sessions/session.ts";
 import { formatError } from "@/util/errors.ts";
 import { Logger } from "@/util/logging.ts";
-
-const isPreviousPromptMessage = (activeRun: ActiveRun, messageId: string) =>
-  activeRun.previousPromptMessageIds.has(messageId);
-
-const recordPromptAssistantMessage = (activeRun: ActiveRun, message: AssistantMessage) => {
-  if (isCompactionSummaryAssistant(message)) {
-    return;
-  }
-
-  activeRun.assistantMessageParentIds.set(message.id, message.parentID);
-};
-
-const assistantBelongsToCurrentPrompt = (activeRun: ActiveRun, assistantMessageId: string) =>
-  activeRun.currentPromptUserMessageId !== null &&
-  activeRun.assistantMessageParentIds.get(assistantMessageId) ===
-    activeRun.currentPromptUserMessageId;
-
-const isInFlightToolPart = (status: ToolPart["state"]["status"]) =>
-  status === "pending" || status === "running";
-
-const selectToolPartForActiveRun = (activeRun: ActiveRun, toolPart: ToolPart) => {
-  const belongsToCurrentPrompt = assistantBelongsToCurrentPrompt(activeRun, toolPart.messageID);
-  const isObservedCall = activeRun.observedToolCallIds.has(toolPart.callID);
-  const isInFlight = isInFlightToolPart(toolPart.state.status);
-
-  if (!belongsToCurrentPrompt && !isObservedCall && !isInFlight) {
-    return null;
-  }
-
-  activeRun.observedToolCallIds.add(toolPart.callID);
-  return toolPart;
-};
 
 const toProgressEvent = (event: Event): RunProgressEvent | null => {
   const toolPart = getUpdatedPartByType(event, "tool");
@@ -111,13 +85,16 @@ export const routeRunEvent = (event: Event, session: ChannelSession, activeRun: 
       assistantMessage && !isPreviousPromptMessage(activeRun, assistantMessage.id);
 
     if (isNewUserMessage) {
-      activeRun.currentPromptMessageIds.add(userMessage.id);
-      activeRun.currentPromptUserMessageId = userMessage.id;
+      recordPromptUserMessage(activeRun, userMessage.id);
     }
 
     if (isNewAssistantMessage) {
-      activeRun.currentPromptMessageIds.add(assistantMessage.id);
-      recordPromptAssistantMessage(activeRun, assistantMessage);
+      if (!isCompactionSummaryAssistant(assistantMessage)) {
+        recordPromptAssistantMessage(activeRun, {
+          messageId: assistantMessage.id,
+          parentId: assistantMessage.parentID,
+        });
+      }
     }
 
     const relevantToolPart = toolPart ? selectToolPartForActiveRun(activeRun, toolPart) : null;

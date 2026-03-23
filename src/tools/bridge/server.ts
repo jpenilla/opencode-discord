@@ -22,7 +22,7 @@ export const handleToolBridgeRequest = (input: {
   request: IncomingMessage;
   pathname: string;
   config: AppConfigShape;
-  sessions: Pick<SessionRuntimeShape, "getActiveRunBySessionId">;
+  sessions: Pick<SessionRuntimeShape["runs"], "getActiveBySessionId">;
   logger: LoggerShape;
 }): Effect.Effect<ToolBridgeHttpResponse> => {
   if (
@@ -39,7 +39,7 @@ export const handleToolBridgeRequest = (input: {
 
   return Effect.gen(function* () {
     const parsedRequest = yield* route.parseRequest(input.request);
-    const activeRun = yield* input.sessions.getActiveRunBySessionId(parsedRequest.sessionID);
+    const activeRun = yield* input.sessions.getActiveBySessionId(parsedRequest.sessionID);
     if (!activeRun) {
       return jsonResponse(409, { error: "no active run for session" });
     }
@@ -83,7 +83,7 @@ export const runToolBridgeHttpRequest = (input: {
   response: ServerResponse;
   pathname: string;
   config: AppConfigShape;
-  sessions: Pick<SessionRuntimeShape, "getActiveRunBySessionId">;
+  sessions: Pick<SessionRuntimeShape["runs"], "getActiveBySessionId">;
   logger: LoggerShape;
 }) =>
   handleToolBridgeRequest(input).pipe(
@@ -138,7 +138,7 @@ export const ToolBridgeLayer = Layer.effectDiscard(
     const fs = yield* FileSystem.FileSystem;
     const logger = yield* Logger;
     const path = yield* Path.Path;
-    const sessions = yield* SessionRuntime;
+    const sessions = (yield* SessionRuntime).runs;
 
     yield* fs.makeDirectory(path.dirname(config.toolBridgeSocketPath), { recursive: true });
     yield* fs.remove(config.toolBridgeSocketPath, { force: true });

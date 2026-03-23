@@ -1,13 +1,18 @@
 import { Data, Deferred, Effect, Queue, Ref } from "effect";
 
 import type { PromptResult, SessionHandle, OpencodeServiceShape } from "@/opencode/service.ts";
+import {
+  readRunInterrupt,
+  resetPromptTracking,
+  setCurrentPromptContext,
+} from "@/sessions/run/active-run-state.ts";
 import { beginPendingPrompt, failPendingPrompt } from "@/sessions/run/prompt-state.ts";
 import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
 import {
   admitRequestBatchToActiveRun,
   type NonEmptyRunRequestBatch,
 } from "@/sessions/run/run-batch.ts";
-import { resetActivePromptTracking, type ActiveRun } from "@/sessions/session.ts";
+import { type ActiveRun } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
 class PromptInterruptedError extends Data.TaggedError("PromptInterruptedError")<{
@@ -19,6 +24,7 @@ type PromptCoordinatorActiveRun = Pick<
   | "attachmentMessagesById"
   | "currentPromptContext"
   | "interruptRequested"
+  | "interruptSource"
   | "previousPromptMessageIds"
   | "currentPromptMessageIds"
   | "promptState"
@@ -34,7 +40,7 @@ export type ActiveRunPromptCoordinatorInput = {
   session: SessionHandle;
   activeRun: PromptCoordinatorActiveRun;
   initialRequests: NonEmptyRunRequestBatch;
-  awaitIdleCompaction: (sessionId: string) => Effect.Effect<void, unknown>;
+  awaitIdleCompaction: () => Effect.Effect<void, unknown>;
   submitPrompt: OpencodeServiceShape["submitPrompt"];
   handlePromptCompleted: (
     promptContext: AdmittedPromptContext,
@@ -58,12 +64,12 @@ export const coordinateActiveRunPrompts = (
   Effect.gen(function* () {
     const runPrompt = (promptContext: AdmittedPromptContext) =>
       Effect.gen(function* () {
-        if (input.activeRun.interruptRequested) {
+        if (readRunInterrupt(input.activeRun).requested) {
           return yield* new PromptInterruptedError({ message: "interrupted" });
         }
 
-        resetActivePromptTracking(input.activeRun);
-        input.activeRun.currentPromptContext = promptContext;
+        resetPromptTracking(input.activeRun);
+        setCurrentPromptContext(input.activeRun, promptContext);
         const completion = yield* beginPendingPrompt(input.activeRun.promptState);
 
         yield* input
@@ -84,7 +90,7 @@ export const coordinateActiveRunPrompts = (
       input.initialRequests,
       "initial",
     );
-    yield* input.awaitIdleCompaction(input.session.sessionId);
+    yield* input.awaitIdleCompaction();
     let result = yield* runPrompt(initialPrompt);
     yield* input.handlePromptCompleted(initialPrompt, result);
 

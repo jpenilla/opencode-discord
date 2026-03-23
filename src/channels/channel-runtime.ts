@@ -72,7 +72,7 @@ export const ChannelRuntimeLayer = Layer.effect(
                   attachmentMessages,
                 } satisfies RunRequest;
 
-                const queued = yield* sessionRuntime.queueMessageRunRequest(
+                const queued = yield* sessionRuntime.runs.queueMessage(
                   message,
                   request,
                   "health probe failed before queueing run",
@@ -101,7 +101,7 @@ export const ChannelRuntimeLayer = Layer.effect(
             : interaction.isButton() ||
                 interaction.isStringSelectMenu() ||
                 interaction.isModalSubmit()
-              ? sessionRuntime.routeQuestionInteraction(interaction)
+              ? sessionRuntime.questions.routeInteraction(interaction)
               : Effect.void,
         ),
       shutdown: () =>

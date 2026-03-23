@@ -35,6 +35,7 @@ export type QuestionBatchStatus = "active" | "submitting" | "answered" | "reject
 export type QuestionBatchCardStatus = QuestionBatchStatus | "expired";
 
 export type PendingQuestionBatchView = {
+  sessionId: string;
   request: QuestionRequest;
   version: number;
   page: number;
@@ -44,7 +45,7 @@ export type PendingQuestionBatchView = {
   resolvedAnswers?: ReadonlyArray<QuestionAnswer>;
 };
 
-type QuestionActionMeta = { requestID: string; version: number };
+type QuestionActionMeta = { sessionID: string; requestID: string; version: number };
 type IndexedQuestionActionKind =
   | "option-prev"
   | "option-next"
@@ -166,6 +167,7 @@ const emptyQuestionDraft = (): QuestionDraft => ({
 const setQuestionActionId = (action: QuestionAction) =>
   [
     CUSTOM_ID_PREFIX,
+    action.sessionID,
     action.requestID,
     String(action.version),
     action.kind,
@@ -175,15 +177,19 @@ const setQuestionActionId = (action: QuestionAction) =>
     .join(":");
 
 const withQuestionActionMeta = (
+  sessionID: string,
   requestID: string,
   version: number,
   action: QuestionActionInput,
-): QuestionAction => ({ ...action, requestID, version }) as QuestionAction;
+): QuestionAction => ({ ...action, sessionID, requestID, version }) as QuestionAction;
 
 export const parseQuestionActionId = (customId: string): QuestionAction | null => {
   const parts = customId.split(":");
-  const [prefix, requestID, versionRaw, kind, questionIndex] = parts;
-  if (prefix !== CUSTOM_ID_PREFIX || !requestID || !versionRaw || !kind) {
+  const [prefix, sessionID, requestID, versionRaw, kind, questionIndex] = parts;
+  if (!prefix || !sessionID || !requestID || !versionRaw || !kind) {
+    return null;
+  }
+  if (prefix !== CUSTOM_ID_PREFIX) {
     return null;
   }
 
@@ -192,19 +198,19 @@ export const parseQuestionActionId = (customId: string): QuestionAction | null =
     return null;
   }
 
-  if (parts.length !== 4 && parts.length !== 5) {
+  if (parts.length !== 5 && parts.length !== 6) {
     return null;
   }
 
   switch (kind) {
     case "question-prev":
-      return { kind, requestID, version };
+      return { kind, sessionID, requestID, version };
     case "question-next":
-      return { kind, requestID, version };
+      return { kind, sessionID, requestID, version };
     case "submit":
-      return { kind, requestID, version };
+      return { kind, sessionID, requestID, version };
     case "reject":
-      return { kind, requestID, version };
+      return { kind, sessionID, requestID, version };
     case "clear":
     case "select":
     case "custom":
@@ -215,7 +221,7 @@ export const parseQuestionActionId = (customId: string): QuestionAction | null =
       if (!Number.isInteger(parsedIndex) || parsedIndex < 0) {
         return null;
       }
-      return { kind, requestID, version, questionIndex: parsedIndex };
+      return { kind, sessionID, requestID, version, questionIndex: parsedIndex };
     }
     default:
       return null;
@@ -306,7 +312,7 @@ const renderResolvedQuestionSections = (input: PendingQuestionBatchView) => {
 const renderQuestionContainer = (input: PendingQuestionBatchView) => {
   const container = new ContainerBuilder().setAccentColor(QUESTION_STATUS_COLORS[input.status]);
   const action = (value: QuestionActionInput) =>
-    withQuestionActionMeta(input.request.id, input.version, value);
+    withQuestionActionMeta(input.sessionId, input.request.id, input.version, value);
   const questionButton = (
     value: QuestionActionInput,
     label: string,
@@ -509,6 +515,7 @@ export const setQuestionCustomAnswer = (
 export const clearQuestionDraft = (): QuestionDraft => emptyQuestionDraft();
 
 export const buildQuestionModal = (input: {
+  sessionID: string;
   requestID: string;
   version: number;
   questionIndex: number;
@@ -518,7 +525,7 @@ export const buildQuestionModal = (input: {
   new ModalBuilder()
     .setCustomId(
       setQuestionActionId(
-        withQuestionActionMeta(input.requestID, input.version, {
+        withQuestionActionMeta(input.sessionID, input.requestID, input.version, {
           kind: "modal",
           questionIndex: input.questionIndex,
         }),

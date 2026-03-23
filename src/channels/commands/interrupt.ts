@@ -23,7 +23,10 @@ export const interruptCommand = {
       return;
     }
 
-    const channelActivity = yield* sessionRuntime.readRestoredChannelActivity(context.channelId);
+    const channelActivity = yield* sessionRuntime.activity.readChannel(
+      context.channelId,
+      "restored",
+    );
     const entry = decideInterruptEntry({
       channelActivity,
     });
@@ -34,7 +37,7 @@ export const interruptCommand = {
 
     if (entry.target === "run") {
       yield* context.ack();
-      const interruptResult = yield* sessionRuntime.requestRunInterrupt(context.channelId);
+      const interruptResult = yield* sessionRuntime.runs.requestInterrupt(context.channelId);
       if (interruptResult.type === "failed") {
         yield* context.complete(
           formatErrorResponse("## ❌ Failed to interrupt run", formatError(interruptResult.error)),
@@ -51,7 +54,7 @@ export const interruptCommand = {
     }
 
     yield* context.ack();
-    const result = yield* sessionRuntime.requestCompactionInterrupt(context.channelId);
+    const result = yield* sessionRuntime.compaction.requestInterrupt(context.channelId);
     if (result.type === "failed") {
       yield* context.complete(result.message);
       return;

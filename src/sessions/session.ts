@@ -12,6 +12,8 @@ import type { Ref } from "effect/Ref";
 
 import type { TypingLoop } from "@/discord/messages.ts";
 import type { SessionHandle } from "@/opencode/service.ts";
+import type { SessionCompactionWorkflow } from "@/sessions/compaction/session-compaction-workflow.ts";
+import type { QuestionRunWorkflow } from "@/sessions/question/question-workflow-types.ts";
 import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
 import type { ChannelSettings } from "@/state/channel-settings.ts";
 import type { PendingPrompt } from "@/sessions/run/prompt-state.ts";
@@ -80,14 +82,11 @@ export type ActiveRun = {
   acceptFollowUps: Ref<boolean>;
   typing: TypingLoop;
   finalizeProgress: (reason?: RunFinalizationReason) => Effect.Effect<void, unknown>;
+  questionWorkflow: QuestionRunWorkflow | null;
   questionOutcome: QuestionOutcome;
   interruptRequested: boolean;
   interruptSource: RunInterruptSource | null;
 };
-
-export const currentPromptReplyTargetMessage = (
-  activeRun: Pick<ActiveRun, "currentPromptContext" | "originMessage">,
-) => activeRun.currentPromptContext?.replyTargetMessage ?? activeRun.originMessage;
 
 export type RunProgressEvent =
   | { type: "run-finalizing"; ack: Deferred<void>; reason?: RunFinalizationReason }
@@ -109,25 +108,7 @@ export type ChannelSession = {
   progressChannel: SendableChannels | null;
   progressMentionContext: Message | null;
   emittedCompactionSummaryMessageIds: Set<string>;
+  compactionWorkflow: SessionCompactionWorkflow;
   queue: Queue<RunRequest>;
   activeRun: ActiveRun | null;
-};
-
-export const resetActivePromptTracking = (
-  activeRun: Pick<
-    ActiveRun,
-    | "previousPromptMessageIds"
-    | "currentPromptMessageIds"
-    | "currentPromptUserMessageId"
-    | "assistantMessageParentIds"
-    | "observedToolCallIds"
-  >,
-) => {
-  // Keep only the prompt that just finished as the ignore window so the next prompt binds to its
-  // own message lineage without carrying unbounded history forward.
-  activeRun.previousPromptMessageIds = activeRun.currentPromptMessageIds;
-  activeRun.currentPromptMessageIds = new Set<string>();
-  activeRun.currentPromptUserMessageId = null;
-  activeRun.assistantMessageParentIds.clear();
-  activeRun.observedToolCallIds.clear();
 };

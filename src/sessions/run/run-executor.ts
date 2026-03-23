@@ -17,17 +17,24 @@ import { InfoCards } from "@/discord/info-card.ts";
 import { sendFinalResponse, startTypingLoop, type TypingLoop } from "@/discord/messages.ts";
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
 import { OpencodeService } from "@/opencode/service.ts";
-import { IdleCompactionWorkflow } from "@/sessions/compaction/idle-compaction-workflow.ts";
 import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
+import {
+  clearRunInterrupt,
+  clearRunQuestionOutcome,
+  createActiveRun,
+  currentPromptReplyTargetMessage,
+  readRunInterrupt,
+  readRunQuestionOutcome,
+  setRunQuestionWorkflow,
+} from "@/sessions/run/active-run-state.ts";
 import { coordinateActiveRunPrompts } from "@/sessions/run/prompt-coordinator.ts";
 import { runProgressWorker } from "@/sessions/run/progress.ts";
 import type { PendingPrompt } from "@/sessions/run/prompt-state.ts";
 import type { NonEmptyRunRequestBatch } from "@/sessions/run/run-batch.ts";
 import { decideRunCompletion } from "@/sessions/run/run-completion.ts";
 import { QuestionRuntime } from "@/sessions/question/question-runtime.ts";
+import type { QuestionRunWorkflow } from "@/sessions/question/question-workflow-types.ts";
 import {
-  currentPromptReplyTargetMessage,
-  noQuestionOutcome,
   type ActiveRun,
   type ChannelSession,
   type RunInterruptSource,
@@ -96,6 +103,7 @@ export const executeRunBatch =
     runPrompts: (input: {
       channelId: string;
       session: SessionHandle;
+      awaitIdleCompaction: () => Effect.Effect<void, unknown>;
       activeRun: ActiveRun;
       initialRequests: NonEmptyRunRequestBatch;
       handlePromptCompleted: (
@@ -111,7 +119,10 @@ export const executeRunBatch =
     ) => Effect.Effect<unknown, unknown>,
     startTyping: (message: Message) => TypingLoop,
     setActiveRun: SetActiveRun,
-    terminateQuestions: (sessionId: string) => Effect.Effect<void, unknown>,
+    createQuestionWorkflow: (
+      session: ChannelSession,
+      activeRun: ActiveRun,
+    ) => Effect.Effect<QuestionRunWorkflow, unknown>,
     recoverSession: RecoverSession,
     sendInterrupted: (message: Message, source: RunInterruptSource) => Effect.Effect<void, unknown>,
     sendFinal: (message: Message, text: string) => Effect.Effect<void, unknown>,
@@ -141,26 +152,20 @@ export const executeRunBatch =
       ).pipe(Effect.forkChild({ startImmediately: true }));
       const finalizeProgress = (reason?: RunFinalizationReason) =>
         finishProgressWorker(session, progressQueue, progressFiber, logger, reason);
-      const activeRun: ActiveRun = {
+      const activeRun: ActiveRun = createActiveRun({
         originMessage,
         workdir: session.workdir,
-        attachmentMessagesById: new Map<string, Message>(),
-        currentPromptContext: null,
-        previousPromptMessageIds: new Set<string>(),
-        currentPromptMessageIds: new Set<string>(),
-        currentPromptUserMessageId: null,
-        assistantMessageParentIds: new Map<string, string>(),
-        observedToolCallIds: new Set<string>(),
         progressQueue,
         promptState,
         followUpQueue,
         acceptFollowUps,
         typing: startTyping(originMessage),
         finalizeProgress,
-        questionOutcome: noQuestionOutcome(),
-        interruptRequested: false,
-        interruptSource: null,
-      };
+      });
+      const questionWorkflow = yield* createQuestionWorkflow(session, activeRun);
+      yield* Effect.sync(() => {
+        setRunQuestionWorkflow(activeRun, questionWorkflow);
+      });
       yield* setActiveRun(session, activeRun);
 
       const stopTyping = Effect.promise(() => activeRun.typing.stop());
@@ -169,8 +174,8 @@ export const executeRunBatch =
         Effect.gen(function* () {
           const completion = decideRunCompletion({
             transcript: result.transcript,
-            questionOutcome: activeRun.questionOutcome,
-            interruptRequested: activeRun.interruptRequested,
+            questionOutcome: readRunQuestionOutcome(activeRun),
+            interruptRequested: readRunInterrupt(activeRun).requested,
           });
 
           switch (completion.type) {
@@ -184,21 +189,21 @@ export const executeRunBatch =
               break;
           }
 
-          activeRun.questionOutcome = noQuestionOutcome();
+          clearRunQuestionOutcome(activeRun);
         });
 
       const runResult = yield* Effect.gen(function* () {
         const result = yield* runPrompts({
           channelId: session.channelId,
           session: session.opencode,
+          awaitIdleCompaction: () => session.compactionWorkflow.awaitCompletion(),
           activeRun,
           initialRequests,
           handlePromptCompleted,
         });
 
-        if (activeRun.interruptRequested) {
-          activeRun.interruptRequested = false;
-          activeRun.interruptSource = null;
+        if (readRunInterrupt(activeRun).requested) {
+          clearRunInterrupt(activeRun);
           yield* logger.warn("interrupt request did not stop run", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
@@ -216,10 +221,10 @@ export const executeRunBatch =
 
       if (Result.isFailure(runResult)) {
         const error = runResult.failure;
-        if (activeRun.interruptRequested) {
-          const interruptSource = activeRun.interruptSource ?? "user";
-          activeRun.interruptRequested = false;
-          activeRun.interruptSource = null;
+        const interrupt = readRunInterrupt(activeRun);
+        if (interrupt.requested) {
+          const interruptSource = interrupt.source ?? "user";
+          clearRunInterrupt(activeRun);
           yield* logger.info("interrupted run", {
             channelId: session.channelId,
             sessionId: session.opencode.sessionId,
@@ -241,7 +246,7 @@ export const executeRunBatch =
       }
 
       yield* stopTyping;
-      yield* terminateQuestions(session.opencode.sessionId);
+      yield* activeRun.questionWorkflow?.terminate() ?? Effect.void;
       yield* setActiveRun(session, null);
       yield* Fiber.interrupt(progressFiber);
 
@@ -252,7 +257,6 @@ export const executeRunBatch =
 
 export const makeRunOrchestrator = () =>
   Effect.gen(function* () {
-    const idleCompaction = yield* IdleCompactionWorkflow;
     const infoCards = yield* InfoCards;
     const logger = yield* Logger;
     const opencode = yield* OpencodeService;
@@ -268,13 +272,20 @@ export const makeRunOrchestrator = () =>
       );
 
     return executeRunBatch(
-      ({ channelId, session, activeRun, initialRequests, handlePromptCompleted }) =>
+      ({
+        channelId,
+        session,
+        awaitIdleCompaction,
+        activeRun,
+        initialRequests,
+        handlePromptCompleted,
+      }) =>
         coordinateActiveRunPrompts({
           channelId,
           session,
           activeRun,
           initialRequests,
-          awaitIdleCompaction: idleCompaction.awaitCompletion,
+          awaitIdleCompaction,
           submitPrompt: opencode.submitPrompt,
           handlePromptCompleted,
           logger,
@@ -282,7 +293,7 @@ export const makeRunOrchestrator = () =>
       runProgressWorker,
       (message) => startTypingLoop(message.channel),
       runSessionLifecycle.setActiveRun,
-      questionRuntime.terminateSession,
+      questionRuntime.createRunWorkflow,
       runSessionLifecycle.recoverSession,
       (message, source) =>
         infoCards

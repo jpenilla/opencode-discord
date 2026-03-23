@@ -28,6 +28,7 @@ export type QuestionBatchDomainState = {
 };
 
 export type QuestionBatchRuntimeState = {
+  sessionId: string;
   channelId: string;
   replyTargetMessage: Message;
   lastModifiedBy: string | null;
@@ -43,6 +44,7 @@ const emptyResolvedAnswers = (request: QuestionRequest): Array<QuestionAnswer> =
   request.questions.map(() => []);
 
 export const createQuestionWorkflowBatch = (input: {
+  sessionId: string;
   request: QuestionRequest;
   channelId: string;
   replyTargetMessage: Message;
@@ -57,6 +59,7 @@ export const createQuestionWorkflowBatch = (input: {
     lifecycle: "posting",
   },
   runtime: {
+    sessionId: input.sessionId,
     channelId: input.channelId,
     replyTargetMessage: input.replyTargetMessage,
     lastModifiedBy: null,
@@ -65,6 +68,7 @@ export const createQuestionWorkflowBatch = (input: {
 });
 
 export const questionBatchView = (batch: QuestionWorkflowBatch): PendingQuestionBatchView => ({
+  sessionId: batch.runtime.sessionId,
   request: batch.domain.request,
   version: batch.domain.version,
   page: batch.domain.page,

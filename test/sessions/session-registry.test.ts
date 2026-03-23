@@ -7,12 +7,9 @@ import {
   type OpencodeServiceShape,
   type SessionHandle,
 } from "@/opencode/service.ts";
-import {
-  buildSessionIndex,
-  createSessionLifecycle,
-  SessionStore,
-  type SessionStoreShape,
-} from "@/sessions/session-runtime.ts";
+import { buildSessionIndex } from "@/sessions/session-index.ts";
+import { makeSessionRegistry } from "@/sessions/session-registry.ts";
+import { SessionStore, type SessionStoreShape } from "@/sessions/session-store.ts";
 import type { ActiveRun } from "@/sessions/session.ts";
 import type { PersistedChannelSettings } from "@/state/channel-settings.ts";
 import type { PersistedChannelSession } from "@/state/persistence.ts";
@@ -159,16 +156,51 @@ const makeHarness = async (options?: HarnessOptions) => {
   });
 
   const lifecycle = await runTestEffect(
-    createSessionLifecycle(
+    makeSessionRegistry(
       sessionIndex,
-      (session) => appendRef(started, session.opencode.sessionId),
+      {
+        startWorker: (session) => appendRef(started, session.opencode.sessionId),
+        readActivity: (session) =>
+          (options?.isSessionBusy
+            ? options.isSessionBusy(session.opencode.sessionId)
+            : Effect.succeed(false)
+          ).pipe(
+            Effect.map((callbackBusy) => ({
+              hasActiveRun: Boolean(session.activeRun),
+              hasPendingQuestions: false,
+              hasIdleCompaction: false,
+              hasQueuedWork: false,
+              isBusy: Boolean(session.activeRun) || callbackBusy,
+            })),
+          ),
+        createCompactionWorkflow: () =>
+          Effect.succeed({
+            hasActive: () => Effect.succeed(false),
+            awaitCompletion: () => Effect.void,
+            start: () =>
+              Effect.succeed({
+                type: "rejected",
+                message: "unexpected compaction start",
+              } as const),
+            requestInterrupt: () =>
+              Effect.succeed({
+                type: "failed",
+                message: "unexpected compaction interrupt",
+              } as const),
+            handleCompacted: () => Effect.void,
+            handleInterrupted: () => Effect.void,
+            emitSummary: () => Effect.void,
+            shutdown: () => Effect.void,
+          }),
+        routeEvent: () => Effect.void,
+        interruptRunForShutdown: () => Effect.succeed(false),
+        interruptCompactionForShutdown: () => Effect.void,
+        awaitSessionIdleObservedAfterInterrupt: () => Effect.void,
+        finalizeInterruptedRunShutdown: () => Effect.void,
+      },
       "",
       "hey opencode",
       30 * 60 * 1_000,
-      (session) =>
-        options?.isSessionBusy
-          ? options.isSessionBusy(session.opencode.sessionId)
-          : Effect.succeed(false),
     ).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -194,7 +226,7 @@ type Harness = Awaited<ReturnType<typeof makeHarness>>;
 
 const createLoadedSession = async (lifecycle: Harness["lifecycle"], channelId = "channel-1") => {
   const message = makeRegistryMessage(channelId);
-  const session = await runEffect(lifecycle.createOrGetSession(message));
+  const session = await runEffect(lifecycle.ensureSessionForMessage(message));
   return { message, session };
 };
 
@@ -221,10 +253,10 @@ describe("createSessionRegistry", () => {
     const message = makeRegistryMessage("channel-1");
 
     const [first, second] = await runConcurrent(
-      lifecycle.createOrGetSession(message),
+      lifecycle.ensureSessionForMessage(message),
       Deferred.await(createStarted).pipe(
         Effect.andThen(succeed(releaseCreate, undefined)),
-        Effect.andThen(lifecycle.createOrGetSession(message)),
+        Effect.andThen(lifecycle.ensureSessionForMessage(message)),
       ),
     );
 
@@ -254,10 +286,10 @@ describe("createSessionRegistry", () => {
     const message = makeRegistryMessage("channel-retry");
 
     const exits = await runConcurrent(
-      Effect.exit(lifecycle.createOrGetSession(message)),
+      Effect.exit(lifecycle.ensureSessionForMessage(message)),
       Deferred.await(createStarted).pipe(
         Effect.andThen(succeed(releaseCreate, undefined)),
-        Effect.andThen(Effect.exit(lifecycle.createOrGetSession(message))),
+        Effect.andThen(Effect.exit(lifecycle.ensureSessionForMessage(message))),
       ),
     );
 
@@ -278,7 +310,7 @@ describe("createSessionRegistry", () => {
     });
 
     await expect(
-      lifecycle.createOrGetSession(makeRegistryMessage("channel-fail")).pipe(runEffect),
+      lifecycle.ensureSessionForMessage(makeRegistryMessage("channel-fail")).pipe(runEffect),
     ).rejects.toThrow("settings unavailable");
 
     expect(await readRef(removedRoots)).toEqual(["/tmp/session-root-1"]);
@@ -294,7 +326,7 @@ describe("createSessionRegistry", () => {
     const { message, session } = await createLoadedSession(lifecycle, "channel-busy");
     session.activeRun = makeActiveRun();
 
-    const result = await runEffect(lifecycle.ensureSessionHealth(session, message, "busy"));
+    const result = await runEffect(lifecycle.ensureHealthySession(session, message, "busy"));
 
     expect(result).toBe(session);
     expect(await readRef(healthChecks)).toEqual([]);
@@ -325,35 +357,37 @@ describe("createSessionRegistry", () => {
 
     const { message, session } = await createLoadedSession(lifecycle, "channel-recover");
     const previousSessionId = session.opencode.sessionId;
-    await runEffect(lifecycle.setActiveRun(session, makeActiveRun()));
+    await runEffect(lifecycle.updateActiveRun(session, makeActiveRun()));
 
     const [first, second] = await runConcurrent(
-      lifecycle.ensureSessionHealth(session, message, "recover", false),
+      lifecycle.ensureHealthySession(session, message, "recover", false),
       Deferred.await(recreateStarted).pipe(
         Effect.andThen(succeed(releaseRecreate, undefined)),
-        Effect.andThen(lifecycle.ensureSessionHealth(session, message, "recover", false)),
+        Effect.andThen(lifecycle.ensureHealthySession(session, message, "recover", false)),
       ),
     );
 
-    expect(first).toBe(session);
-    expect(second).toBe(session);
-    expect(session.opencode.sessionId).toBe("session-2");
+    expect(first).not.toBe(session);
+    expect(second).toBe(first);
+    expect(first.opencode.sessionId).toBe("session-2");
     expect(await readRef(createCount)).toBe(2);
-    expect(await runEffect(lifecycle.getSession(message.channelId))).toBe(session);
-    expect(await runEffect(lifecycle.getSessionContext(previousSessionId))).toBeNull();
-    expect(await runEffect(lifecycle.getSessionContext(session.opencode.sessionId))).toEqual({
-      session,
+    expect(await runEffect(lifecycle.findLoadedSession(message.channelId))).toBe(first);
+    expect(await runEffect(lifecycle.findLoadedContextBySessionId(previousSessionId))).toBeNull();
+    expect(
+      await runEffect(lifecycle.findLoadedContextBySessionId(first.opencode.sessionId)),
+    ).toEqual({
+      session: first,
       activeRun: null,
     });
-    expect(await runEffect(lifecycle.getActiveRunBySessionId(previousSessionId))).toBeNull();
+    expect(await runEffect(lifecycle.findActiveRunBySessionId(previousSessionId))).toBeNull();
     expect(await readRef(closed)).toEqual(["session-1"]);
   });
 
   test("shuts down sessions, closes handles, and keeps persistent session roots", async () => {
     const { lifecycle, closed, removedRoots } = await makeHarness();
 
-    await runEffect(lifecycle.createOrGetSession(makeRegistryMessage("channel-1")));
-    await runEffect(lifecycle.createOrGetSession(makeRegistryMessage("channel-2")));
+    await runEffect(lifecycle.ensureSessionForMessage(makeRegistryMessage("channel-1")));
+    await runEffect(lifecycle.ensureSessionForMessage(makeRegistryMessage("channel-2")));
     await runEffect(lifecycle.shutdownSessions());
 
     expect(await readRef(closed)).toEqual(["session-1", "session-2"]);
@@ -369,7 +403,7 @@ describe("createSessionRegistry", () => {
     ).toBe(true);
 
     expect(await readRef(closed)).toEqual([session.opencode.sessionId]);
-    expect(await runEffect(lifecycle.getSession("channel-1"))).toBeUndefined();
+    expect(await runEffect(lifecycle.findLoadedSession("channel-1"))).toBeUndefined();
     expect(await readRef(persisted)).toEqual(new Map());
     expect(await readRef(removedRoots)).toEqual([]);
   });
@@ -389,7 +423,7 @@ describe("createSessionRegistry", () => {
     const message = makeRegistryMessage("channel-race");
 
     const [created, invalidated] = await runConcurrent(
-      lifecycle.createOrGetSession(message),
+      lifecycle.ensureSessionForMessage(message),
       Deferred.await(createStarted).pipe(
         Effect.andThen(succeed(releaseCreate, undefined)),
         Effect.andThen(lifecycle.invalidateSession("channel-race", "user requested /new-session")),
@@ -398,7 +432,7 @@ describe("createSessionRegistry", () => {
 
     expect(created.opencode.sessionId).toBe("session-race");
     expect(invalidated).toBe(true);
-    expect(await runEffect(lifecycle.getSession("channel-race"))).toBeUndefined();
+    expect(await runEffect(lifecycle.findLoadedSession("channel-race"))).toBeUndefined();
     expect(await readRef(persisted)).toEqual(new Map());
     expect(await readRef(closed)).toEqual(["session-race"]);
   });
@@ -413,7 +447,7 @@ describe("createSessionRegistry", () => {
     ).toBe(false);
 
     expect(await readRef(closed)).toEqual([]);
-    expect(await runEffect(lifecycle.getSession("channel-1"))).toBe(session);
+    expect(await runEffect(lifecycle.findLoadedSession("channel-1"))).toBe(session);
     expect(await runEffect(Ref.get(persisted))).toEqual(
       new Map([
         [
@@ -442,7 +476,7 @@ describe("createSessionRegistry", () => {
     ).toBe(false);
 
     expect(await readRef(closed)).toEqual([]);
-    expect(await runEffect(lifecycle.getSession("channel-1"))).toBe(session);
+    expect(await runEffect(lifecycle.findLoadedSession("channel-1"))).toBe(session);
     expect(await runEffect(Ref.get(persisted))).toEqual(
       new Map([
         [
@@ -469,7 +503,7 @@ describe("createSessionRegistry", () => {
     await runEffect(lifecycle.closeExpiredSessions(30 * 60 * 1_000 + 1));
 
     expect(await readRef(closed)).toEqual([]);
-    expect(await runEffect(lifecycle.getSession(session.channelId))).toBe(session);
+    expect(await runEffect(lifecycle.findLoadedSession(session.channelId))).toBe(session);
   });
 
   test("does not close idle sessions while callback-driven work is present", async () => {
@@ -482,6 +516,6 @@ describe("createSessionRegistry", () => {
     await runEffect(lifecycle.closeExpiredSessions(30 * 60 * 1_000 + 1));
 
     expect(await readRef(closed)).toEqual([]);
-    expect(await runEffect(lifecycle.getSession(session.channelId))).toBe(session);
+    expect(await runEffect(lifecycle.findLoadedSession(session.channelId))).toBe(session);
   });
 });

@@ -1,6 +1,11 @@
 import type { Message } from "discord.js";
 import { Effect, Queue, Ref } from "effect";
 
+import type {
+  SessionCompactionInterruptResult,
+  SessionCompactionStartResult,
+  SessionCompactionWorkflow,
+} from "@/sessions/compaction/session-compaction-workflow.ts";
 import { createPromptState } from "@/sessions/run/prompt-state.ts";
 import {
   noQuestionOutcome,
@@ -11,6 +16,26 @@ import {
 } from "@/sessions/session.ts";
 import { makeMessage, makeSessionHandle } from "./fixtures.ts";
 import { unsafeStub } from "./stub.ts";
+
+const makeSessionCompactionWorkflow = (): SessionCompactionWorkflow =>
+  unsafeStub<SessionCompactionWorkflow>({
+    hasActive: () => Effect.succeed(false),
+    awaitCompletion: () => Effect.void,
+    start: () =>
+      Effect.succeed<SessionCompactionStartResult>({
+        type: "rejected",
+        message: "unexpected compaction start",
+      }),
+    requestInterrupt: () =>
+      Effect.succeed<SessionCompactionInterruptResult>({
+        type: "failed",
+        message: "unexpected compaction interrupt",
+      }),
+    handleCompacted: () => Effect.void,
+    handleInterrupted: () => Effect.void,
+    emitSummary: () => Effect.void,
+    shutdown: () => Effect.void,
+  });
 
 export const makeRunMessage = (id: string): Message =>
   makeMessage({
@@ -34,6 +59,7 @@ export const makeTestSession = (overrides: Partial<ChannelSession> = {}): Channe
     progressChannel: null,
     progressMentionContext: null,
     emittedCompactionSummaryMessageIds: new Set<string>(),
+    compactionWorkflow: makeSessionCompactionWorkflow(),
     queue: Effect.runSync(Queue.unbounded<RunRequest>()),
     activeRun: null,
     ...overrides,
@@ -66,6 +92,7 @@ export const makeTestActiveRun = async (
       stop: () => Promise.resolve(),
     },
     finalizeProgress: () => Effect.void,
+    questionWorkflow: null,
     questionOutcome: noQuestionOutcome(),
     interruptRequested: false,
     interruptSource: null,

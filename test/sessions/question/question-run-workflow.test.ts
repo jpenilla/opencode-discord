@@ -1,27 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2";
 import type { Interaction, Message, MessageCreateOptions, MessageEditOptions } from "discord.js";
-import { Deferred, Effect, Layer, Ref } from "effect";
+import { Deferred, Effect } from "effect";
 
-import { OpencodeService, type OpencodeServiceShape } from "@/opencode/service.ts";
-import {
-  applyQuestionSignals,
-  questionTypingAction,
-  runQuestionTypingAction,
-  type QuestionWorkflowSignal,
-} from "@/sessions/question/question-run-state.ts";
-import {
-  makeQuestionRuntime,
-  QuestionSignalRouter,
-  QuestionSessionLookup,
-  type QuestionRuntimeShape,
-} from "@/sessions/question/question-runtime.ts";
-import type { ActiveRun, ChannelSession } from "@/sessions/session.ts";
-import { Logger } from "@/util/logging.ts";
+import type { OpencodeServiceShape } from "@/opencode/service.ts";
+import { makeQuestionRunWorkflow } from "@/sessions/question/question-run-workflow.ts";
+import type { QuestionRunWorkflow } from "@/sessions/question/question-workflow-types.ts";
+import type { ChannelSession } from "@/sessions/session.ts";
 import { makePostedMessage, makeRecordedComponentInteraction } from "../../support/discord.ts";
 import { makeMessage, makeSilentLogger } from "../../support/fixtures.ts";
 import { failTest } from "../../support/errors.ts";
-import { makeRef, runTestEffect } from "../../support/runtime.ts";
+import { runTestEffect } from "../../support/runtime.ts";
 import { makeTestActiveRun, makeTestSession } from "../../support/session.ts";
 import { unsafeStub } from "../../support/stub.ts";
 
@@ -48,7 +37,6 @@ type HarnessOptions = {
   replyTargetId?: string;
 };
 type Harness = Awaited<ReturnType<typeof makeHarness>>;
-type SessionContext = { session: ChannelSession; activeRun: ActiveRun };
 type InteractionReply = { content?: string | null };
 
 const makeHarness = async (options?: HarnessOptions) => {
@@ -64,7 +52,6 @@ const makeHarness = async (options?: HarnessOptions) => {
   let typingPauseCount = 0;
   let typingResumeCount = 0;
   let typingStopCount = 0;
-  const typingPausedRef = await makeRef(false);
   const questionPostStarted = await runTestEffect(Deferred.make<void>());
   const allowQuestionPost = await runTestEffect(Deferred.make<void>());
 
@@ -117,69 +104,35 @@ const makeHarness = async (options?: HarnessOptions) => {
     rootDir: "/tmp/root",
     activeRun,
   });
-  const sessionContextRef = await runTestEffect(
-    Ref.make<SessionContext | null>({ session, activeRun }),
-  );
-  let rawRuntime!: QuestionRuntimeShape;
-
-  const reconcileTyping = () =>
-    rawRuntime.hasPendingQuestions(session.opencode.sessionId).pipe(
-      Effect.flatMap((pending) =>
-        Ref.modify(typingPausedRef, (paused) => [{ paused, pending } as const, pending]).pipe(
-          Effect.flatMap(({ paused }) =>
-            runQuestionTypingAction({
-              sessionId: session.opencode.sessionId,
-              activeRun,
-              action: questionTypingAction(activeRun, pending, paused),
-              logger: { warn: () => Effect.void },
-            }),
-          ),
-        ),
-      ),
-    );
-
-  const applySignalsAndTyping = (
-    _sessionId: string,
-    signals: ReadonlyArray<QuestionWorkflowSignal>,
-  ) => applyQuestionSignals(activeRun, signals).pipe(Effect.andThen(reconcileTyping()));
+  let rawRuntime!: QuestionRunWorkflow;
 
   rawRuntime = await runTestEffect(
-    makeQuestionRuntime((message, error) =>
-      Effect.sync(() => {
-        questionUiFailureTargetIds.push(message.id);
-        sentQuestionUiFailures.push(String(error));
-      }),
-    ).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          Layer.succeed(QuestionSessionLookup, {
-            getSessionContext: () => Ref.get(sessionContextRef),
+    makeQuestionRunWorkflow({
+      session,
+      activeRun,
+      sendQuestionUiFailure: (message, error) =>
+        Effect.sync(() => {
+          questionUiFailureTargetIds.push(message.id);
+          sentQuestionUiFailures.push(String(error));
+        }),
+      logger: makeSilentLogger(),
+      opencode: unsafeStub<Pick<OpencodeServiceShape, "replyToQuestion" | "rejectQuestion">>({
+        replyToQuestion: (_opencode: unknown, requestId: string) =>
+          Effect.sync(() => {
+            replyCalls.push(requestId);
           }),
-          Layer.succeed(QuestionSignalRouter, {
-            apply: applySignalsAndTyping,
-          }),
-          Layer.succeed(
-            OpencodeService,
-            unsafeStub<OpencodeServiceShape>({
-              replyToQuestion: (_opencode: unknown, requestId: string) =>
-                Effect.sync(() => {
-                  replyCalls.push(requestId);
-                }),
-              rejectQuestion: (_opencode: unknown, requestId: string) =>
-                Effect.sync(() => {
-                  rejectCalls.push(requestId);
-                }).pipe(
-                  Effect.flatMap(() =>
-                    options?.rejectResult === "failure" ? failTest("reject failed") : Effect.void,
-                  ),
-                ),
-            }),
+        rejectQuestion: (_opencode: unknown, requestId: string) =>
+          Effect.sync(() => {
+            rejectCalls.push(requestId);
+          }).pipe(
+            Effect.flatMap(() =>
+              options?.rejectResult === "failure" ? failTest("reject failed") : Effect.void,
+            ),
           ),
-          Layer.succeed(Logger, makeSilentLogger()),
-        ),
-      ),
-    ),
+      }),
+    }),
   );
+  activeRun.questionWorkflow = rawRuntime;
 
   const recordInteractionReply = (payload: unknown) =>
     Promise.resolve(push(interactionReplies, payload as InteractionReply)).then(() => undefined);
@@ -190,16 +143,15 @@ const makeHarness = async (options?: HarnessOptions) => {
     rawRuntime,
     handleEvent: rawRuntime.handleEvent,
     routeEvent: rawRuntime.handleEvent,
-    handleInteraction: (interaction: Interaction) => rawRuntime.routeInteraction(interaction),
-    terminateForSession: rawRuntime.terminateSession,
-    shutdown: () => rawRuntime.shutdownSession(session.opencode.sessionId),
+    handleInteraction: rawRuntime.routeInteraction,
+    terminateForSession: () => rawRuntime.terminate(),
+    shutdown: () => rawRuntime.shutdown(),
   };
   const interactionBase = { onReply: recordInteractionReply, onUpdate: recordInteractionUpdate };
 
   return {
     runtime,
     session,
-    sessionContextRef,
     activeRun,
     request: makeRequest(),
     postedPayloads,
@@ -242,7 +194,7 @@ const makeHarness = async (options?: HarnessOptions) => {
   };
 };
 
-describe("makeQuestionRuntime", () => {
+describe("makeQuestionRunWorkflow", () => {
   const ask = (harness: Harness, request = harness.request) =>
     Effect.runPromise(
       harness.runtime.routeEvent({
@@ -271,11 +223,10 @@ describe("makeQuestionRuntime", () => {
       harness,
       harness.makeModalInteraction({ customId: questionId(harness, suffix), value, userId }),
     );
-  const questionId = (harness: Harness, suffix: string) => `ocq:${harness.request.id}:0:${suffix}`;
+  const questionId = (harness: Harness, suffix: string) =>
+    `ocq:${harness.session.opencode.sessionId}:${harness.request.id}:0:${suffix}`;
   const hasPendingQuestions = (harness: Harness) =>
-    Effect.runPromise(harness.runtime.rawRuntime.hasPendingQuestions("session-1"));
-  const hasPendingQuestionsAnywhere = (harness: Harness) =>
-    Effect.runPromise(harness.runtime.rawRuntime.hasPendingQuestionsAnywhere());
+    Effect.runPromise(harness.runtime.rawRuntime.hasPendingQuestions());
   const expectStaleStateReply = (harness: Harness) =>
     expect(harness.interactionReplies.at(-1)?.content).toBe(staleStateMessage);
 
@@ -330,9 +281,7 @@ describe("makeQuestionRuntime", () => {
   test("expires question batches for a session and treats later interactions as expired", async () => {
     const harness = await askHarness();
 
-    await Effect.runPromise(
-      harness.runtime.terminateForSession(harness.session.opencode.sessionId),
-    );
+    await Effect.runPromise(harness.runtime.terminateForSession());
     await press(harness, "submit");
 
     expect(harness.editedPayloads).toHaveLength(1);
@@ -359,7 +308,7 @@ describe("makeQuestionRuntime", () => {
 
   test("expires a submitting batch if the session disappears before the reply RPC starts", async () => {
     const harness = await askHarness();
-    await Effect.runPromise(Ref.set(harness.sessionContextRef, null));
+    await Effect.runPromise(harness.runtime.terminateForSession());
     await press(harness, "submit");
 
     expect(harness.replyCalls).toEqual([]);
@@ -402,22 +351,18 @@ describe("makeQuestionRuntime", () => {
   test("shuts down open questions per session and ignores later question events", async () => {
     const harness = await makeHarness();
 
-    const firstResult = await ask(harness);
-
-    expect(firstResult).not.toBeNull();
-    expect(await hasPendingQuestionsAnywhere(harness)).toBe(true);
+    await ask(harness);
+    expect(await hasPendingQuestions(harness)).toBe(true);
 
     await Effect.runPromise(harness.runtime.shutdown());
 
     expect(harness.rejectCalls).toEqual([harness.request.id]);
-    expect(await hasPendingQuestionsAnywhere(harness)).toBe(false);
+    expect(await hasPendingQuestions(harness)).toBe(false);
     expect(harness.postedPayloads).toHaveLength(1);
     expect(harness.editedPayloads).toHaveLength(1);
     expect(JSON.stringify(harness.editedPayloads[0])).toContain("Questions expired");
 
-    const lateResult = await ask(harness, makeRequest("req-2"));
-
-    expect(lateResult).toBeUndefined();
+    await ask(harness, makeRequest("req-2"));
     expect(harness.rejectCalls).toEqual([harness.request.id]);
   });
 });

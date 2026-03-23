@@ -92,10 +92,10 @@ const queuedPromptFor = (message: Message, prompt: string) =>
   buildQueuedFollowUpPrompt([promptFor(message, prompt)]);
 
 const waitForNoActiveRun = (
-  sessions: { getActiveRunBySessionId: (sessionId: string) => Effect.Effect<unknown, unknown> },
+  sessions: { getActiveBySessionId: (sessionId: string) => Effect.Effect<unknown, unknown> },
   sessionId: string,
 ) =>
-  sessions.getActiveRunBySessionId(sessionId).pipe(
+  sessions.getActiveBySessionId(sessionId).pipe(
     Effect.flatMap((activeRun) => (activeRun ? failTest("run still active") : Effect.void)),
     Effect.eventually,
     Effect.timeoutOrElse({
@@ -163,7 +163,7 @@ const makeToolUpdatedEvent = (input: {
 type Harness = Awaited<ReturnType<typeof makeHarness>>;
 type RuntimeServices = {
   channels: ChannelRuntimeShape;
-  sessions: Pick<SessionRuntimeShape, "getActiveRunBySessionId">;
+  sessions: Pick<SessionRuntimeShape["runs"], "getActiveBySessionId">;
 };
 
 const makePromptMessage = (
@@ -243,7 +243,7 @@ const waitForQuestionCard = (replyPayloads: unknown[]) =>
   );
 
 const waitForQuestionUiFailure = (sessions: RuntimeServices["sessions"]) =>
-  sessions.getActiveRunBySessionId("session-1").pipe(
+  sessions.getActiveBySessionId("session-1").pipe(
     Effect.flatMap((activeRun) =>
       activeRun && activeRun.questionOutcome._tag === "ui-failure"
         ? Effect.void
@@ -270,7 +270,7 @@ const withHarness = <A>(
     Effect.scoped(
       Effect.gen(function* () {
         const channels = yield* ChannelRuntime;
-        const sessions = yield* SessionRuntime;
+        const sessions = (yield* SessionRuntime).runs;
         return yield* run({
           channels,
           sessions,
@@ -446,7 +446,7 @@ const makeHarness = async (options: {
     const interactionEdits: unknown[] = [];
 
     const interaction = makeRecordedComponentInteraction("button", {
-      customId: "ocq:req-1:0:submit",
+      customId: "ocq:session-1:req-1:0:submit",
       userId: input?.userId ?? "intruder",
       messageId: input?.messageId ?? "reply-message-1",
       onReply: (payload) => {
@@ -699,7 +699,7 @@ describe("ChannelRuntimeLayer integration", () => {
 
         expect(harness.replies).toEqual([]);
         yield* sessions
-          .getActiveRunBySessionId("session-1")
+          .getActiveBySessionId("session-1")
           .pipe(
             Effect.flatMap((activeRun) =>
               activeRun ? Effect.void : failTest("active run cleared before idle"),

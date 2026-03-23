@@ -17,7 +17,10 @@ export const compactCommand = {
       return;
     }
 
-    const channelActivity = yield* sessionRuntime.readRestoredChannelActivity(context.channelId);
+    const channelActivity = yield* sessionRuntime.activity.readChannel(
+      context.channelId,
+      "restored",
+    );
     const entry = decideCompactEntry({
       channelActivity,
     });
@@ -27,7 +30,7 @@ export const compactCommand = {
     }
 
     yield* context.ack();
-    const result = yield* sessionRuntime.startCompaction(
+    const result = yield* sessionRuntime.compaction.start(
       context.channelId,
       context.guildTextChannel!,
     );

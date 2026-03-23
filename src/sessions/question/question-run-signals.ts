@@ -1,5 +1,11 @@
 import { Effect, Option } from "effect";
 
+import {
+  clearRunInterrupt,
+  readRunInterrupt,
+  readRunQuestionOutcome,
+  setRunQuestionOutcome,
+} from "@/sessions/run/active-run-state.ts";
 import { isQuestionOutcomeNone, type ActiveRun, type QuestionOutcome } from "@/sessions/session.ts";
 import type { LoggerShape } from "@/util/logging.ts";
 
@@ -21,11 +27,10 @@ export const applyQuestionSignals = (
           Effect.sync(() => {
             switch (item.type) {
               case "clear-run-interrupt":
-                activeRun.interruptRequested = false;
-                activeRun.interruptSource = null;
+                clearRunInterrupt(activeRun);
                 break;
               case "set-run-question-outcome":
-                activeRun.questionOutcome = item.outcome;
+                setRunQuestionOutcome(activeRun, item.outcome);
                 break;
             }
           }),
@@ -36,7 +41,10 @@ export const questionTypingAction = (activeRun: ActiveRun, pending: boolean, pau
   if (pending) {
     return paused ? "none" : "pause";
   }
-  if (!isQuestionOutcomeNone(activeRun.questionOutcome) || activeRun.interruptRequested) {
+  if (
+    !isQuestionOutcomeNone(readRunQuestionOutcome(activeRun)) ||
+    readRunInterrupt(activeRun).requested
+  ) {
     return "stop";
   }
   return paused ? "resume" : "none";

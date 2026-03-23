@@ -4,7 +4,7 @@ import type { Message, SendableChannels } from "discord.js";
 
 import { formatErrorResponse } from "@/discord/formatting.ts";
 import { InfoCards, type InfoCardsShape } from "@/discord/info-card.ts";
-import { makeIdleCompactionWorkflow } from "@/sessions/compaction/idle-compaction-workflow.ts";
+import { makeSessionCompactionWorkflow } from "@/sessions/compaction/session-compaction-workflow.ts";
 import { OpencodeService, type OpencodeServiceShape } from "@/opencode/service.ts";
 import { Logger } from "@/util/logging.ts";
 import { failTest, timeoutTestError } from "../../support/errors.ts";
@@ -27,11 +27,12 @@ const makeOpencode = (overrides: Partial<OpencodeServiceShape> = {}): OpencodeSe
   ...overrides,
 });
 const makeWorkflow = (input: {
+  session: ReturnType<typeof makeSession>;
   infoCards: InfoCardsShape;
   opencode?: Partial<OpencodeServiceShape>;
 }) =>
   Effect.runPromise(
-    makeIdleCompactionWorkflow().pipe(
+    makeSessionCompactionWorkflow(() => input.session).pipe(
       Effect.provide(
         Layer.mergeAll(
           Layer.succeed(InfoCards, input.infoCards),
@@ -41,12 +42,9 @@ const makeWorkflow = (input: {
       ),
     ),
   );
-const expectEventuallyActive = (
-  sessionId: string,
-  hasActive: (sessionId: string) => Effect.Effect<boolean, unknown>,
-) =>
+const expectEventuallyActive = (hasActive: () => Effect.Effect<boolean, unknown>) =>
   Effect.runPromise(
-    hasActive(sessionId).pipe(
+    hasActive().pipe(
       Effect.flatMap((active) =>
         active ? Effect.void : failTest("compaction not marked active yet"),
       ),
@@ -58,12 +56,9 @@ const expectEventuallyActive = (
       }),
     ),
   );
-const expectEventuallyInactive = (
-  sessionId: string,
-  hasActive: (sessionId: string) => Effect.Effect<boolean, unknown>,
-) =>
+const expectEventuallyInactive = (hasActive: () => Effect.Effect<boolean, unknown>) =>
   Effect.runPromise(
-    hasActive(sessionId).pipe(
+    hasActive().pipe(
       Effect.flatMap((active) => (active ? failTest("compaction still active") : Effect.void)),
       Effect.eventually,
       Effect.timeoutOrElse({
@@ -73,9 +68,11 @@ const expectEventuallyInactive = (
     ),
   );
 
-describe("makeIdleCompactionWorkflow", () => {
+describe("makeSessionCompactionWorkflow", () => {
   test("clears active state when card post and compaction both fail", async () => {
+    const session = makeSession();
     const workflow = await makeWorkflow({
+      session,
       infoCards: {
         send: () => failTest("unexpected"),
         edit: () => Effect.void,
@@ -84,16 +81,17 @@ describe("makeIdleCompactionWorkflow", () => {
       opencode: { compactSession: () => failTest("compaction failed") },
     });
 
-    const session = makeSession();
     const channel = makeChannel();
 
-    await Effect.runPromise(workflow.start({ session, channel }));
-    await expectEventuallyInactive(session.opencode.sessionId, workflow.hasActive);
+    await Effect.runPromise(workflow.start(channel));
+    await expectEventuallyInactive(workflow.hasActive);
   });
 
   test("formats compaction interrupt failures consistently", async () => {
     const card = unsafeStub<Message>({ id: "card-1" });
+    const session = makeSession();
     const workflow = await makeWorkflow({
+      session,
       infoCards: {
         send: () => failTest("unexpected"),
         edit: () => Effect.void,
@@ -105,10 +103,9 @@ describe("makeIdleCompactionWorkflow", () => {
       },
     });
 
-    const session = makeSession();
     const channel = makeChannel();
-    await Effect.runPromise(workflow.start({ session, channel }));
-    const result = await Effect.runPromise(workflow.requestInterrupt({ session }));
+    await Effect.runPromise(workflow.start(channel));
+    const result = await Effect.runPromise(workflow.requestInterrupt());
 
     expect(result).toEqual({
       type: "failed",
@@ -119,7 +116,9 @@ describe("makeIdleCompactionWorkflow", () => {
   test("ignores a late compaction card attachment after shutdown", async () => {
     const allowCardPost = await Effect.runPromise(Deferred.make<void>());
     const edits = await Effect.runPromise(Ref.make<string[]>([]));
+    const session = makeSession();
     const workflow = await makeWorkflow({
+      session,
       infoCards: {
         send: () => failTest("unexpected"),
         edit: (_card, title) =>
@@ -130,11 +129,10 @@ describe("makeIdleCompactionWorkflow", () => {
       opencode: { compactSession: () => Effect.never },
     });
 
-    const session = makeSession();
     const channel = makeChannel();
-    const startPromise = Effect.runPromise(workflow.start({ session, channel }));
+    const startPromise = Effect.runPromise(workflow.start(channel));
 
-    await expectEventuallyActive(session.opencode.sessionId, workflow.hasActive);
+    await expectEventuallyActive(workflow.hasActive);
     await Effect.runPromise(workflow.shutdown());
     await Effect.runPromise(Deferred.succeed(allowCardPost, undefined).pipe(Effect.ignore));
 
@@ -144,7 +142,9 @@ describe("makeIdleCompactionWorkflow", () => {
 
   test("prunes completed workflows so later interrupts do not hit opencode", async () => {
     const interruptCalls = await Effect.runPromise(Ref.make(0));
+    const session = makeSession();
     const workflow = await makeWorkflow({
+      session,
       infoCards: {
         send: () => failTest("unexpected"),
         edit: () => Effect.void,
@@ -157,13 +157,12 @@ describe("makeIdleCompactionWorkflow", () => {
       },
     });
 
-    const session = makeSession();
     const channel = makeChannel();
 
-    await Effect.runPromise(workflow.start({ session, channel }));
-    await expectEventuallyInactive(session.opencode.sessionId, workflow.hasActive);
+    await Effect.runPromise(workflow.start(channel));
+    await expectEventuallyInactive(workflow.hasActive);
 
-    const result = await Effect.runPromise(workflow.requestInterrupt({ session }));
+    const result = await Effect.runPromise(workflow.requestInterrupt());
     expect(result).toEqual({
       type: "failed",
       message: "No active OpenCode run or compaction is running in this channel.",
