@@ -5,13 +5,9 @@ import type { ToolPart } from "@opencode-ai/sdk/v2";
 import { compactionCardContent } from "@/discord/compaction-card.ts";
 import { editInfoCard, upsertInfoCard } from "@/discord/info-card.ts";
 import { sendProgressUpdate } from "@/discord/messages.ts";
-import { editToolCard, upsertToolCard } from "@/discord/tool-card.ts";
+import { editToolCard, upsertToolCard } from "@/discord/tool-card/index.ts";
 import { formatSessionStatus, formatThinkingCompleted } from "@/discord/progress.ts";
-import type {
-  ChannelSession,
-  RunFinalizationReason,
-  RunProgressEvent,
-} from "@/sessions/session.ts";
+import type { ChannelSession, RunFinalizationReason, RunProgressEvent } from "@/sessions/types.ts";
 import { ResolvedSandboxBackend } from "@/sandbox/common";
 import { ChannelSettings } from "@/state/channel-settings";
 

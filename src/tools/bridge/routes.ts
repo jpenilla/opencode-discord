@@ -2,7 +2,7 @@ import type { IncomingMessage } from "node:http";
 
 import { Effect, Schema } from "effect";
 
-import type { ActiveRun } from "@/sessions/session.ts";
+import type { ActiveRun } from "@/sessions/types.ts";
 import {
   handleListCustomEmojis,
   handleListStickers,

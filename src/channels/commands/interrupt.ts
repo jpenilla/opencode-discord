@@ -5,10 +5,10 @@ import {
   GUILD_TEXT_COMMAND_ONLY_MESSAGE,
   QUESTION_PENDING_INTERRUPT_MESSAGE,
 } from "@/channels/command-policy.ts";
-import type { GuildCommand } from "@/channels/commands.ts";
+import type { GuildCommand } from "@/channels/commands/registry.ts";
 import { CommandContext } from "@/discord/command-context.ts";
 import { formatErrorResponse } from "@/discord/formatting.ts";
-import { SessionRuntime } from "@/sessions/session-runtime.ts";
+import { SessionRuntime } from "@/sessions/runtime.ts";
 import { formatError } from "@/util/errors.ts";
 
 export const interruptCommand = {

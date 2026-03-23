@@ -7,8 +7,8 @@ import { InfoCards } from "@/discord/info-card.ts";
 import { buildOpencodePrompt, promptMessageContext, startTypingLoop } from "@/discord/messages.ts";
 import type { Invocation } from "@/discord/triggers.ts";
 import { collectAttachmentMessages } from "@/sessions/message-context.ts";
-import { SessionRuntime } from "@/sessions/session-runtime.ts";
-import type { RunRequest } from "@/sessions/session.ts";
+import { SessionRuntime } from "@/sessions/runtime.ts";
+import type { RunRequest } from "@/sessions/types.ts";
 import { StatePersistence } from "@/state/persistence.ts";
 import { Logger } from "@/util/logging.ts";
 

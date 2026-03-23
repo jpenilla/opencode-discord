@@ -17,7 +17,7 @@ import { InfoCards } from "@/discord/info-card.ts";
 import { sendFinalResponse, startTypingLoop, type TypingLoop } from "@/discord/messages.ts";
 import type { PromptResult, SessionHandle } from "@/opencode/service.ts";
 import { OpencodeService } from "@/opencode/service.ts";
-import type { AdmittedPromptContext } from "@/sessions/run/prompt-context.ts";
+import type { AdmittedPromptContext } from "@/sessions/run/prompt/context.ts";
 import {
   clearRunInterrupt,
   clearRunQuestionOutcome,
@@ -26,14 +26,14 @@ import {
   readRunInterrupt,
   readRunQuestionOutcome,
   setRunQuestionWorkflow,
-} from "@/sessions/run/active-run-state.ts";
-import { coordinateActiveRunPrompts } from "@/sessions/run/prompt-coordinator.ts";
+} from "@/sessions/run/active-state.ts";
+import { coordinateActiveRunPrompts } from "@/sessions/run/prompt/coordinator.ts";
 import { runProgressWorker } from "@/sessions/run/progress.ts";
-import type { PendingPrompt } from "@/sessions/run/prompt-state.ts";
-import type { NonEmptyRunRequestBatch } from "@/sessions/run/run-batch.ts";
-import { decideRunCompletion } from "@/sessions/run/run-completion.ts";
-import { QuestionRuntime } from "@/sessions/question/question-runtime.ts";
-import type { QuestionRunWorkflow } from "@/sessions/question/question-workflow-types.ts";
+import type { PendingPrompt } from "@/sessions/run/prompt/state.ts";
+import type { NonEmptyRunRequestBatch } from "@/sessions/run/batch.ts";
+import { decideRunCompletion } from "@/sessions/run/completion.ts";
+import { QuestionRuntime } from "@/sessions/question/runtime.ts";
+import type { QuestionRunWorkflow } from "@/sessions/question/types.ts";
 import {
   type ActiveRun,
   type ChannelSession,
@@ -41,7 +41,7 @@ import {
   type RunFinalizationReason,
   type RunProgressEvent,
   type RunRequest,
-} from "@/sessions/session.ts";
+} from "@/sessions/types.ts";
 import { formatError } from "@/util/errors.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
 

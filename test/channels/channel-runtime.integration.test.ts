@@ -40,7 +40,7 @@ import {
   SessionRuntime,
   SessionRuntimeLayer,
   type SessionRuntimeShape,
-} from "@/sessions/session-runtime.ts";
+} from "@/sessions/runtime.ts";
 import { Logger, type LoggerShape } from "@/util/logging.ts";
 import {
   cardText,

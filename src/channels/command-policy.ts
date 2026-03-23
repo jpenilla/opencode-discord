@@ -1,4 +1,4 @@
-import type { ChannelActivity } from "@/sessions/session-activity.ts";
+import type { ChannelActivity } from "@/sessions/loaded/activity.ts";
 
 export type CommandRejection = { type: "reject"; message: string };
 

@@ -1,7 +1,7 @@
 import { type ChatInputCommandInteraction } from "discord.js";
 import { Effect, Layer } from "effect";
 
-import { getGuildCommand, type GuildCommandDependencies } from "@/channels/commands.ts";
+import { getGuildCommand, type GuildCommandDependencies } from "@/channels/commands/registry.ts";
 import { CommandContext, makeCommandContextLayer } from "@/discord/command-context.ts";
 
 export const createCommandHandler = (commandLayer: Layer.Layer<GuildCommandDependencies>) => ({

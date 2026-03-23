@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { Cause, Effect, FileSystem, Layer, Path, Redacted } from "effect";
 
 import { AppConfig, type AppConfigShape } from "@/config.ts";
-import { SessionRuntime, type SessionRuntimeShape } from "@/sessions/session-runtime.ts";
+import { SessionRuntime, type SessionRuntimeShape } from "@/sessions/runtime.ts";
 import { ToolBridgeResponseError, classifyToolBridgeFailure } from "@/tools/bridge/errors.ts";
 import { matchToolBridgeRoute } from "@/tools/bridge/routes.ts";
 import { sendJson } from "@/tools/bridge/transport.ts";

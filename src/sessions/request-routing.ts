@@ -1,6 +1,6 @@
 import { Effect, Queue, Ref } from "effect";
 
-import type { ActiveRun, ChannelSession, RunRequest } from "@/sessions/session.ts";
+import type { ActiveRun, ChannelSession, RunRequest } from "@/sessions/types.ts";
 
 export type RunRequestDestination = "session" | "follow-up";
 type EnqueueableSession = {
