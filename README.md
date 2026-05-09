@@ -1,5 +1,8 @@
 # opencode-discord
 
+> [!IMPORTANT]
+> This project is archived. Use [BubbleBuddy](https://github.com/jpenilla/BubbleBuddy) instead.
+
 Discord frontend for [OpenCode](https://github.com/sst/opencode).
 
 This project runs OpenCode behind a Discord bot. Each Discord text channel gets its own long-lived OpenCode thread and persistent session home/workspace, so channel conversations stay isolated and survive bot restarts.
